@@ -1,7 +1,10 @@
 import { router } from 'expo-router';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
+import { useAuth } from '../context/AuthContext';
+import { getProfile } from '../services/profileService';
 import { colors, spacing, typography } from '../theme';
 
 const quickActions = [
@@ -18,33 +21,118 @@ const quickActions = [
 ];
 
 export default function HomeScreen() {
+  const { user } = useAuth();
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadProfile() {
+      if (!user?.id) {
+        setProfile(null);
+        setLoading(false);
+        setError('');
+        return;
+      }
+
+      try {
+        setLoading(true);
+        setError('');
+        const data = await getProfile(user.id);
+
+        if (!isMounted) {
+          return;
+        }
+
+        setProfile(data);
+      } catch (err) {
+        if (!isMounted) {
+          return;
+        }
+
+        setProfile(null);
+        setError('לא הצלחנו לטעון את נתוני החשבון');
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    }
+
+    loadProfile();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user?.id]);
+
+  const firstName = (() => {
+    const fullName = String(profile?.full_name || '').trim();
+
+    if (!fullName) {
+      return 'שלום';
+    }
+
+    const [name] = fullName.split(/\s+/);
+    return name || 'שלום';
+  })();
+
+  const membershipLevel = String(profile?.membership_level || 'BRONZE').toUpperCase();
+  const safeMembershipLevel = ['BRONZE', 'SILVER', 'GOLD'].includes(membershipLevel)
+    ? membershipLevel
+    : 'BRONZE';
+  const pointsBalance = profile?.points_balance ?? 0;
+
+  const formatNumber = (value) => {
+    const numericValue = Number.isFinite(value) ? value : 0;
+    return numericValue.toLocaleString('he-IL');
+  };
+
   return (
     <AppScreen
       backgroundColor={colors.background}
       contentContainerStyle={styles.screenContent}>
       <View style={styles.container}>
         <View style={styles.header}>
-          <Text style={styles.greeting}>שלום, ישראל</Text>
+          <Text style={styles.greeting}>{loading ? 'טוען...' : `שלום, ${firstName}`}</Text>
           <Text style={styles.title}>ברוכים הבאים ל +GOLDEN</Text>
           <Text style={styles.tagline}>מועדון המקצוענים של גולדן לייט</Text>
         </View>
 
         <View style={styles.heroCard}>
           <Text style={styles.heroLabel}>יתרת הנקודות שלך</Text>
-          <View style={styles.pointsRow}>
-            <Text style={styles.pointsValue}>1,850</Text>
-            <Text style={styles.pointsUnit}>נק׳</Text>
-          </View>
-          <Text style={styles.heroMeta}>שווה ערך ל-925 ₪ בהטבות</Text>
 
-          <View style={styles.levelRow}>
-            <Text style={styles.levelBadge}>GOLD</Text>
-            <Text style={styles.levelMeta}>150 נק׳ לרמה הבאה</Text>
-          </View>
+          {loading ? (
+            <View style={styles.loadingState}>
+              <ActivityIndicator color={colors.primary} size="small" />
+            </View>
+          ) : error ? (
+            <View style={styles.errorState}>
+              <Text style={styles.errorText}>{error}</Text>
+              <Pressable onPress={() => user?.id && getProfile(user.id).then(setProfile).catch(() => setError('לא הצלחנו לטעון את נתוני החשבון'))}>
+                <Text style={styles.retryText}>נסו שוב</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <>
+              <View style={styles.pointsRow}>
+                <Text style={styles.pointsValue}>{formatNumber(pointsBalance)}</Text>
+                <Text style={styles.pointsUnit}>נק׳</Text>
+              </View>
+              <Text style={styles.heroMeta}>הטבות יופיעו בהמשך</Text>
 
-          <View style={styles.progressTrack}>
-            <View style={[styles.progressFill, { width: '70%' }]} />
-          </View>
+              <View style={styles.levelRow}>
+                <Text style={styles.levelBadge}>{safeMembershipLevel}</Text>
+                <Text style={styles.levelMeta}>רמת החברות מעודכנת מהמערכת</Text>
+              </View>
+
+              <View style={styles.progressTrack}>
+                <View style={[styles.progressFill, { width: '0%' }]} />
+              </View>
+            </>
+          )}
         </View>
 
         <Text style={styles.sectionTitle}>פעולות מהירות</Text>
@@ -64,13 +152,8 @@ export default function HomeScreen() {
         <Text style={styles.sectionTitle}>פעילות אחרונה</Text>
         <View style={styles.activityCard}>
           <View style={styles.activityInfo}>
-            <Text style={styles.activityTitle}>רכישה אושרה</Text>
-            <Text style={styles.activitySubtitle}>חשבונית #1248</Text>
-            <Text style={styles.activityDate}>08.08.2026</Text>
-          </View>
-
-          <View style={styles.activityPoints}>
-            <Text style={styles.pointsBadge}>+120 נק׳</Text>
+            <Text style={styles.activityTitle}>אין פעילות אחרונה להצגה</Text>
+            <Text style={styles.activitySubtitle}>הפעילות תופיע כאן לאחר אישורים חדשים</Text>
           </View>
         </View>
       </View>
@@ -159,6 +242,31 @@ const styles = StyleSheet.create({
     fontSize: typography.caption.fontSize,
     fontWeight: '500',
     color: colors.surfaceMuted,
+    textAlign: 'right',
+  },
+  loadingState: {
+    minHeight: 140,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: spacing.md,
+  },
+  errorState: {
+    minHeight: 140,
+    justifyContent: 'center',
+    alignItems: 'flex-end',
+    paddingVertical: spacing.md,
+    gap: spacing.xs,
+  },
+  errorText: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '600',
+    color: colors.surfaceMuted,
+    textAlign: 'right',
+  },
+  retryText: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '700',
+    color: colors.primary,
     textAlign: 'right',
   },
   levelRow: {
@@ -281,16 +389,5 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     textAlign: 'right',
     marginTop: spacing.xs,
-  },
-  activityPoints: {
-    marginLeft: spacing.md,
-    alignItems: 'flex-end',
-    justifyContent: 'center',
-  },
-  pointsBadge: {
-    fontSize: typography.body.fontSize,
-    fontWeight: '700',
-    color: colors.primary,
-    textAlign: 'right',
   },
 });
