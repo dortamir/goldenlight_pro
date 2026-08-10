@@ -1,17 +1,81 @@
 import { useRouter } from 'expo-router';
-import { useState } from 'react';
-import { Image, Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { Image, Pressable, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 import AppCard from '../components/common/AppCard';
 import AppInput from '../components/common/AppInput';
 import AppScreen from '../components/common/AppScreen';
 import AuthSegmentedControl from '../components/common/AuthSegmentedControl';
 import PrimaryButton from '../components/common/PrimaryButton';
+import { useAuth } from '../context/AuthContext';
 import { colors, radius, spacing, typography } from '../theme';
 
 export default function RegisterScreen() {
   const router = useRouter();
+  const { signUp, session, loading: authLoading } = useAuth();
   const [showPassword, setShowPassword] = useState(false);
+  const [fullName, setFullName] = useState('');
+  const [phone, setPhone] = useState('');
+  const [profession, setProfession] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (session) {
+      router.replace('/(tabs)');
+    }
+  }, [router, session]);
+
+  const handleRegister = async () => {
+    setErrorMessage('');
+    setSuccessMessage('');
+
+    if (!fullName.trim() || !phone.trim() || !email.trim() || !password) {
+      setErrorMessage('אנא מלאו את כל השדות הנדרשים');
+      return;
+    }
+
+    if (password.length < 6) {
+      setErrorMessage('הסיסמה חייבת להכיל לפחות 6 תווים');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const result = await signUp({
+        email: email.trim(),
+        password,
+        fullName: fullName.trim(),
+        phone: phone.trim(),
+        profession: profession.trim(),
+      });
+
+      if (result.session) {
+        setSuccessMessage('ההרשמה הושלמה');
+      } else {
+        setSuccessMessage('ההרשמה הושלמה. שלחנו אליכם אימייל לאישור החשבון.');
+      }
+    } catch (error) {
+      if (error?.message?.includes('already registered')) {
+        setErrorMessage('כתובת האימייל כבר רשומה');
+      } else {
+        setErrorMessage('לא הצלחנו ליצור את החשבון. נסו שוב.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (authLoading) {
+    return (
+      <AppScreen backgroundColor={colors.background}>
+        <View style={styles.loadingState}><Text style={styles.loadingText}>טוען...</Text></View>
+      </AppScreen>
+    );
+  }
 
   return (
     <AppScreen backgroundColor={colors.background}>
@@ -41,6 +105,8 @@ export default function RegisterScreen() {
               label="שם מלא *"
               placeholder="הכניסו שם מלא"
               style={styles.input}
+              value={fullName}
+              onChangeText={setFullName}
             />
 
             <AppInput
@@ -48,12 +114,20 @@ export default function RegisterScreen() {
               placeholder="050-1234567"
               keyboardType="phone-pad"
               style={styles.input}
+              value={phone}
+              onChangeText={setPhone}
             />
 
             <View style={styles.professionWrapper}>
               <Text style={styles.professionLabel}>מקצוע</Text>
               <Pressable style={styles.professionField} accessibilityRole="button">
-                <Text style={styles.professionPlaceholder}>בחרו מקצוע...</Text>
+                <TextInput
+                  placeholder="בחרו מקצוע..."
+                  value={profession}
+                  onChangeText={setProfession}
+                  style={styles.professionPlaceholder}
+                  placeholderTextColor={colors.textMuted}
+                />
               </Pressable>
             </View>
 
@@ -66,6 +140,8 @@ export default function RegisterScreen() {
               style={styles.input}
               textAlign="left"
               writingDirection="ltr"
+              value={email}
+              onChangeText={setEmail}
             />
 
             <View style={styles.passwordFieldWrapper}>
@@ -75,6 +151,8 @@ export default function RegisterScreen() {
                 secureTextEntry={!showPassword}
                 style={styles.input}
                 inputStyle={styles.passwordInput}
+                value={password}
+                onChangeText={setPassword}
               />
               <TouchableOpacity
                 style={styles.passwordToggle}
@@ -86,7 +164,10 @@ export default function RegisterScreen() {
               </TouchableOpacity>
             </View>
 
-            <PrimaryButton title="פתיחת חשבון" onPress={() => undefined} style={styles.button} />
+            {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
+            {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
+
+            <PrimaryButton title="פתיחת חשבון" onPress={handleRegister} loading={loading} disabled={loading} style={styles.button} />
 
             <View style={styles.registerRow}>
               <Text style={styles.registerPrompt}>כבר רשומים?</Text>
@@ -229,6 +310,32 @@ const styles = StyleSheet.create({
   button: {
     marginTop: spacing.xs,
     marginBottom: spacing.xl,
+  },
+  loadingState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loadingText: {
+    color: colors.textMuted,
+    fontSize: typography.body.fontSize,
+    textAlign: 'center',
+  },
+  errorText: {
+    color: colors.error,
+    fontSize: typography.caption.fontSize,
+    lineHeight: typography.caption.lineHeight,
+    textAlign: 'right',
+    writingDirection: 'rtl',
+    marginBottom: spacing.sm,
+  },
+  successText: {
+    color: colors.primary,
+    fontSize: typography.caption.fontSize,
+    lineHeight: typography.caption.lineHeight,
+    textAlign: 'right',
+    writingDirection: 'rtl',
+    marginBottom: spacing.sm,
   },
   registerRow: {
     flexDirection: 'row',

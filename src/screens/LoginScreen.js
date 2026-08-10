@@ -1,5 +1,5 @@
 import { useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { I18nManager, Image, Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 import AppCard from '../components/common/AppCard';
@@ -7,11 +7,53 @@ import AppInput from '../components/common/AppInput';
 import AppScreen from '../components/common/AppScreen';
 import AuthSegmentedControl from '../components/common/AuthSegmentedControl';
 import PrimaryButton from '../components/common/PrimaryButton';
+import { useAuth } from '../context/AuthContext';
 import { colors, radius, spacing, typography } from '../theme';
 
 export default function LoginScreen() {
   const router = useRouter();
+  const { signIn, session, loading: authLoading } = useAuth();
   const [showPassword, setShowPassword] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (session) {
+      router.replace('/(tabs)');
+    }
+  }, [router, session]);
+
+  const handleLogin = async () => {
+    setErrorMessage('');
+
+    if (!email.trim() || !password) {
+      setErrorMessage('אימייל או סיסמה שגויים');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      await signIn(email.trim(), password);
+    } catch (error) {
+      if (error?.message?.includes('Invalid login credentials')) {
+        setErrorMessage('אימייל או סיסמה שגויים');
+      } else {
+        setErrorMessage('לא הצלחנו להתחבר. נסו שוב.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (authLoading) {
+    return (
+      <AppScreen backgroundColor={colors.background}>
+        <View style={styles.loadingState}><Text style={styles.loadingText}>טוען...</Text></View>
+      </AppScreen>
+    );
+  }
 
   return (
     <AppScreen backgroundColor={colors.background}>
@@ -46,6 +88,8 @@ export default function LoginScreen() {
               style={styles.input}
               textAlign="left"
               writingDirection="ltr"
+              value={email}
+              onChangeText={setEmail}
             />
 
             <View style={styles.passwordFieldWrapper}>
@@ -55,6 +99,8 @@ export default function LoginScreen() {
                 secureTextEntry={!showPassword}
                 style={styles.input}
                 inputStyle={styles.passwordInput}
+                value={password}
+                onChangeText={setPassword}
               />
               <TouchableOpacity
                 style={styles.passwordToggle}
@@ -72,9 +118,13 @@ export default function LoginScreen() {
               </Pressable>
             </View>
 
+            {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
+
             <PrimaryButton
               title="התחברות"
-              onPress={() => router.push('/(tabs)')}
+              onPress={handleLogin}
+              loading={loading}
+              disabled={loading}
               style={styles.button}
             />
 
@@ -231,6 +281,24 @@ const styles = StyleSheet.create({
   },
   button: {
     marginBottom: spacing.xl,
+  },
+  loadingState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loadingText: {
+    color: colors.textMuted,
+    fontSize: typography.body.fontSize,
+    textAlign: 'center',
+  },
+  errorText: {
+    color: colors.error,
+    fontSize: typography.caption.fontSize,
+    lineHeight: typography.caption.lineHeight,
+    textAlign: 'right',
+    writingDirection: 'rtl',
+    marginBottom: spacing.md,
   },
   registerRow: {
     flexDirection: 'row',

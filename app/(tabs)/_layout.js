@@ -1,6 +1,7 @@
-import { Tabs } from 'expo-router';
+import { Redirect, Tabs } from 'expo-router';
 import { Platform, StyleSheet, Text } from 'react-native';
 
+import { useAuth } from '../../src/context/AuthContext';
 import { colors } from '../../src/theme';
 
 function renderTabLabel(label) {
@@ -18,6 +19,16 @@ function renderTabLabel(label) {
 }
 
 export default function TabsLayout() {
+  const { session, loading } = useAuth();
+
+  if (loading) {
+    return null;
+  }
+
+  if (!session) {
+    return <Redirect href="/(auth)/login" />;
+  }
+
   return (
     <Tabs
       screenOptions={{

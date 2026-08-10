@@ -1,6 +1,8 @@
+import { useRouter } from 'expo-router';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
+import { useAuth } from '../context/AuthContext';
 import { colors, spacing, typography } from '../theme';
 
 const accountActions = [
@@ -10,6 +12,18 @@ const accountActions = [
 ];
 
 export default function ProfileScreen() {
+  const router = useRouter();
+  const { signOut } = useAuth();
+
+  const handleLogout = async () => {
+    try {
+      await signOut();
+      router.replace('/(auth)/login');
+    } catch (error) {
+      console.warn('[Auth] Logout failed', error);
+    }
+  };
+
   return (
     <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
       <View style={styles.container}>
@@ -64,7 +78,7 @@ export default function ProfileScreen() {
           ))}
         </View>
 
-        <Pressable style={styles.logoutButton}>
+        <Pressable style={styles.logoutButton} onPress={handleLogout}>
           <Text style={styles.logoutText}>התנתקות</Text>
         </Pressable>
       </View>
