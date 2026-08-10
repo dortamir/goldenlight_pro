@@ -1,23 +1,42 @@
-import { SafeAreaView, StyleSheet, Text } from 'react-native';
+import React from 'react';
+import { StyleSheet, Text, View } from 'react-native';
+
+import AppScreen from './src/components/common/AppScreen';
+import { colors, spacing, typography } from './src/theme';
 
 export default function App() {
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <Text style={styles.title}>Golden Pro</Text>
-    </SafeAreaView>
+    <AppScreen>
+      <View style={styles.previewCard}>
+        <Text style={styles.title}>Golden Pro</Text>
+        <Text style={styles.subtitle}>Mobile foundation</Text>
+      </View>
+    </AppScreen>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: '#ffffff',
-    justifyContent: 'center',
+  previewCard: {
+    width: '100%',
     alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.xxl,
+    paddingHorizontal: spacing.xl,
+    borderRadius: 20,
+    backgroundColor: colors.surface,
   },
   title: {
-    fontSize: 24,
-    fontWeight: '600',
-    color: '#111111',
+    fontSize: typography.display.fontSize,
+    lineHeight: typography.display.lineHeight,
+    fontWeight: typography.display.fontWeight,
+    color: colors.text,
+    textAlign: 'center',
+  },
+  subtitle: {
+    marginTop: spacing.sm,
+    fontSize: typography.body.fontSize,
+    lineHeight: typography.body.lineHeight,
+    color: colors.textMuted,
+    textAlign: 'center',
   },
 });
