@@ -1,16 +1,15 @@
-import React from 'react';
 import {
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  TouchableWithoutFeedback,
-  Keyboard,
-  View,
+    Keyboard,
+    KeyboardAvoidingView,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    TouchableWithoutFeedback,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { colors, radius, spacing, typography } from '../../theme';
+import { colors, spacing } from '../../theme';
 
 export default function AppScreen({
   children,
