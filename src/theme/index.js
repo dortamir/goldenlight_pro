@@ -1,8 +1,14 @@
-export { colors, default as colorsTheme } from './colors';
-export { radius, default as radiusTheme } from './radius';
-export { shadows, default as shadowsTheme } from './shadows';
-export { spacing, default as spacingTheme } from './spacing';
-export { typography, default as typographyTheme } from './typography';
+import { colors } from './colors';
+import { radius } from './radius';
+import { shadows } from './shadows';
+import { spacing } from './spacing';
+import { typography } from './typography';
+
+export { colors, colors as colorsTheme } from './colors';
+export { radius, radius as radiusTheme } from './radius';
+export { shadows, shadows as shadowsTheme } from './shadows';
+export { spacing, spacing as spacingTheme } from './spacing';
+export { typography, typography as typographyTheme } from './typography';
 
 export const theme = {
   colors,

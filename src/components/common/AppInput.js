@@ -12,6 +12,8 @@ export default function AppInput({
   error,
   style,
   inputStyle,
+  textAlign = 'right',
+  writingDirection = 'rtl',
   ...props
 }) {
   const [isFocused, setIsFocused] = useState(false);
@@ -31,8 +33,8 @@ export default function AppInput({
           placeholder={placeholder}
           placeholderTextColor={colors.textMuted}
           secureTextEntry={secureTextEntry}
-          selectionColor={colors.gold}
-          style={[styles.input, inputStyle]}
+          selectionColor={colors.primary}
+          style={[styles.input, inputStyle, { textAlign, writingDirection }]}
           onFocus={() => setIsFocused(true)}
           onBlur={() => setIsFocused(false)}
           {...props}
@@ -68,11 +70,12 @@ const styles = StyleSheet.create({
     fontSize: typography.body.fontSize,
     lineHeight: typography.body.lineHeight,
     paddingVertical: spacing.sm,
+    textAlign: 'right',
     textAlignVertical: 'center',
-    writingDirection: 'auto',
+    writingDirection: 'rtl',
   },
   focused: {
-    borderColor: colors.gold,
+    borderColor: colors.primary,
     ...shadows.sm,
   },
   error: {

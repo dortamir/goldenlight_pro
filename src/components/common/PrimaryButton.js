@@ -36,7 +36,7 @@ const styles = StyleSheet.create({
     width: '100%',
     minHeight: 52,
     borderRadius: radius.lg,
-    backgroundColor: colors.gold,
+    backgroundColor: colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: spacing.xl,
@@ -50,7 +50,7 @@ const styles = StyleSheet.create({
     letterSpacing: typography.button.letterSpacing,
   },
   pressed: {
-    opacity: 0.9,
+    backgroundColor: colors.primaryPressed,
     transform: [{ scale: 0.98 }],
   },
   disabled: {
