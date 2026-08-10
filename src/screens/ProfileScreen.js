@@ -1,8 +1,10 @@
 import { useRouter } from 'expo-router';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
 import { useAuth } from '../context/AuthContext';
+import { getProfile } from '../services/profileService';
 import { colors, spacing, typography } from '../theme';
 
 const accountActions = [
@@ -13,7 +15,10 @@ const accountActions = [
 
 export default function ProfileScreen() {
   const router = useRouter();
-  const { signOut } = useAuth();
+  const { signOut, user } = useAuth();
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   const handleLogout = async () => {
     try {
@@ -23,6 +28,49 @@ export default function ProfileScreen() {
       console.warn('[Auth] Logout failed', error);
     }
   };
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadProfile() {
+      if (!user?.id) {
+        setProfile(null);
+        setLoading(false);
+        setError('');
+        return;
+      }
+
+      try {
+        setLoading(true);
+        setError('');
+        const data = await getProfile(user.id);
+        if (isActive) {
+          setProfile(data);
+        }
+      } catch (err) {
+        if (isActive) {
+          setError('לא הצלחנו לטעון את פרטי החשבון');
+          setProfile(null);
+        }
+      } finally {
+        if (isActive) {
+          setLoading(false);
+        }
+      }
+    }
+
+    loadProfile();
+
+    return () => {
+      isActive = false;
+    };
+  }, [user?.id]);
+
+  const avatarLetter = (() => {
+    const source = profile?.full_name || user?.user_metadata?.full_name || user?.email || 'G';
+    const visible = String(source).trim();
+    return visible ? visible[0] : 'G';
+  })();
 
   return (
     <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
@@ -35,38 +83,61 @@ export default function ProfileScreen() {
         <View style={styles.profileCard}>
           <View style={styles.avatarWrap}>
             <View style={styles.avatarCircle}>
-              <Text style={styles.avatarText}>י</Text>
+              <Text style={styles.avatarText}>{avatarLetter}</Text>
             </View>
             <View style={styles.profileIdentity}>
-              <Text style={styles.profileName}>ישראל ישראלי</Text>
-              <Text style={styles.profileRole}>חשמלאי</Text>
+              {loading ? (
+                <View style={styles.loadingWrap}>
+                  <ActivityIndicator color={colors.primary} size="small" />
+                </View>
+              ) : error ? (
+                <Text style={styles.errorText}>{error}</Text>
+              ) : (
+                <>
+                  <Text style={styles.profileName}>{profile?.full_name || 'לא הוגדר שם'}</Text>
+                  <Text style={styles.profileRole}>{profile?.profession || 'לא הוגדר מקצוע'}</Text>
+                </>
+              )}
             </View>
           </View>
 
           <View style={styles.detailsList}>
             <View style={styles.detailRow}>
               <Text style={styles.detailLabel}>טלפון</Text>
-              <Text style={styles.detailValue}>050-1234567</Text>
+              <Text style={styles.detailValue}>{profile?.phone || '—'}</Text>
             </View>
             <View style={styles.detailRow}>
               <Text style={styles.detailLabel}>אימייל</Text>
-              <Text style={styles.detailValue}>you@example.com</Text>
+              <Text style={styles.detailValue}>{user?.email || '—'}</Text>
             </View>
           </View>
         </View>
 
         <View style={styles.summaryCard}>
           <Text style={styles.sectionTitle}>סיכום החשבון</Text>
-          <View style={styles.summaryGrid}>
-            <View style={styles.summaryItem}>
-              <Text style={styles.summaryLabel}>יתרת נקודות</Text>
-              <Text style={styles.summaryValue}>1,850</Text>
+          {loading ? (
+            <View style={styles.summaryLoading}>
+              <ActivityIndicator color={colors.primary} size="small" />
             </View>
-            <View style={styles.summaryItem}>
-              <Text style={styles.summaryLabel}>רכישות שאושרו</Text>
-              <Text style={styles.summaryValue}>12</Text>
+          ) : error ? (
+            <View style={styles.summaryErrorWrap}>
+              <Text style={styles.errorText}>{error}</Text>
+              <Pressable onPress={() => user?.id && getProfile(user.id).then(setProfile).catch(() => setError('לא הצלחנו לטעון את פרטי החשבון'))}>
+                <Text style={styles.retryText}>נסו שוב</Text>
+              </Pressable>
             </View>
-          </View>
+          ) : (
+            <View style={styles.summaryGrid}>
+              <View style={styles.summaryItem}>
+                <Text style={styles.summaryLabel}>יתרת נקודות</Text>
+                <Text style={styles.summaryValue}>{profile?.points_balance ?? 0}</Text>
+              </View>
+              <View style={styles.summaryItem}>
+                <Text style={styles.summaryLabel}>רכישות שאושרו</Text>
+                <Text style={styles.summaryValue}>{profile?.approved_purchases_count ?? 0}</Text>
+              </View>
+            </View>
+          )}
         </View>
 
         <View style={styles.actionsCard}>
@@ -162,6 +233,34 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     textAlign: 'right',
     marginTop: 4,
+  },
+  loadingWrap: {
+    minHeight: 40,
+    justifyContent: 'center',
+  },
+  errorText: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '600',
+    color: colors.error,
+    textAlign: 'right',
+    writingDirection: 'rtl',
+  },
+  summaryLoading: {
+    minHeight: 64,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  summaryErrorWrap: {
+    minHeight: 64,
+    justifyContent: 'center',
+    alignItems: 'flex-end',
+    gap: spacing.sm,
+  },
+  retryText: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '600',
+    color: colors.primary,
+    textAlign: 'right',
   },
   detailsList: {
     marginTop: spacing.lg,
