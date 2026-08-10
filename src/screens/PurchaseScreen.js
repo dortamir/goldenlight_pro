@@ -1,7 +1,10 @@
+import * as ImagePicker from 'expo-image-picker';
 import { useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
+import { useAuth } from '../context/AuthContext';
+import { submitPurchaseReceipt } from '../services/purchaseReportService';
 import { colors, spacing, typography } from '../theme';
 
 const uploadOptions = [
@@ -23,9 +26,122 @@ const tips = [
   'הימנעו מצללים והשתקפויות',
 ];
 
+const supportedReceiptTypes = ['image/jpeg', 'image/png', 'image/webp'];
+
+function isSupportedReceiptAsset(asset) {
+  const mimeType = asset?.mimeType || asset?.type || '';
+  if (!mimeType) {
+    const name = String(asset?.fileName || asset?.name || '').toLowerCase();
+    return name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.png') || name.endsWith('.webp');
+  }
+
+  return supportedReceiptTypes.includes(mimeType.toLowerCase());
+}
+
 export default function PurchaseScreen() {
-  const [selectedReceipt, setSelectedReceipt] = useState(false);
-  const [status, setStatus] = useState('מוכן לסריקה');
+  const { user } = useAuth();
+  const [selectedReceipt, setSelectedReceipt] = useState(null);
+  const [status, setStatus] = useState('מוכן לשליחה');
+  const [error, setError] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
+
+  const handlePickReceipt = async (mode) => {
+    try {
+      setError('');
+
+      if (mode === 'camera') {
+        const cameraPermission = await ImagePicker.requestCameraPermissionsAsync();
+        if (!cameraPermission.granted) {
+          setError('לא ניתנה הרשאה למצלמה');
+          return;
+        }
+
+        const result = await ImagePicker.launchCameraAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.8,
+          allowsEditing: false,
+        });
+
+        if (result.canceled) {
+          return;
+        }
+
+        const asset = result.assets?.[0];
+        if (!asset) {
+          return;
+        }
+
+        if (!isSupportedReceiptAsset(asset)) {
+          setError('פורמט תמונה לא נתמך. בחרו JPG, PNG או WEBP.');
+          return;
+        }
+
+        setSelectedReceipt({
+          uri: asset.uri,
+          name: asset.fileName || 'receipt.jpg',
+          type: asset.mimeType || 'image/jpeg',
+        });
+        setStatus('מוכן לשליחה');
+        return;
+      }
+
+      const photoPermission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!photoPermission.granted) {
+        setError('לא ניתנה הרשאה לגישה לתמונות');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.8,
+        allowsEditing: false,
+      });
+
+      if (result.canceled) {
+        return;
+      }
+
+      const asset = result.assets?.[0];
+      if (!asset) {
+        return;
+      }
+
+      if (!isSupportedReceiptAsset(asset)) {
+        setError('פורמט תמונה לא נתמך. בחרו JPG, PNG או WEBP.');
+        return;
+      }
+
+      setSelectedReceipt({
+        uri: asset.uri,
+        name: asset.fileName || 'receipt.jpg',
+        type: asset.mimeType || 'image/jpeg',
+      });
+      setStatus('מוכן לשליחה');
+    } catch (err) {
+      console.warn('[Purchase] Failed to pick receipt', err);
+      setError('לא הצלחנו לבחור את החשבונית');
+    }
+  };
+
+  const handleSubmit = async () => {
+    if (!selectedReceipt || !user?.id || isUploading) {
+      return;
+    }
+
+    try {
+      setIsUploading(true);
+      setError('');
+      setStatus('מעלה את החשבונית...');
+      await submitPurchaseReceipt({ file: selectedReceipt, userId: user.id });
+      setStatus('החשבונית נשלחה לבדיקה');
+    } catch (err) {
+      console.warn('[Purchase] Failed to submit receipt', err);
+      setStatus('מוכן לשליחה');
+      setError('לא הצלחנו לשלוח את החשבונית. נסו שוב.');
+    } finally {
+      setIsUploading(false);
+    }
+  };
 
   const receiptCard = useMemo(() => {
     if (!selectedReceipt) {
@@ -39,21 +155,23 @@ export default function PurchaseScreen() {
           <Text style={styles.receiptStatus}>{status}</Text>
         </View>
 
-        <Text style={styles.receiptName}>receipt_1248.jpg</Text>
-        <Text style={styles.receiptMeta}>סטטוס: {status}</Text>
+        <Text style={styles.receiptName}>{selectedReceipt.name}</Text>
+        <Text style={styles.receiptMeta}>מוכן לשליחה</Text>
 
-        {status === 'מוכן לסריקה' ? (
-          <Pressable style={styles.submitButton} onPress={() => setStatus('החשבונית נשלחה לבדיקה')}>
-            <Text style={styles.submitButtonText}>שליחה לסריקה</Text>
-          </Pressable>
-        ) : (
+        {status === 'החשבונית נשלחה לבדיקה' ? (
           <View style={styles.successBox}>
             <Text style={styles.successText}>נעדכן אתכם כשהנקודות יתווספו לחשבון</Text>
           </View>
+        ) : (
+          <Pressable style={[styles.submitButton, isUploading && styles.submitButtonDisabled]} onPress={handleSubmit} disabled={isUploading}>
+            {isUploading ? <ActivityIndicator color={colors.white} /> : <Text style={styles.submitButtonText}>שליחה לסריקה</Text>}
+          </Pressable>
         )}
+
+        {error ? <Text style={styles.errorText}>{error}</Text> : null}
       </View>
     );
-  }, [selectedReceipt, status]);
+  }, [error, handleSubmit, isUploading, selectedReceipt, status]);
 
   return (
     <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
@@ -73,11 +191,9 @@ export default function PurchaseScreen() {
             {uploadOptions.map((option) => (
               <Pressable
                 key={option.key}
-                style={styles.optionCard}
-                onPress={() => {
-                  setSelectedReceipt(true);
-                  setStatus('מוכן לסריקה');
-                }}>
+                style={[styles.optionCard, isUploading && styles.optionCardDisabled]}
+                onPress={() => handlePickReceipt(option.key === 'camera' ? 'camera' : 'gallery')}
+                disabled={isUploading}>
                 <View style={styles.optionAccent} />
                 <Text style={styles.optionTitle}>{option.title}</Text>
                 <Text style={styles.optionSubtitle}>{option.subtitle}</Text>
@@ -182,6 +298,9 @@ const styles = StyleSheet.create({
     minHeight: 84,
     justifyContent: 'center',
   },
+  optionCardDisabled: {
+    opacity: 0.7,
+  },
   optionAccent: {
     width: 24,
     height: 3,
@@ -252,6 +371,9 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
     alignItems: 'center',
   },
+  submitButtonDisabled: {
+    opacity: 0.7,
+  },
   submitButtonText: {
     fontSize: typography.button.fontSize,
     fontWeight: typography.button.fontWeight,
@@ -269,6 +391,13 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: colors.text,
     textAlign: 'right',
+  },
+  errorText: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '600',
+    color: colors.error,
+    textAlign: 'right',
+    marginTop: spacing.sm,
   },
   infoCard: {
     backgroundColor: colors.white,
