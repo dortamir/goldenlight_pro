@@ -76,7 +76,38 @@ The app should later access them through authenticated Storage requests or signe
 4. Run the migrations.
 5. Confirm that the tables, triggers, RLS policies, and storage policies were created.
 
+## Product catalog table
+
+The public.products table stores the official Golden Light catalog entries.
+Each product has a stable sku, a display name, an optional description, and a category/brand label.
+
+### What the catalog stores
+- sku
+- name
+- description
+- brand
+- category
+- is_active
+
+The product catalog is intended for future OCR and receipt matching workflows.
+It is kept separate from point calculations so points rules can be introduced later without changing the catalog schema.
+
+## Product aliases table
+
+The public.product_aliases table stores alternate spellings and shorthand variants that may appear on invoices or receipts.
+Examples include different separator styles or variants such as GL10452 or SPOT GL 7W.
+
+Aliases are stored together with a deterministic normalized_alias value that is set automatically by the database trigger. This keeps normalization consistent and prevents formatting-only variants from drifting out of sync.
+
+For the current deterministic model, aliases that normalize to the same value should generally be stored once. For example, GL-10452, GL 10452, GL/10452, and GL_10452 should all resolve to the same normalized value, so inserting multiple formatting variants as separate rows would conflict by design.
+
+## Read-only access for mobile clients
+
+Authenticated mobile users may read active products and aliases.
+They may not insert, update, or delete catalog rows.
+Anonymous users have no access.
+
 ## Notes
 
 - Email is still managed by Supabase Auth and is not duplicated in profiles.
-- The schema is intentionally limited to the receipt foundation and does not yet include OCR, payment totals, or point-award automation.
+- The schema is intentionally limited to the catalog foundation and does not yet include OCR, payment totals, point rules, or admin management flows.
