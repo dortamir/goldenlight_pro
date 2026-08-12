@@ -10,7 +10,7 @@ import AuthSegmentedControl from '../components/common/AuthSegmentedControl';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { MIN_PASSWORD_LENGTH, PASSWORD_TOO_SHORT_MESSAGE } from '../constants/validation';
 import { useAuth } from '../context/AuthContext';
-import { colors, radius, spacing, typography } from '../theme';
+import { colors, radius, shadows, spacing, typography } from '../theme';
 
 export default function RegisterScreen() {
   const router = useRouter();
@@ -251,11 +251,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     borderRadius: radius.xl,
     backgroundColor: colors.surface,
-    shadowColor: colors.black,
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
+    ...shadows.premiumCard,
   },
   formSection: {
     width: '100%',

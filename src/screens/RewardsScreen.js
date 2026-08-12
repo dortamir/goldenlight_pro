@@ -4,7 +4,7 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-nati
 import AppScreen from '../components/common/AppScreen';
 import { useAuth } from '../context/AuthContext';
 import { getProfile } from '../services/profileService';
-import { colors, spacing, typography } from '../theme';
+import { colors, shadows, spacing, typography } from '../theme';
 
 const mockRewards = [
   {
@@ -243,23 +243,19 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   summaryCard: {
-    backgroundColor: colors.white,
-    borderRadius: 16,
+    backgroundColor: colors.charcoal,
+    borderRadius: 20,
     paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    paddingVertical: spacing.lg,
     borderWidth: 1,
-    borderColor: colors.border,
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.04,
-    shadowRadius: 6,
-    elevation: 2,
+    borderColor: colors.charcoalBorder,
+    ...shadows.premiumCard,
     alignItems: 'flex-end',
   },
   summaryLabel: {
     fontSize: typography.caption.fontSize,
     fontWeight: '600',
-    color: colors.textMuted,
+    color: colors.mutedOnDark,
     textAlign: 'right',
   },
   pointsValue: {
@@ -272,7 +268,7 @@ const styles = StyleSheet.create({
   summaryMeta: {
     fontSize: typography.caption.fontSize,
     fontWeight: '500',
-    color: colors.textMuted,
+    color: colors.mutedOnDark,
     textAlign: 'right',
     marginTop: 2,
   },
@@ -343,11 +339,7 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
     borderWidth: 1,
     borderColor: colors.border,
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.04,
-    shadowRadius: 6,
-    elevation: 2,
+    ...shadows.softCard,
   },
   rewardHeader: {
     alignItems: 'flex-end',
@@ -414,11 +406,16 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingVertical: spacing.md,
     alignItems: 'center',
+    shadowColor: colors.primaryPressed,
+    shadowOpacity: 0.2,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 3,
   },
   actionButtonText: {
     fontSize: typography.button.fontSize,
     fontWeight: typography.button.fontWeight,
-    color: colors.white,
+    color: colors.black,
     textAlign: 'center',
   },
   disabledBox: {

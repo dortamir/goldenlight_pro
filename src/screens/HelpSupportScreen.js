@@ -4,7 +4,7 @@ import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppBackButton from '../components/common/AppBackButton';
 import AppScreen from '../components/common/AppScreen';
-import { colors, spacing, typography } from '../theme';
+import { colors, shadows, spacing, typography } from '../theme';
 
 const PHONE_NUMBER = '08-8695112';
 const FAX_NUMBER = '08-8695110';
@@ -196,11 +196,7 @@ const styles = StyleSheet.create({
     padding: spacing.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.04,
-    shadowRadius: 6,
-    elevation: 2,
+    ...shadows.softCard,
   },
   cardTitle: {
     fontSize: typography.body.fontSize,

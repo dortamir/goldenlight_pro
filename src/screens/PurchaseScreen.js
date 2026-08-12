@@ -1,3 +1,4 @@
+import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { useMemo, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
@@ -5,18 +6,20 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-nati
 import AppScreen from '../components/common/AppScreen';
 import { useAuth } from '../context/AuthContext';
 import { submitPurchaseReceipt } from '../services/purchaseReportService';
-import { colors, spacing, typography } from '../theme';
+import { colors, shadows, spacing, typography } from '../theme';
 
 const uploadOptions = [
   {
     key: 'camera',
     title: 'צילום חשבונית',
     subtitle: 'פתחו מצלמה וצילמו את החשבונית',
+    icon: 'camera-outline',
   },
   {
     key: 'gallery',
     title: 'בחירת תמונה',
     subtitle: 'בחרו תמונה קיימת מהמכשיר',
+    icon: 'images-outline',
   },
 ];
 
@@ -191,10 +194,16 @@ export default function PurchaseScreen() {
             {uploadOptions.map((option) => (
               <Pressable
                 key={option.key}
-                style={[styles.optionCard, isUploading && styles.optionCardDisabled]}
+                style={({ pressed }) => [
+                  styles.optionCard,
+                  pressed && !isUploading && styles.optionCardPressed,
+                  isUploading && styles.optionCardDisabled,
+                ]}
                 onPress={() => handlePickReceipt(option.key === 'camera' ? 'camera' : 'gallery')}
                 disabled={isUploading}>
-                <View style={styles.optionAccent} />
+                <View style={styles.optionIconWrap}>
+                  <Ionicons name={option.icon} size={20} color={colors.primary} />
+                </View>
                 <Text style={styles.optionTitle}>{option.title}</Text>
                 <Text style={styles.optionSubtitle}>{option.subtitle}</Text>
               </Pressable>
@@ -261,11 +270,7 @@ const styles = StyleSheet.create({
     padding: spacing.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    elevation: 2,
+    ...shadows.softCard,
   },
   uploadHeader: {
     alignItems: 'flex-end',
@@ -288,7 +293,7 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   optionCard: {
-    backgroundColor: colors.surfaceMuted,
+    backgroundColor: colors.white,
     borderRadius: 14,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
@@ -297,15 +302,22 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     minHeight: 84,
     justifyContent: 'center',
+    ...shadows.softCard,
+  },
+  optionCardPressed: {
+    backgroundColor: colors.primarySoft,
+    borderColor: colors.primary,
   },
   optionCardDisabled: {
     opacity: 0.7,
   },
-  optionAccent: {
-    width: 24,
-    height: 3,
-    borderRadius: 999,
-    backgroundColor: colors.primary,
+  optionIconWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 11,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
     marginBottom: spacing.xs,
   },
   optionTitle: {
@@ -327,11 +339,7 @@ const styles = StyleSheet.create({
     padding: spacing.lg,
     borderWidth: 1,
     borderColor: colors.primarySoft,
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+    ...shadows.softCard,
   },
   receiptHeader: {
     flexDirection: 'row-reverse',

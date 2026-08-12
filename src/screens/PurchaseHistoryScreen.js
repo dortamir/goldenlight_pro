@@ -7,7 +7,7 @@ import AppScreen from '../components/common/AppScreen';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
 import { getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
-import { colors, spacing, typography } from '../theme';
+import { colors, shadows, spacing, typography } from '../theme';
 
 const historyFilters = [
   { key: 'all', label: 'הכל' },
@@ -432,11 +432,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: spacing.md,
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+    ...shadows.softCard,
   },
   reportCardPressed: {
     opacity: 0.85,

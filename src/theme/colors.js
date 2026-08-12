@@ -21,6 +21,13 @@ export const colors = {
   successSoft: '#E8F5EE',
   error: '#C24B4B',
   errorSoft: '#FBECEC',
+  // Premium dark-card palette (near-black, not pure #000) - used only for
+  // selected high-value sections (e.g. the Home points card), never as a
+  // whole-app background. Pair with mutedOnDark for secondary text and
+  // charcoalBorder for a barely-there turquoise-tinted edge.
+  charcoal: '#14181A',
+  charcoalBorder: 'rgba(46, 196, 199, 0.18)',
+  mutedOnDark: '#9AA6A8',
 };
 
 export default colors;

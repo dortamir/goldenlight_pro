@@ -41,6 +41,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: spacing.xl,
     paddingVertical: spacing.md,
+    shadowColor: colors.primaryPressed,
+    shadowOpacity: 0.22,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   label: {
     color: colors.black,
@@ -56,5 +61,7 @@ const styles = StyleSheet.create({
   disabled: {
     backgroundColor: colors.grayMedium,
     opacity: 0.7,
+    shadowOpacity: 0,
+    elevation: 0,
   },
 });

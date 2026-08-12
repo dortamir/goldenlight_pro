@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { colors, radius, shadows, spacing, typography } from '../../theme';
+import { colors, radius, spacing, typography } from '../../theme';
 
 export default function AppInput({
   label,
@@ -74,9 +74,16 @@ const styles = StyleSheet.create({
     textAlignVertical: 'center',
     writingDirection: 'rtl',
   },
+  // A soft turquoise glow (not the generic black card shadow) reads as an
+  // intentional focus state rather than "this input is elevated like a
+  // card" - kept subtle on purpose.
   focused: {
     borderColor: colors.primary,
-    ...shadows.sm,
+    shadowColor: colors.primary,
+    shadowOpacity: 0.18,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 2,
   },
   error: {
     borderColor: colors.error,

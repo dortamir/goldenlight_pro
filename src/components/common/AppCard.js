@@ -17,6 +17,6 @@ const styles = StyleSheet.create({
     padding: spacing.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    ...shadows.sm,
+    ...shadows.softCard,
   },
 });

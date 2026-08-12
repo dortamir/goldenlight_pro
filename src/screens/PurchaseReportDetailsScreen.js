@@ -8,7 +8,7 @@ import AppScreen from '../components/common/AppScreen';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
 import { getPurchaseReportById, getReceiptSignedUrl } from '../services/purchaseReportService';
-import { colors, spacing, typography } from '../theme';
+import { colors, shadows, spacing, typography } from '../theme';
 
 function formatReportDate(value) {
   const date = new Date(value);
@@ -502,11 +502,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     alignItems: 'flex-end',
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+    ...shadows.softCard,
   },
   summaryCardTitle: {
     fontSize: typography.body.fontSize,
@@ -551,11 +547,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     alignItems: 'flex-end',
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.04,
-    shadowRadius: 6,
-    elevation: 2,
+    ...shadows.softCard,
   },
   sectionCardTitle: {
     fontSize: typography.body.fontSize,

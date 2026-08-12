@@ -5,7 +5,7 @@ import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'rea
 import AppScreen from '../components/common/AppScreen';
 import { useAuth } from '../context/AuthContext';
 import { getCachedAvatarUrl, getProfile, getProfileAvatarSignedUrl } from '../services/profileService';
-import { colors, spacing, typography } from '../theme';
+import { colors, shadows, spacing, typography } from '../theme';
 
 const accountActions = [
   'עריכת פרטים אישיים',
@@ -294,11 +294,7 @@ const styles = StyleSheet.create({
     padding: spacing.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+    ...shadows.softCard,
   },
   avatarWrap: {
     flexDirection: 'row-reverse',
@@ -313,6 +309,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: colors.primary,
   },
   avatarImage: {
     width: '100%',
@@ -405,11 +403,7 @@ const styles = StyleSheet.create({
     padding: spacing.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.04,
-    shadowRadius: 6,
-    elevation: 2,
+    ...shadows.softCard,
   },
   sectionTitle: {
     fontSize: typography.body.fontSize,
@@ -436,7 +430,7 @@ const styles = StyleSheet.create({
     textAlign: 'right',
   },
   summaryValue: {
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: '700',
     color: colors.primary,
     textAlign: 'right',
@@ -448,11 +442,7 @@ const styles = StyleSheet.create({
     padding: spacing.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.04,
-    shadowRadius: 6,
-    elevation: 2,
+    ...shadows.softCard,
   },
   actionRow: {
     borderTopWidth: 1,

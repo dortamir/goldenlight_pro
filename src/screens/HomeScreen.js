@@ -1,3 +1,4 @@
+import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
@@ -6,7 +7,7 @@ import AppScreen from '../components/common/AppScreen';
 import { useAuth } from '../context/AuthContext';
 import { getProfile } from '../services/profileService';
 import { getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
-import { colors, spacing, typography } from '../theme';
+import { colors, shadows, spacing, typography } from '../theme';
 
 function isPdfFile(name) {
   return /\.pdf$/i.test(String(name || ''));
@@ -17,11 +18,13 @@ const quickActions = [
     title: 'דיווח רכישה',
     subtitle: 'העלאת חשבונית חדשה',
     route: '/(tabs)/purchase',
+    icon: 'receipt-outline',
   },
   {
     title: 'הטבות',
     subtitle: 'צפייה בהטבות שלך',
     route: '/(tabs)/rewards',
+    icon: 'gift-outline',
   },
 ];
 
@@ -212,6 +215,7 @@ export default function HomeScreen() {
 
         <View style={styles.heroCard}>
           <Text style={styles.heroLabel}>יתרת הנקודות שלך</Text>
+          <View style={styles.heroAccentLine} />
 
           {loading ? (
             <View style={styles.loadingState}>
@@ -249,9 +253,11 @@ export default function HomeScreen() {
           {quickActions.map((action) => (
             <Pressable
               key={action.title}
-              style={styles.actionCard}
+              style={({ pressed }) => [styles.actionCard, pressed && styles.actionCardPressed]}
               onPress={() => router.push(action.route)}>
-              <View style={styles.actionAccent} />
+              <View style={styles.actionIconWrap}>
+                <Ionicons name={action.icon} size={20} color={colors.primary} />
+              </View>
               <Text style={styles.actionTitle}>{action.title}</Text>
               <Text style={styles.actionSubtitle}>{action.subtitle}</Text>
             </Pressable>
@@ -388,29 +394,33 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   heroCard: {
-    backgroundColor: colors.black,
+    backgroundColor: colors.charcoal,
     borderRadius: 24,
     paddingHorizontal: spacing.xxl,
     paddingVertical: spacing.xxl,
     borderWidth: 1,
-    borderColor: colors.primarySoft,
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.15,
-    shadowRadius: 20,
-    elevation: 4,
+    borderColor: colors.charcoalBorder,
+    ...shadows.premiumCard,
   },
   heroLabel: {
     fontSize: typography.caption.fontSize,
     fontWeight: '600',
-    color: colors.surfaceElevated,
+    color: colors.mutedOnDark,
     textAlign: 'right',
-    opacity: 0.8,
+  },
+  heroAccentLine: {
+    width: 36,
+    height: 2,
+    borderRadius: 999,
+    backgroundColor: colors.primary,
+    opacity: 0.7,
+    marginTop: 8,
+    alignSelf: 'flex-end',
   },
   pointsRow: {
     flexDirection: 'row-reverse',
     alignItems: 'baseline',
-    marginTop: spacing.sm,
+    marginTop: spacing.lg,
     gap: spacing.xs,
   },
   pointsValue: {
@@ -423,7 +433,7 @@ const styles = StyleSheet.create({
   pointsUnit: {
     fontSize: 18,
     fontWeight: '600',
-    color: colors.surfaceElevated,
+    color: colors.white,
     lineHeight: 22,
     marginBottom: 1,
   },
@@ -431,7 +441,7 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
     fontSize: typography.caption.fontSize,
     fontWeight: '500',
-    color: colors.surfaceMuted,
+    color: colors.mutedOnDark,
     textAlign: 'right',
   },
   loadingState: {
@@ -450,7 +460,7 @@ const styles = StyleSheet.create({
   errorText: {
     fontSize: typography.caption.fontSize,
     fontWeight: '600',
-    color: colors.surfaceMuted,
+    color: colors.error,
     textAlign: 'right',
   },
   retryText: {
@@ -477,7 +487,7 @@ const styles = StyleSheet.create({
   levelMeta: {
     fontSize: 12,
     fontWeight: '500',
-    color: colors.surfaceMuted,
+    color: colors.mutedOnDark,
     textAlign: 'right',
   },
   progressTrack: {
@@ -523,23 +533,24 @@ const styles = StyleSheet.create({
     backgroundColor: colors.white,
     borderRadius: 18,
     paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.lg,
+    paddingVertical: spacing.xl,
     borderWidth: 1,
     borderColor: colors.border,
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.06,
-    shadowRadius: 10,
-    elevation: 2,
+    ...shadows.softCard,
     alignItems: 'flex-end',
-    minHeight: 110,
+    minHeight: 122,
     justifyContent: 'center',
   },
-  actionAccent: {
-    width: 30,
-    height: 3,
-    borderRadius: 999,
-    backgroundColor: colors.primary,
+  actionCardPressed: {
+    opacity: 0.85,
+  },
+  actionIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
     marginBottom: spacing.sm,
   },
   actionTitle: {
@@ -565,11 +576,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row-reverse',
     alignItems: 'center',
     justifyContent: 'space-between',
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+    ...shadows.softCard,
   },
   activityInfo: {
     flex: 1,
@@ -605,11 +612,7 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     padding: spacing.sm,
     alignItems: 'flex-end',
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+    ...shadows.softCard,
   },
   activityTilePressed: {
     opacity: 0.85,
