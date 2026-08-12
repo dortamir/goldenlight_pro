@@ -129,3 +129,38 @@ export async function getMyPurchaseReports(userId) {
 
   return data || [];
 }
+
+export async function getPurchaseReportById(reportId, userId) {
+  if (!supabase || !reportId || !userId) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from('purchase_reports')
+    .select('id, original_filename, receipt_path, status, points_awarded, created_at, updated_at')
+    .eq('id', reportId)
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+export async function getReceiptSignedUrl(receiptPath, expiresInSeconds = 300) {
+  if (!supabase || !receiptPath) {
+    return null;
+  }
+
+  const { data, error } = await supabase.storage
+    .from('receipts')
+    .createSignedUrl(receiptPath, expiresInSeconds);
+
+  if (error) {
+    throw error;
+  }
+
+  return data?.signedUrl || null;
+}

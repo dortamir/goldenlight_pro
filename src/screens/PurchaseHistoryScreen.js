@@ -1,11 +1,11 @@
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
-import { getMyPurchaseReports } from '../services/purchaseReportService';
+import { getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
 import { colors, spacing, typography } from '../theme';
 
 const historyFilters = [
@@ -35,6 +35,10 @@ function formatNumber(value) {
   return numericValue.toLocaleString('he-IL');
 }
 
+function isPdfFile(name) {
+  return /\.pdf$/i.test(String(name || ''));
+}
+
 function getStatusMeta(status) {
   switch (status) {
     case 'processing':
@@ -57,10 +61,34 @@ export default function PurchaseHistoryScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activeFilter, setActiveFilter] = useState('all');
+  const [previewUrls, setPreviewUrls] = useState({});
+
+  const loadThumbnails = useCallback((items, isActiveRef) => {
+    items
+      .filter((report) => !isPdfFile(report.original_filename) && report.receipt_path)
+      .forEach((report) => {
+        setPreviewUrls((prev) => ({ ...prev, [report.id]: { status: 'loading', url: null } }));
+
+        getReceiptSignedUrl(report.receipt_path)
+          .then((url) => {
+            if (!isActiveRef.current) {
+              return;
+            }
+            setPreviewUrls((prev) => ({ ...prev, [report.id]: { status: url ? 'ready' : 'error', url } }));
+          })
+          .catch(() => {
+            if (!isActiveRef.current) {
+              return;
+            }
+            setPreviewUrls((prev) => ({ ...prev, [report.id]: { status: 'error', url: null } }));
+          });
+      });
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
-      let isActive = true;
+      const isActiveRef = { current: true };
+      setPreviewUrls({});
 
       async function loadReports() {
         if (!user?.id) {
@@ -75,16 +103,17 @@ export default function PurchaseHistoryScreen() {
           setError('');
           const data = await getMyPurchaseReports(user.id);
 
-          if (isActive) {
+          if (isActiveRef.current) {
             setReports(data);
+            loadThumbnails(data, isActiveRef);
           }
         } catch (err) {
-          if (isActive) {
+          if (isActiveRef.current) {
             setReports([]);
             setError('לא הצלחנו לטעון את היסטוריית הרכישות');
           }
         } finally {
-          if (isActive) {
+          if (isActiveRef.current) {
             setLoading(false);
           }
         }
@@ -93,9 +122,9 @@ export default function PurchaseHistoryScreen() {
       loadReports();
 
       return () => {
-        isActive = false;
+        isActiveRef.current = false;
       };
-    }, [user?.id]),
+    }, [user?.id, loadThumbnails]),
   );
 
   const retryLoad = () => {
@@ -103,12 +132,20 @@ export default function PurchaseHistoryScreen() {
       return;
     }
 
+    const isActiveRef = { current: true };
     setLoading(true);
     setError('');
     getMyPurchaseReports(user.id)
-      .then((data) => setReports(data))
+      .then((data) => {
+        setReports(data);
+        loadThumbnails(data, isActiveRef);
+      })
       .catch(() => setError('לא הצלחנו לטעון את היסטוריית הרכישות'))
       .finally(() => setLoading(false));
+  };
+
+  const openReportDetails = (report) => {
+    router.push(`/(tabs)/activity/${report.id}`);
   };
 
   const filteredReports = useMemo(() => {
@@ -184,23 +221,51 @@ export default function PurchaseHistoryScreen() {
             {filteredReports.map((report) => {
               const statusMeta = getStatusMeta(report.status);
               const showPoints = report.status === 'approved' && report.points_awarded > 0;
+              const isPdf = isPdfFile(report.original_filename);
+              const preview = previewUrls[report.id];
 
               return (
-                <View key={report.id} style={styles.reportCard}>
+                <Pressable
+                  key={report.id}
+                  style={({ pressed }) => [styles.reportCard, pressed && styles.reportCardPressed]}
+                  onPress={() => openReportDetails(report)}
+                  accessibilityRole="button"
+                  accessibilityLabel="פתיחת פרטי חשבונית">
+                  <View style={styles.thumbnailWrap}>
+                    {isPdf ? (
+                      <View style={styles.thumbnailPlaceholder}>
+                        <Text style={styles.thumbnailPlaceholderText}>PDF</Text>
+                      </View>
+                    ) : preview?.status === 'ready' && preview.url ? (
+                      <Image source={{ uri: preview.url }} style={styles.thumbnailImage} resizeMode="cover" />
+                    ) : preview?.status === 'loading' ? (
+                      <View style={styles.thumbnailPlaceholder}>
+                        <ActivityIndicator color={colors.primary} size="small" />
+                      </View>
+                    ) : (
+                      <View style={styles.thumbnailPlaceholder}>
+                        <Text style={styles.thumbnailPlaceholderText}>חשבונית</Text>
+                      </View>
+                    )}
+                  </View>
+
                   <View style={styles.reportInfo}>
-                    <Text style={styles.reportTitle}>דיווח רכישה</Text>
+                    <Text style={styles.reportTitle}>חשבונית</Text>
                     <Text style={styles.reportFilename} numberOfLines={1} ellipsizeMode="tail">
                       {report.original_filename || 'חשבונית'}
                     </Text>
                     <Text style={styles.reportDate}>{formatReportDate(report.created_at)}</Text>
+                  </View>
+
+                  <View style={styles.statusColumn}>
+                    <View style={[styles.statusBadge, { backgroundColor: statusMeta.backgroundColor }]}>
+                      <Text style={[styles.statusBadgeText, { color: statusMeta.textColor }]}>{statusMeta.label}</Text>
+                    </View>
                     {showPoints ? (
                       <Text style={styles.reportPoints}>{`+${formatNumber(report.points_awarded)} נק׳`}</Text>
                     ) : null}
                   </View>
-                  <View style={[styles.statusBadge, { backgroundColor: statusMeta.backgroundColor }]}>
-                    <Text style={[styles.statusBadgeText, { color: statusMeta.textColor }]}>{statusMeta.label}</Text>
-                  </View>
-                </View>
+                </Pressable>
               );
             })}
           </View>
@@ -356,6 +421,36 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 2,
   },
+  reportCardPressed: {
+    opacity: 0.85,
+  },
+  thumbnailWrap: {
+    width: 56,
+    height: 56,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceMuted,
+    flexShrink: 0,
+  },
+  thumbnailImage: {
+    width: '100%',
+    height: '100%',
+  },
+  thumbnailPlaceholder: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceMuted,
+  },
+  thumbnailPlaceholderText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.textMuted,
+    textAlign: 'center',
+  },
   reportInfo: {
     flex: 1,
     minWidth: 0,
@@ -381,6 +476,11 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     textAlign: 'right',
     marginTop: 2,
+  },
+  statusColumn: {
+    flexShrink: 0,
+    alignItems: 'flex-end',
+    gap: 4,
   },
   reportPoints: {
     fontSize: typography.caption.fontSize,
