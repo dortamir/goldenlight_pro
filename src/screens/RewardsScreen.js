@@ -1,7 +1,9 @@
-import { useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
+import { useAuth } from '../context/AuthContext';
+import { getProfile } from '../services/profileService';
 import { colors, spacing, typography } from '../theme';
 
 const mockRewards = [
@@ -10,29 +12,89 @@ const mockRewards = [
     title: 'שובר BUYME בסך 100 ₪',
     cost: 1000,
     category: 'שובר מתנה',
-    available: true,
   },
   {
     id: 2,
     title: 'ערכת כלי עבודה מקצועית',
     cost: 1500,
     category: 'ציוד מקצועי',
-    available: true,
   },
   {
     id: 3,
     title: 'שובר Golden Light בסך 200 ₪',
     cost: 2000,
     category: 'Golden Light',
-    available: false,
   },
 ];
 
 const filters = ['הכל', 'שוברים', 'ציוד', 'Golden Light'];
 
 export default function RewardsScreen() {
+  const { user } = useAuth();
   const [activeFilter, setActiveFilter] = useState('הכל');
   const [selectedRewardId, setSelectedRewardId] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadProfile() {
+      if (!user?.id) {
+        setProfile(null);
+        setLoading(false);
+        setError('');
+        return;
+      }
+
+      try {
+        setLoading(true);
+        setError('');
+        const data = await getProfile(user.id);
+
+        if (isActive) {
+          setProfile(data);
+        }
+      } catch (err) {
+        if (isActive) {
+          setProfile(null);
+          setError('לא הצלחנו לטעון את יתרת הנקודות');
+        }
+      } finally {
+        if (isActive) {
+          setLoading(false);
+        }
+      }
+    }
+
+    loadProfile();
+
+    return () => {
+      isActive = false;
+    };
+  }, [user?.id]);
+
+  const pointsBalance = profile?.points_balance ?? 0;
+
+  const formatNumber = (value) => {
+    const numericValue = Number.isFinite(value) ? value : 0;
+    return numericValue.toLocaleString('he-IL');
+  };
+
+  const getAvailability = (reward) => {
+    if (loading) {
+      return { isAvailable: false, message: 'טוען יתרה...' };
+    }
+
+    if (error) {
+      return { isAvailable: false, message: 'לא ניתן לבדוק זמינות' };
+    }
+
+    const isAvailable = pointsBalance >= reward.cost;
+    const missing = formatNumber(Math.max(reward.cost - pointsBalance, 0));
+    return { isAvailable, message: `חסרות ${missing} נק׳` };
+  };
 
   const visibleRewards = useMemo(() => {
     if (activeFilter === 'הכל') {
@@ -52,8 +114,32 @@ export default function RewardsScreen() {
 
         <View style={styles.summaryCard}>
           <Text style={styles.summaryLabel}>יתרת הנקודות שלך</Text>
-          <Text style={styles.pointsValue}>1,850 נק׳</Text>
-          <Text style={styles.summaryMeta}>זמינות למימוש</Text>
+          {loading ? (
+            <View style={styles.summaryLoading}>
+              <ActivityIndicator color={colors.primary} size="small" />
+            </View>
+          ) : error ? (
+            <View style={styles.summaryErrorWrap}>
+              <Text style={styles.summaryErrorText}>{error}</Text>
+              <Pressable
+                onPress={() =>
+                  user?.id &&
+                  getProfile(user.id)
+                    .then((data) => {
+                      setProfile(data);
+                      setError('');
+                    })
+                    .catch(() => setError('לא הצלחנו לטעון את יתרת הנקודות'))
+                }>
+                <Text style={styles.retryText}>נסו שוב</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <>
+              <Text style={styles.pointsValue}>{`${formatNumber(pointsBalance)} נק׳`}</Text>
+              <Text style={styles.summaryMeta}>זמינות למימוש</Text>
+            </>
+          )}
         </View>
 
         <View style={styles.filterRow}>
@@ -74,8 +160,7 @@ export default function RewardsScreen() {
 
         {visibleRewards.map((reward) => {
           const isSelected = selectedRewardId === reward.id;
-          const isAvailable = reward.available;
-          const needsPoints = reward.cost - 1850;
+          const { isAvailable, message: unavailableMessage } = getAvailability(reward);
 
           return (
             <View key={reward.id} style={styles.rewardCard}>
@@ -116,7 +201,7 @@ export default function RewardsScreen() {
                 </Pressable>
               ) : (
                 <View style={styles.disabledBox}>
-                  <Text style={styles.disabledText}>חסרות {needsPoints} נק׳</Text>
+                  <Text style={styles.disabledText}>{unavailableMessage}</Text>
                 </View>
               )}
             </View>
@@ -190,6 +275,30 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     textAlign: 'right',
     marginTop: 2,
+  },
+  summaryLoading: {
+    minHeight: 40,
+    justifyContent: 'center',
+    alignItems: 'flex-end',
+    marginTop: spacing.xs,
+  },
+  summaryErrorWrap: {
+    minHeight: 40,
+    alignItems: 'flex-end',
+    gap: spacing.xs,
+    marginTop: spacing.xs,
+  },
+  summaryErrorText: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '600',
+    color: colors.error,
+    textAlign: 'right',
+  },
+  retryText: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '700',
+    color: colors.primary,
+    textAlign: 'right',
   },
   filterRow: {
     flexDirection: 'row-reverse',
