@@ -146,7 +146,7 @@ export default function PurchaseHistoryScreen() {
   };
 
   const openReportDetails = (report) => {
-    router.push(`/(tabs)/activity/${report.id}`);
+    router.push({ pathname: '/(tabs)/activity/[id]', params: { id: report.id, from: 'history' } });
   };
 
   const filteredReports = useMemo(() => {
@@ -172,7 +172,7 @@ export default function PurchaseHistoryScreen() {
     <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
       <View style={styles.container}>
         <View style={styles.header}>
-          <AppBackButton fallbackRoute="/(tabs)" style={styles.headerBackButton} />
+          <AppBackButton deterministicRoute="/(tabs)" style={styles.headerBackButton} />
           <View style={styles.headerTextBlock}>
             <Text style={styles.title}>היסטוריית רכישות</Text>
             <Text style={styles.subtitle}>כל החשבוניות והדיווחים שהעליתם</Text>

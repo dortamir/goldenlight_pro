@@ -118,9 +118,28 @@ function DetectedProductRow({ product }) {
   );
 }
 
+// Maps the safe navigation-origin param (never receipt_path/user_id/signed
+// URLs - see HomeScreen.js and PurchaseHistoryScreen.js, the only two
+// places that link into this screen) to a deterministic back destination.
+// Unrecognized/missing origin intentionally resolves to null so the back
+// button falls back to its default canGoBack()-then-fallbackRoute behavior
+// instead of guessing - see the AppBackButton usage below.
+function resolveBackRoute(origin) {
+  if (origin === 'home') {
+    return '/(tabs)';
+  }
+
+  if (origin === 'history') {
+    return '/(tabs)/activity';
+  }
+
+  return null;
+}
+
 export default function PurchaseReportDetailsScreen() {
-  const { id } = useLocalSearchParams();
+  const { id, from } = useLocalSearchParams();
   const { user } = useAuth();
+  const backRoute = resolveBackRoute(from);
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -233,7 +252,11 @@ export default function PurchaseReportDetailsScreen() {
     <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
       <View style={styles.container}>
         <View style={styles.header}>
-          <AppBackButton fallbackRoute="/(tabs)/activity" style={styles.headerBackButton} />
+          <AppBackButton
+            deterministicRoute={backRoute || undefined}
+            fallbackRoute="/(tabs)"
+            style={styles.headerBackButton}
+          />
           <View style={styles.headerTextBlock}>
             <Text style={styles.title}>פרטי חשבונית</Text>
             {report ? <Text style={styles.subtitle}>{`הועלתה ב-${formatReportDate(report.created_at)}`}</Text> : null}

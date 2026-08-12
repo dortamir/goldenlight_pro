@@ -118,8 +118,8 @@ export default function LoginScreen() {
             </View>
 
             <View style={styles.forgotRow}>
-              <Pressable onPress={() => undefined} accessibilityRole="link">
-                <Text style={styles.forgotText}>שכחתם סיסמה?</Text>
+              <Pressable onPress={() => router.push('/(auth)/forgot-password')} accessibilityRole="link">
+                <Text style={styles.forgotText}>שכחתי סיסמה?</Text>
               </Pressable>
             </View>
 

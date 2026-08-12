@@ -26,8 +26,26 @@ function ChevronRightIcon({ size, color }) {
   );
 }
 
-export default function AppBackButton({ fallbackRoute, size = 28, color = colors.textMuted, style }) {
+export default function AppBackButton({
+  fallbackRoute,
+  deterministicRoute,
+  size = 28,
+  color = colors.textMuted,
+  style,
+}) {
   const handlePress = () => {
+    // Opt-in only (used by screens that must always land on one specific
+    // route regardless of how the user arrived, e.g. PurchaseHistoryScreen
+    // returning to Home) - deliberately skips router.canGoBack()/back(),
+    // since navigation history can otherwise send the user somewhere other
+    // than the screen that's conceptually "back" for this entry point.
+    // Every other screen leaves this unset and keeps the default
+    // back()-then-fallbackRoute behavior below, unchanged.
+    if (deterministicRoute) {
+      router.replace(deterministicRoute);
+      return;
+    }
+
     if (router.canGoBack()) {
       router.back();
       return;

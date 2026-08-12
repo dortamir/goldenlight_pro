@@ -1,12 +1,16 @@
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
 import { useAuth } from '../context/AuthContext';
 import { getProfile } from '../services/profileService';
-import { getMyPurchaseReports } from '../services/purchaseReportService';
+import { getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
 import { colors, spacing, typography } from '../theme';
+
+function isPdfFile(name) {
+  return /\.pdf$/i.test(String(name || ''));
+}
 
 const quickActions = [
   {
@@ -29,6 +33,7 @@ export default function HomeScreen() {
   const [reports, setReports] = useState([]);
   const [reportsLoading, setReportsLoading] = useState(true);
   const [reportsError, setReportsError] = useState('');
+  const [previewUrls, setPreviewUrls] = useState({});
 
   useEffect(() => {
     let isMounted = true;
@@ -72,9 +77,37 @@ export default function HomeScreen() {
     };
   }, [user?.id]);
 
+  // Thumbnails are only requested for the handful of reports actually
+  // rendered in "פעילות אחרונה" (see recentReports.slice below), never the
+  // full report list - keeps this bounded to at most a few signed-URL
+  // requests per focus, the same private-Storage pattern already used by
+  // PurchaseHistoryScreen (never getPublicUrl, never a public bucket).
+  const loadThumbnails = useCallback((items, isActiveRef) => {
+    items
+      .filter((report) => !isPdfFile(report.original_filename) && report.receipt_path)
+      .forEach((report) => {
+        setPreviewUrls((prev) => ({ ...prev, [report.id]: { status: 'loading', url: null } }));
+
+        getReceiptSignedUrl(report.receipt_path)
+          .then((url) => {
+            if (!isActiveRef.current) {
+              return;
+            }
+            setPreviewUrls((prev) => ({ ...prev, [report.id]: { status: url ? 'ready' : 'error', url } }));
+          })
+          .catch(() => {
+            if (!isActiveRef.current) {
+              return;
+            }
+            setPreviewUrls((prev) => ({ ...prev, [report.id]: { status: 'error', url: null } }));
+          });
+      });
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
-      let isActive = true;
+      const isActiveRef = { current: true };
+      setPreviewUrls({});
 
       async function loadReports() {
         if (!user?.id) {
@@ -89,16 +122,17 @@ export default function HomeScreen() {
           setReportsError('');
           const data = await getMyPurchaseReports(user.id);
 
-          if (isActive) {
+          if (isActiveRef.current) {
             setReports(data);
+            loadThumbnails(data.slice(0, 3), isActiveRef);
           }
         } catch (err) {
-          if (isActive) {
+          if (isActiveRef.current) {
             setReports([]);
             setReportsError('לא הצלחנו לטעון את הפעילות האחרונה');
           }
         } finally {
-          if (isActive) {
+          if (isActiveRef.current) {
             setReportsLoading(false);
           }
         }
@@ -107,9 +141,9 @@ export default function HomeScreen() {
       loadReports();
 
       return () => {
-        isActive = false;
+        isActiveRef.current = false;
       };
-    }, [user?.id]),
+    }, [user?.id, loadThumbnails]),
   );
 
   const firstName = (() => {
@@ -247,6 +281,7 @@ export default function HomeScreen() {
                     .then((data) => {
                       setReports(data);
                       setReportsError('');
+                      loadThumbnails(data.slice(0, 3), { current: true });
                     })
                     .catch(() => setReportsError('לא הצלחנו לטעון את הפעילות האחרונה'))
                 }>
@@ -262,26 +297,51 @@ export default function HomeScreen() {
             </View>
           </View>
         ) : (
-          <View style={styles.activityList}>
+          <View style={styles.activityGrid}>
             {recentReports.map((report) => {
               const statusMeta = getStatusMeta(report.status);
               const showPoints = report.status === 'approved' && report.points_awarded > 0;
+              const isPdf = isPdfFile(report.original_filename);
+              const preview = previewUrls[report.id];
 
               return (
-                <View key={report.id} style={styles.activityCard}>
-                  <View style={styles.activityInfo}>
-                    <Text style={styles.activityTitle} numberOfLines={1}>
-                      {report.original_filename || 'חשבונית'}
-                    </Text>
-                    <Text style={styles.activitySubtitle}>{formatReportDate(report.created_at)}</Text>
-                    {showPoints ? (
-                      <Text style={styles.activityPoints}>{`+${formatNumber(report.points_awarded)} נק׳`}</Text>
-                    ) : null}
+                <Pressable
+                  key={report.id}
+                  style={({ pressed }) => [styles.activityTile, pressed && styles.activityTilePressed]}
+                  onPress={() =>
+                    router.push({ pathname: '/(tabs)/activity/[id]', params: { id: report.id, from: 'home' } })
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel="פתיחת פרטי חשבונית">
+                  <View style={styles.activityTileThumbnailWrap}>
+                    {isPdf ? (
+                      <View style={styles.activityTilePlaceholder}>
+                        <Text style={styles.activityTilePlaceholderText}>PDF</Text>
+                      </View>
+                    ) : preview?.status === 'ready' && preview.url ? (
+                      <Image source={{ uri: preview.url }} style={styles.activityTileThumbnailImage} resizeMode="cover" />
+                    ) : preview?.status === 'loading' ? (
+                      <View style={styles.activityTilePlaceholder}>
+                        <ActivityIndicator color={colors.primary} size="small" />
+                      </View>
+                    ) : (
+                      <View style={styles.activityTilePlaceholder}>
+                        <Text style={styles.activityTilePlaceholderText}>חשבונית</Text>
+                      </View>
+                    )}
                   </View>
-                  <View style={[styles.statusBadge, { backgroundColor: statusMeta.backgroundColor }]}>
+
+                  <Text style={styles.activityTileTitle}>חשבונית</Text>
+                  <Text style={styles.activityTileDate}>{formatReportDate(report.created_at)}</Text>
+
+                  <View style={[styles.statusBadge, { backgroundColor: statusMeta.backgroundColor, marginTop: spacing.xs }]}>
                     <Text style={[styles.statusBadgeText, { color: statusMeta.textColor }]}>{statusMeta.label}</Text>
                   </View>
-                </View>
+
+                  {showPoints ? (
+                    <Text style={styles.activityPoints}>{`+${formatNumber(report.points_awarded)} נק׳`}</Text>
+                  ) : null}
+                </Pressable>
               );
             })}
           </View>
@@ -530,6 +590,69 @@ const styles = StyleSheet.create({
   },
   activityList: {
     gap: spacing.md,
+  },
+  activityGrid: {
+    flexDirection: 'row-reverse',
+    flexWrap: 'wrap',
+    rowGap: spacing.sm,
+    columnGap: spacing.sm,
+  },
+  activityTile: {
+    width: '48%',
+    backgroundColor: colors.white,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.sm,
+    alignItems: 'flex-end',
+    shadowColor: colors.black,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  activityTilePressed: {
+    opacity: 0.85,
+  },
+  activityTileThumbnailWrap: {
+    width: '100%',
+    aspectRatio: 1.4,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceMuted,
+    marginBottom: spacing.xs,
+  },
+  activityTileThumbnailImage: {
+    width: '100%',
+    height: '100%',
+  },
+  activityTilePlaceholder: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceMuted,
+  },
+  activityTilePlaceholderText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.textMuted,
+    textAlign: 'center',
+  },
+  activityTileTitle: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '700',
+    color: colors.text,
+    textAlign: 'right',
+  },
+  activityTileDate: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: colors.textMuted,
+    textAlign: 'right',
+    marginTop: 2,
   },
   activityLoadingWrap: {
     minHeight: 64,
