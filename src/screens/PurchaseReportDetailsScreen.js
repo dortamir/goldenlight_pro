@@ -3,6 +3,7 @@ import { useCallback, useState } from 'react';
 import { ActivityIndicator, Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import AppBackButton from '../components/common/AppBackButton';
 import AppScreen from '../components/common/AppScreen';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
@@ -45,6 +46,55 @@ function getStatusMeta(status) {
     default:
       return { label: 'נשלחה לבדיקה', backgroundColor: colors.primarySoft, textColor: colors.primaryPressed };
   }
+}
+
+// Simple hand-drawn outline icons in the app's turquoise accent color.
+// No icon library (@expo/vector-icons, react-native-svg, ...) is installed
+// in this project, so these are built from plain View/Text primitives to
+// avoid adding a new dependency while keeping a consistent outline style.
+function PackageIcon({ size = 26, color = colors.primary, style }) {
+  const strokeWidth = Math.max(1.5, size * 0.08);
+  return (
+    <View
+      style={[
+        {
+          width: size,
+          height: size * 0.78,
+          borderWidth: strokeWidth,
+          borderColor: color,
+          borderRadius: size * 0.14,
+          overflow: 'hidden',
+        },
+        style,
+      ]}>
+      <View style={{ marginTop: size * 0.26, height: strokeWidth, backgroundColor: color }} />
+    </View>
+  );
+}
+
+function StarIcon({ size = 26, color = colors.primary, style }) {
+  return <Text style={[{ fontSize: size, lineHeight: size * 1.05, color, textAlign: 'center' }, style]}>☆</Text>;
+}
+
+function InfoIcon({ size = 22, color = colors.primary, style }) {
+  const strokeWidth = Math.max(1.5, size * 0.09);
+  return (
+    <View
+      style={[
+        {
+          width: size,
+          height: size,
+          borderRadius: size / 2,
+          borderWidth: strokeWidth,
+          borderColor: color,
+          alignItems: 'center',
+          justifyContent: 'center',
+        },
+        style,
+      ]}>
+      <Text style={{ fontSize: size * 0.52, fontWeight: '700', color, lineHeight: size * 0.58 }}>i</Text>
+    </View>
+  );
 }
 
 // Reserved for future OCR/product-matching integration. Intentionally not
@@ -183,8 +233,11 @@ export default function PurchaseReportDetailsScreen() {
     <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
       <View style={styles.container}>
         <View style={styles.header}>
-          <Text style={styles.title}>פרטי חשבונית</Text>
-          {report ? <Text style={styles.subtitle}>{`הועלתה ב-${formatReportDate(report.created_at)}`}</Text> : null}
+          <AppBackButton fallbackRoute="/(tabs)/activity" style={styles.headerBackButton} />
+          <View style={styles.headerTextBlock}>
+            <Text style={styles.title}>פרטי חשבונית</Text>
+            {report ? <Text style={styles.subtitle}>{`הועלתה ב-${formatReportDate(report.created_at)}`}</Text> : null}
+          </View>
         </View>
 
         {loading ? (
@@ -249,7 +302,7 @@ export default function PurchaseReportDetailsScreen() {
             <View style={styles.sectionCard}>
               <Text style={styles.sectionCardTitle}>מוצרי Golden Light שזוהו</Text>
               <View style={styles.pendingBox}>
-                <Text style={styles.sectionEmoji}>📦</Text>
+                <PackageIcon size={26} style={styles.sectionIconWrap} />
                 <Text style={styles.pendingBoxTitle}>ממתינים לזיהוי המוצרים בחשבונית</Text>
                 <Text style={styles.pendingBoxSubtitle}>
                   לאחר סריקת החשבונית יוצגו כאן מוצרי Golden Light שזוהו.
@@ -270,7 +323,7 @@ export default function PurchaseReportDetailsScreen() {
                 </View>
               ) : (
                 <View style={styles.pointsNeutralBox}>
-                  <Text style={styles.sectionEmoji}>⭐</Text>
+                  <StarIcon size={26} style={styles.sectionIconWrap} />
                   <Text style={styles.pointsNeutralText}>הנקודות יחושבו לאחר אישור החשבונית</Text>
                   <Text style={styles.pointsNeutralSubtext}>לאחר אישור החשבונית יתווספו הנקודות לחשבונך.</Text>
                 </View>
@@ -291,7 +344,7 @@ export default function PurchaseReportDetailsScreen() {
             ) : null}
 
             <View style={styles.noticeCard}>
-              <Text style={styles.noticeEmoji}>ℹ️</Text>
+              <InfoIcon size={22} style={styles.noticeIconWrap} />
               <Text style={styles.noticeTitle}>נעדכן אותך על סטטוס החשבונית</Text>
               <Text style={styles.noticeSubtitle}>תקבל/י הודעה לאחר השלמת הטיפול.</Text>
             </View>
@@ -332,8 +385,21 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
   header: {
+    position: 'relative',
     alignItems: 'flex-end',
+    paddingTop: 2,
     paddingBottom: 2,
+  },
+  headerBackButton: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    zIndex: 1,
+  },
+  headerTextBlock: {
+    width: '100%',
+    alignItems: 'flex-end',
+    paddingEnd: 56,
   },
   title: {
     fontSize: typography.title.fontSize,
@@ -475,10 +541,8 @@ const styles = StyleSheet.create({
     textAlign: 'right',
     marginBottom: spacing.sm,
   },
-  sectionEmoji: {
-    fontSize: 28,
-    textAlign: 'center',
-    marginBottom: 4,
+  sectionIconWrap: {
+    marginBottom: 6,
   },
   pendingBox: {
     width: '100%',
@@ -642,10 +706,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 4,
   },
-  noticeEmoji: {
-    fontSize: 22,
-    textAlign: 'center',
-    marginBottom: 2,
+  noticeIconWrap: {
+    marginBottom: 4,
   },
   noticeTitle: {
     fontSize: typography.caption.fontSize,

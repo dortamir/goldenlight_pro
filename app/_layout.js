@@ -1,3 +1,5 @@
+import { Ionicons } from '@expo/vector-icons';
+import * as Font from 'expo-font';
 import { Stack } from 'expo-router';
 import { useEffect } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -6,6 +8,21 @@ import { AuthProvider } from '../src/context/AuthContext';
 import { supabase, supabaseConfigStatus } from '../src/services/supabase';
 
 export default function RootLayout() {
+  useEffect(() => {
+    // Preload the Ionicons font used by the bottom tab bar as early as
+    // possible, well before the tab bar itself ever mounts. Each rendered
+    // <Ionicons> icon otherwise calls Font.loadAsync internally on its own
+    // mount if the font isn't loaded yet; on web that goes through
+    // expo-font's fontfaceobserver-based loader, which has a hard ~12s
+    // timeout and (due to a known upstream issue) can surface a rejected
+    // promise as an unhandled rejection instead of failing quietly. Starting
+    // the load here gives it the whole app-launch window to finish before
+    // any icon needs it, and catching it here means a slow/failed load on
+    // web is never left unhandled. This never blocks rendering - we don't
+    // await it or gate any UI on the result.
+    Font.loadAsync(Ionicons.font).catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (!__DEV__) {
       return;

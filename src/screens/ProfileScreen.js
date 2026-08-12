@@ -1,10 +1,10 @@
-import { useRouter } from 'expo-router';
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { useCallback, useRef, useState } from 'react';
+import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
 import { useAuth } from '../context/AuthContext';
-import { getProfile } from '../services/profileService';
+import { getCachedAvatarUrl, getProfile, getProfileAvatarSignedUrl } from '../services/profileService';
 import { colors, spacing, typography } from '../theme';
 
 const accountActions = [
@@ -19,6 +19,19 @@ export default function ProfileScreen() {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // status: 'loading' | 'none' | 'ready' | 'error'. Starts as 'loading' so the
+  // avatar circle never falls back to the initial-letter placeholder while we
+  // don't yet know whether this profile has an avatar_path — that fallback
+  // is reserved for the 'none'/'error' states once we actually know.
+  const [avatarState, setAvatarState] = useState({ status: 'loading', url: null });
+  // Mirrors the URL currently shown on screen (only while status === 'ready').
+  // Avatar uploads reuse the same storage path (upsert), so avatar_path
+  // staying the same string does NOT mean the underlying image is
+  // unchanged — only comparing against the URL we're actually displaying
+  // does. Using a ref (not state) avoids a stale closure inside the
+  // useFocusEffect callback below, which is only recreated when user?.id
+  // changes.
+  const currentAvatarUrlRef = useRef(null);
 
   const handleLogout = async () => {
     try {
@@ -29,42 +42,107 @@ export default function ProfileScreen() {
     }
   };
 
-  useEffect(() => {
-    let isActive = true;
+  useFocusEffect(
+    useCallback(() => {
+      let isActive = true;
 
-    async function loadProfile() {
-      if (!user?.id) {
-        setProfile(null);
-        setLoading(false);
-        setError('');
-        return;
-      }
-
-      try {
-        setLoading(true);
-        setError('');
-        const data = await getProfile(user.id);
-        if (isActive) {
-          setProfile(data);
-        }
-      } catch (err) {
-        if (isActive) {
-          setError('לא הצלחנו לטעון את פרטי החשבון');
+      async function loadProfile() {
+        if (!user?.id) {
           setProfile(null);
-        }
-      } finally {
-        if (isActive) {
           setLoading(false);
+          setError('');
+          currentAvatarUrlRef.current = null;
+          setAvatarState({ status: 'none', url: null });
+          return;
+        }
+
+        try {
+          setLoading(true);
+          setError('');
+          const data = await getProfile(user.id);
+          if (isActive) {
+            setProfile(data);
+          }
+
+          const avatarPath = data?.avatar_path || null;
+
+          if (!avatarPath) {
+            currentAvatarUrlRef.current = null;
+            if (isActive) {
+              setAvatarState({ status: 'none', url: null });
+            }
+          } else {
+            // Always re-check the shared cache, even when avatar_path itself
+            // is unchanged from before: avatar uploads use upsert against a
+            // stable "<userId>/avatar.<ext>" path, so replacing the photo
+            // does not change this string. uploadProfileAvatar() invalidates
+            // the cache entry for that path on a successful upload, so a
+            // fresh call here will correctly pick up the new signed URL
+            // instead of never even looking (which was the bug: skipping
+            // this check whenever the path string matched the previous one).
+            const cachedUrl = getCachedAvatarUrl(avatarPath);
+
+            if (cachedUrl) {
+              if (cachedUrl !== currentAvatarUrlRef.current) {
+                // Either the very first resolution, or the cache now holds a
+                // newer URL than what's on screen (post-replacement) - swap
+                // straight to it, no loading state needed since we already
+                // have the value synchronously.
+                currentAvatarUrlRef.current = cachedUrl;
+                if (isActive) {
+                  setAvatarState({ status: 'ready', url: cachedUrl });
+                }
+              }
+              // else: identical to what's already displayed - no-op, avoids
+              // any unnecessary re-render/flicker.
+            } else {
+              // Genuine cache miss: a brand-new avatar we've never resolved,
+              // or an entry invalidated after a same-path replacement that
+              // hasn't been re-populated yet. Only show the loading
+              // placeholder if nothing valid is currently on screen -
+              // otherwise keep the current avatar visible until the fresh
+              // URL resolves, then swap directly.
+              if (!currentAvatarUrlRef.current && isActive) {
+                setAvatarState({ status: 'loading', url: null });
+              }
+
+              getProfileAvatarSignedUrl(avatarPath)
+                .then((url) => {
+                  if (isActive) {
+                    if (url) {
+                      currentAvatarUrlRef.current = url;
+                      setAvatarState({ status: 'ready', url });
+                    } else {
+                      setAvatarState({ status: 'error', url: null });
+                    }
+                  }
+                })
+                .catch(() => {
+                  if (isActive) {
+                    setAvatarState({ status: 'error', url: null });
+                  }
+                });
+            }
+          }
+        } catch (err) {
+          if (isActive) {
+            setError('לא הצלחנו לטעון את פרטי החשבון');
+            setProfile(null);
+          }
+        } finally {
+          if (isActive) {
+            setLoading(false);
+          }
         }
       }
-    }
 
-    loadProfile();
+      loadProfile();
 
-    return () => {
-      isActive = false;
-    };
-  }, [user?.id]);
+      return () => {
+        isActive = false;
+      };
+    }, [user?.id]),
+  );
 
   const avatarLetter = (() => {
     const source = profile?.full_name || user?.user_metadata?.full_name || user?.email || 'G';
@@ -83,7 +161,20 @@ export default function ProfileScreen() {
         <View style={styles.profileCard}>
           <View style={styles.avatarWrap}>
             <View style={styles.avatarCircle}>
-              <Text style={styles.avatarText}>{avatarLetter}</Text>
+              {avatarState.status === 'ready' && avatarState.url ? (
+                <Image
+                  source={{ uri: avatarState.url }}
+                  style={styles.avatarImage}
+                  resizeMode="cover"
+                  fadeDuration={200}
+                />
+              ) : avatarState.status === 'loading' ? (
+                <View style={styles.avatarLoadingWrap}>
+                  <ActivityIndicator color={colors.primary} size="small" />
+                </View>
+              ) : (
+                <Text style={styles.avatarText}>{avatarLetter}</Text>
+              )}
             </View>
             <View style={styles.profileIdentity}>
               {loading ? (
@@ -143,7 +234,10 @@ export default function ProfileScreen() {
         <View style={styles.actionsCard}>
           <Text style={styles.sectionTitle}>הגדרות וחשבון</Text>
           {accountActions.map((action) => (
-            <Pressable key={action} style={styles.actionRow}>
+            <Pressable
+              key={action}
+              style={styles.actionRow}
+              onPress={action === 'עריכת פרטים אישיים' ? () => router.push('/(tabs)/profile/edit') : undefined}>
               <Text style={styles.actionText}>{action}</Text>
             </Pressable>
           ))}
@@ -208,6 +302,17 @@ const styles = StyleSheet.create({
     height: 52,
     borderRadius: 999,
     backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  avatarImage: {
+    width: '100%',
+    height: '100%',
+  },
+  avatarLoadingWrap: {
+    width: '100%',
+    height: '100%',
     alignItems: 'center',
     justifyContent: 'center',
   },

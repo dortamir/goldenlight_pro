@@ -1,3 +1,4 @@
+import { Ionicons } from '@expo/vector-icons';
 import { Redirect, Tabs } from 'expo-router';
 import { Platform, StyleSheet, Text } from 'react-native';
 
@@ -15,6 +16,12 @@ function renderTabLabel(label) {
       adjustsFontSizeToFit={false}>
       {label}
     </Text>
+  );
+}
+
+function renderTabIcon(outlineName, filledName) {
+  return ({ focused, color, size }) => (
+    <Ionicons name={focused ? filledName : outlineName} size={size} color={color} />
   );
 }
 
@@ -45,7 +52,7 @@ export default function TabsLayout() {
         options={{
           title: 'אזור אישי',
           tabBarLabel: renderTabLabel('אזור אישי'),
-          tabBarIcon: () => null,
+          tabBarIcon: renderTabIcon('person-outline', 'person'),
         }}
       />
       <Tabs.Screen
@@ -53,7 +60,7 @@ export default function TabsLayout() {
         options={{
           title: 'הטבות',
           tabBarLabel: renderTabLabel('הטבות'),
-          tabBarIcon: () => null,
+          tabBarIcon: renderTabIcon('gift-outline', 'gift'),
         }}
       />
       <Tabs.Screen
@@ -61,7 +68,7 @@ export default function TabsLayout() {
         options={{
           title: 'דיווח רכישה',
           tabBarLabel: renderTabLabel('דיווח רכישה'),
-          tabBarIcon: () => null,
+          tabBarIcon: renderTabIcon('receipt-outline', 'receipt'),
         }}
       />
       <Tabs.Screen
@@ -69,7 +76,7 @@ export default function TabsLayout() {
         options={{
           title: 'בית',
           tabBarLabel: renderTabLabel('בית'),
-          tabBarIcon: () => null,
+          tabBarIcon: renderTabIcon('home-outline', 'home'),
         }}
       />
       <Tabs.Screen

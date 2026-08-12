@@ -2,6 +2,7 @@ import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
+import AppBackButton from '../components/common/AppBackButton';
 import AppScreen from '../components/common/AppScreen';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
@@ -171,8 +172,11 @@ export default function PurchaseHistoryScreen() {
     <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
       <View style={styles.container}>
         <View style={styles.header}>
-          <Text style={styles.title}>היסטוריית רכישות</Text>
-          <Text style={styles.subtitle}>כל החשבוניות והדיווחים שהעליתם</Text>
+          <AppBackButton fallbackRoute="/(tabs)" style={styles.headerBackButton} />
+          <View style={styles.headerTextBlock}>
+            <Text style={styles.title}>היסטוריית רכישות</Text>
+            <Text style={styles.subtitle}>כל החשבוניות והדיווחים שהעליתם</Text>
+          </View>
         </View>
 
         {!loading && !error && hasAnyReports ? (
@@ -288,8 +292,21 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
   header: {
+    position: 'relative',
     alignItems: 'flex-end',
+    paddingTop: 2,
     paddingBottom: 2,
+  },
+  headerBackButton: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    zIndex: 1,
+  },
+  headerTextBlock: {
+    width: '100%',
+    alignItems: 'flex-end',
+    paddingEnd: 56,
   },
   title: {
     fontSize: typography.title.fontSize,
