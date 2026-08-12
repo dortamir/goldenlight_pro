@@ -107,7 +107,47 @@ Authenticated mobile users may read active products and aliases.
 They may not insert, update, or delete catalog rows.
 Anonymous users have no access.
 
+## Receipt OCR foundation
+
+The public.receipt_ocr_results and public.receipt_ocr_lines tables store OCR output for a purchase report so that a later processing/matching layer can parse receipt lines, match SKUs/product names against the product catalog, and flag uncertain cases for needs_review.
+
+This is a data foundation only. No OCR provider has been chosen or integrated, no product matching runs against this data yet, and no points logic exists. Those are separate future steps.
+
+### receipt_ocr_results
+
+One row per purchase report (purchase_report_id is unique), holding the OCR run as a whole:
+
+- raw_text: the full OCR text as returned/normalized from the OCR provider.
+- provider: a free-text label for which OCR provider produced the result (for example google_vision, azure, aws_textract, manual). No enum is enforced yet, since the provider has not been chosen.
+- status: the OCR run lifecycle, one of pending, processing, completed, failed. Defaults to pending.
+- error_message: internal processing/error detail for backend debugging. This column is intentionally excluded from the mobile client's read grant and must never be exposed directly to mobile users.
+- processed_at: when OCR processing finished for this report.
+
+### receipt_ocr_lines
+
+Zero or more rows per OCR result, one per detected receipt line, for future matching:
+
+- raw_text: the OCR text for that line exactly as detected.
+- normalized_text: a lightweight, deterministic normalization of raw_text (trimmed, lowercased, repeated whitespace collapsed) via public.normalize_receipt_line(). This is intentionally different from public.normalize_catalog_text() used by the product catalog: catalog normalization strips separators/whitespace entirely to produce a matching key, while receipt line normalization preserves readable structure. No fuzzy matching is implemented at this stage.
+- detected_quantity, detected_unit_price, detected_total: optional numeric values extracted from the line, when available.
+
+product_id and Golden Light match/confidence columns are intentionally not part of this schema yet. Product matching against the catalog is deferred until the real Golden Light product list is available and a matching layer is designed.
+
+### OCR lifecycle
+
+A receipt_ocr_results row is expected to move through pending -> processing -> completed (or failed) as a trusted backend/service-role OCR processing job runs. This migration does not create any trigger that changes purchase_reports.status; status transitions for purchase reports remain the responsibility of the future OCR processing service.
+
+### Access model
+
+OCR data is entirely backend-controlled:
+
+- Row Level Security is enabled on both tables.
+- Authenticated mobile users may only SELECT OCR results and OCR lines that belong to their own purchase reports (verified via an EXISTS check back to purchase_reports.user_id = auth.uid(), chained through receipt_ocr_results for OCR lines).
+- Mobile clients have no INSERT, UPDATE, or DELETE privileges on either table.
+- anon has no access at all.
+- OCR rows are written only by trusted backend/service-role logic, not by the app.
+
 ## Notes
 
 - Email is still managed by Supabase Auth and is not duplicated in profiles.
-- The schema is intentionally limited to the catalog foundation and does not yet include OCR, payment totals, point rules, or admin management flows.
+- The schema now includes an OCR data foundation (receipt_ocr_results, receipt_ocr_lines) in addition to the catalog foundation, but still does not include product matching, payment totals, point rules, or admin management flows.
