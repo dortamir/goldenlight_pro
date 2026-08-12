@@ -224,7 +224,12 @@ export default function HomeScreen() {
           ))}
         </View>
 
-        <Text style={styles.sectionTitle}>פעילות אחרונה</Text>
+        <View style={styles.sectionHeaderRow}>
+          <Text style={[styles.sectionTitle, styles.sectionHeaderTitle]}>פעילות אחרונה</Text>
+          <Pressable onPress={() => router.push('/(tabs)/activity')} accessibilityRole="link">
+            <Text style={styles.viewAllText}>לכל הפעילות</Text>
+          </Pressable>
+        </View>
         {reportsLoading ? (
           <View style={styles.activityCard}>
             <View style={styles.activityLoadingWrap}>
@@ -432,6 +437,21 @@ const styles = StyleSheet.create({
     color: colors.text,
     textAlign: 'right',
     marginBottom: spacing.xs,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row-reverse',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.xs,
+  },
+  sectionHeaderTitle: {
+    marginBottom: 0,
+  },
+  viewAllText: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '700',
+    color: colors.primary,
+    textAlign: 'right',
   },
   actionsRow: {
     flexDirection: 'row-reverse',

@@ -72,6 +72,12 @@ export default function TabsLayout() {
           tabBarIcon: () => null,
         }}
       />
+      <Tabs.Screen
+        name="activity"
+        options={{
+          href: null,
+        }}
+      />
     </Tabs>
   );
 }
