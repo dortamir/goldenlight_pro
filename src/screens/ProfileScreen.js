@@ -233,14 +233,22 @@ export default function ProfileScreen() {
 
         <View style={styles.actionsCard}>
           <Text style={styles.sectionTitle}>הגדרות וחשבון</Text>
-          {accountActions.map((action) => (
-            <Pressable
-              key={action}
-              style={styles.actionRow}
-              onPress={action === 'עריכת פרטים אישיים' ? () => router.push('/(tabs)/profile/edit') : undefined}>
-              <Text style={styles.actionText}>{action}</Text>
-            </Pressable>
-          ))}
+          {accountActions.map((action) => {
+            let onPress;
+            if (action === 'עריכת פרטים אישיים') {
+              onPress = () => router.push('/(tabs)/profile/edit');
+            } else if (action === 'שינוי סיסמה') {
+              onPress = () => router.push('/(tabs)/profile/change-password');
+            } else if (action === 'עזרה ותמיכה') {
+              onPress = () => router.push('/(tabs)/profile/help-support');
+            }
+
+            return (
+              <Pressable key={action} style={styles.actionRow} onPress={onPress}>
+                <Text style={styles.actionText}>{action}</Text>
+              </Pressable>
+            );
+          })}
         </View>
 
         <Pressable style={styles.logoutButton} onPress={handleLogout}>

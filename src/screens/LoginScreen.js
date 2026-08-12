@@ -1,3 +1,4 @@
+import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { I18nManager, Image, Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
@@ -108,7 +109,11 @@ export default function LoginScreen() {
                 accessibilityRole="button"
                 accessibilityLabel={showPassword ? 'הסתר סיסמה' : 'הצג סיסמה'}
                 activeOpacity={0.8}>
-                <Text style={styles.passwordTogglePlaceholder}>{showPassword ? '●' : '○'}</Text>
+                <Ionicons
+                  name={showPassword ? 'eye-outline' : 'eye-off-outline'}
+                  size={20}
+                  color={colors.textMuted}
+                />
               </TouchableOpacity>
             </View>
 

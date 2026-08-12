@@ -1,3 +1,4 @@
+import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { Image, Pressable, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
@@ -7,6 +8,7 @@ import AppInput from '../components/common/AppInput';
 import AppScreen from '../components/common/AppScreen';
 import AuthSegmentedControl from '../components/common/AuthSegmentedControl';
 import PrimaryButton from '../components/common/PrimaryButton';
+import { MIN_PASSWORD_LENGTH, PASSWORD_TOO_SHORT_MESSAGE } from '../constants/validation';
 import { useAuth } from '../context/AuthContext';
 import { colors, radius, spacing, typography } from '../theme';
 
@@ -38,8 +40,8 @@ export default function RegisterScreen() {
       return;
     }
 
-    if (password.length < 6) {
-      setErrorMessage('הסיסמה חייבת להכיל לפחות 6 תווים');
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      setErrorMessage(PASSWORD_TOO_SHORT_MESSAGE);
       return;
     }
 
@@ -147,7 +149,7 @@ export default function RegisterScreen() {
             <View style={styles.passwordFieldWrapper}>
               <AppInput
                 label="סיסמה *"
-                placeholder="לפחות 6 תווים"
+                placeholder="לפחות 8 תווים"
                 secureTextEntry={!showPassword}
                 style={styles.input}
                 inputStyle={styles.passwordInput}
@@ -160,7 +162,11 @@ export default function RegisterScreen() {
                 accessibilityRole="button"
                 accessibilityLabel={showPassword ? 'הסתר סיסמה' : 'הצג סיסמה'}
                 activeOpacity={0.8}>
-                <Text style={styles.passwordTogglePlaceholder}>{showPassword ? '●' : '○'}</Text>
+                <Ionicons
+                  name={showPassword ? 'eye-outline' : 'eye-off-outline'}
+                  size={20}
+                  color={colors.textMuted}
+                />
               </TouchableOpacity>
             </View>
 
@@ -302,10 +308,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 4,
-  },
-  passwordTogglePlaceholder: {
-    fontSize: 18,
-    color: colors.textMuted,
   },
   button: {
     marginTop: spacing.xs,
