@@ -1,15 +1,14 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { I18nManager, Image, Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-import AppCard from '../components/common/AppCard';
 import AppInput from '../components/common/AppInput';
 import AppScreen from '../components/common/AppScreen';
-import AuthSegmentedControl from '../components/common/AuthSegmentedControl';
+import AuthScreenShell from '../components/common/AuthScreenShell';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
-import { colors, radius, shadows, spacing, typography } from '../theme';
+import { colors, spacing, typography } from '../theme';
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -50,205 +49,86 @@ export default function LoginScreen() {
 
   if (authLoading) {
     return (
-      <AppScreen backgroundColor={colors.background}>
+      <AppScreen backgroundColor={colors.bgDark}>
         <View style={styles.loadingState}><Text style={styles.loadingText}>טוען...</Text></View>
       </AppScreen>
     );
   }
 
   return (
-    <AppScreen backgroundColor={colors.background}>
-      <View style={styles.screenContent}>
-        <View style={styles.backgroundGlow} />
-        <View style={styles.backgroundGlowSecondary} />
+    <AuthScreenShell
+      title="ברוכים הבאים"
+      subtitle="התחברו ל +GOLDEN והמשיכו לצבור נקודות"
+      activeTab="login"
+      onRegisterPress={() => router.push('/(auth)/register')}
+      onLoginPress={() => undefined}>
+      <AppInput
+        label="אימייל"
+        placeholder="הכניסו כתובת אימייל"
+        keyboardType="email-address"
+        autoCapitalize="none"
+        autoCorrect={false}
+        style={styles.input}
+        textAlign="left"
+        writingDirection="ltr"
+        value={email}
+        onChangeText={setEmail}
+      />
 
-        <View style={styles.heroSection}>
-          <Image
-            source={require('../assets/images/golden-light-logo-black.png')}
-            style={styles.logo}
-            resizeMode="contain"
+      <View style={styles.passwordFieldWrapper}>
+        <AppInput
+          label="סיסמה"
+          placeholder="הכניסו סיסמה"
+          secureTextEntry={!showPassword}
+          style={styles.input}
+          inputStyle={styles.passwordInput}
+          value={password}
+          onChangeText={setPassword}
+        />
+        <TouchableOpacity
+          style={styles.passwordToggle}
+          onPress={() => setShowPassword((value) => !value)}
+          accessibilityRole="button"
+          accessibilityLabel={showPassword ? 'הסתר סיסמה' : 'הצג סיסמה'}
+          activeOpacity={0.8}>
+          <Ionicons
+            name={showPassword ? 'eye-outline' : 'eye-off-outline'}
+            size={20}
+            color={colors.textMuted}
           />
-          <Text style={styles.title}>ברוכים הבאים</Text>
-          <Text style={styles.subtitle}>התחברו ל +GOLDEN והמשיכו לצבור נקודות</Text>
-
-          <AuthSegmentedControl
-            activeTab="login"
-            onRegisterPress={() => router.push('/(auth)/register')}
-            onLoginPress={() => undefined}
-          />
-        </View>
-
-        <AppCard style={styles.card}>
-          <View style={styles.formSection}>
-            <AppInput
-              label="אימייל"
-              placeholder="הכניסו כתובת אימייל"
-              keyboardType="email-address"
-              autoCapitalize="none"
-              autoCorrect={false}
-              style={styles.input}
-              textAlign="left"
-              writingDirection="ltr"
-              value={email}
-              onChangeText={setEmail}
-            />
-
-            <View style={styles.passwordFieldWrapper}>
-              <AppInput
-                label="סיסמה"
-                placeholder="הכניסו סיסמה"
-                secureTextEntry={!showPassword}
-                style={styles.input}
-                inputStyle={styles.passwordInput}
-                value={password}
-                onChangeText={setPassword}
-              />
-              <TouchableOpacity
-                style={styles.passwordToggle}
-                onPress={() => setShowPassword((value) => !value)}
-                accessibilityRole="button"
-                accessibilityLabel={showPassword ? 'הסתר סיסמה' : 'הצג סיסמה'}
-                activeOpacity={0.8}>
-                <Ionicons
-                  name={showPassword ? 'eye-outline' : 'eye-off-outline'}
-                  size={20}
-                  color={colors.textMuted}
-                />
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.forgotRow}>
-              <Pressable onPress={() => router.push('/(auth)/forgot-password')} accessibilityRole="link">
-                <Text style={styles.forgotText}>שכחתי סיסמה?</Text>
-              </Pressable>
-            </View>
-
-            {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
-
-            <PrimaryButton
-              title="התחברות"
-              onPress={handleLogin}
-              loading={loading}
-              disabled={loading}
-              style={styles.button}
-            />
-
-            <View style={styles.registerRow}>
-              <Text style={styles.registerPrompt}>עדיין אין לכם חשבון?</Text>
-              <TouchableOpacity
-                onPress={() => router.push('/(auth)/register')}
-                accessibilityRole="link"
-                activeOpacity={0.8}>
-                <Text style={styles.registerAction}>להרשמה</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </AppCard>
+        </TouchableOpacity>
       </View>
-    </AppScreen>
+
+      <View style={styles.forgotRow}>
+        <Pressable onPress={() => router.push('/(auth)/forgot-password')} accessibilityRole="link">
+          <Text style={styles.forgotText}>שכחתי סיסמה?</Text>
+        </Pressable>
+      </View>
+
+      {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
+
+      <PrimaryButton
+        title="התחברות"
+        onPress={handleLogin}
+        loading={loading}
+        disabled={loading}
+        style={styles.button}
+      />
+
+      <View style={styles.registerRow}>
+        <Text style={styles.registerPrompt}>עדיין אין לכם חשבון?</Text>
+        <TouchableOpacity
+          onPress={() => router.push('/(auth)/register')}
+          accessibilityRole="link"
+          activeOpacity={0.8}>
+          <Text style={styles.registerAction}>להרשמה</Text>
+        </TouchableOpacity>
+      </View>
+    </AuthScreenShell>
   );
 }
 
 const styles = StyleSheet.create({
-  screenContent: {
-    flex: 1,
-    width: '100%',
-    justifyContent: 'center',
-    position: 'relative',
-  },
-  backgroundGlow: {
-    position: 'absolute',
-    top: -40,
-    left: -40,
-    width: 180,
-    height: 180,
-    borderRadius: 90,
-    backgroundColor: colors.primarySoft,
-    opacity: 0.7,
-  },
-  backgroundGlowSecondary: {
-    position: 'absolute',
-    top: 80,
-    right: -30,
-    width: 140,
-    height: 140,
-    borderRadius: 70,
-    backgroundColor: colors.surfaceMuted,
-    opacity: 0.8,
-  },
-  heroSection: {
-    alignItems: 'center',
-    marginBottom: spacing.xxl,
-    paddingTop: spacing.lg,
-    zIndex: 1,
-  },
-  logo: {
-    width: 420,
-    height: 210,
-    alignSelf: 'center',
-  },
-  title: {
-    fontSize: typography.heading.fontSize,
-    lineHeight: typography.heading.lineHeight,
-    fontWeight: typography.heading.fontWeight,
-    color: colors.text,
-    textAlign: 'center',
-    marginBottom: spacing.sm,
-  },
-  subtitle: {
-    fontSize: typography.body.fontSize,
-    lineHeight: typography.body.lineHeight,
-    color: colors.textMuted,
-    textAlign: 'center',
-    maxWidth: 280,
-    marginBottom: spacing.lg,
-  },
-  segmentedControl: {
-    flexDirection: I18nManager.isRTL ? 'row-reverse' : 'row',
-    width: '100%',
-    maxWidth: 380,
-    alignSelf: 'center',
-    borderWidth: 1,
-    borderColor: '#E8ECEF',
-    borderRadius: 20,
-    padding: 4,
-    backgroundColor: 'rgba(255,255,255,0.7)',
-    marginBottom: spacing.lg,
-  },
-  segmentTab: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 52,
-    borderRadius: 16,
-    backgroundColor: 'transparent',
-    paddingHorizontal: spacing.md,
-  },
-  activeTab: {
-    backgroundColor: colors.primary,
-    marginHorizontal: 2,
-  },
-  segmentText: {
-    fontSize: typography.button.fontSize,
-    lineHeight: typography.button.lineHeight,
-    fontWeight: '600',
-    color: colors.textMuted,
-  },
-  activeSegmentText: {
-    color: colors.black,
-  },
-  card: {
-    width: '100%',
-    maxWidth: 380,
-    alignSelf: 'center',
-    borderRadius: radius.xl,
-    backgroundColor: colors.surface,
-    ...shadows.premiumCard,
-  },
-  formSection: {
-    width: '100%',
-    alignItems: 'stretch',
-  },
   input: {
     marginBottom: spacing.md,
   },
@@ -289,10 +169,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   loadingText: {
-    color: colors.textMuted,
+    color: colors.textOnDark,
     fontSize: typography.body.fontSize,
     textAlign: 'center',
   },
+  // The form card is light again (colors.cardLight) - back to the standard
+  // light-surface error color.
   errorText: {
     color: colors.error,
     fontSize: typography.caption.fontSize,

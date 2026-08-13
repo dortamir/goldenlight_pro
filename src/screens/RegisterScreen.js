@@ -1,16 +1,15 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Image, Pressable, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
-import AppCard from '../components/common/AppCard';
 import AppInput from '../components/common/AppInput';
 import AppScreen from '../components/common/AppScreen';
-import AuthSegmentedControl from '../components/common/AuthSegmentedControl';
+import AuthScreenShell from '../components/common/AuthScreenShell';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { MIN_PASSWORD_LENGTH, PASSWORD_TOO_SHORT_MESSAGE } from '../constants/validation';
 import { useAuth } from '../context/AuthContext';
-import { colors, radius, shadows, spacing, typography } from '../theme';
+import { colors, radius, spacing, typography } from '../theme';
 
 export default function RegisterScreen() {
   const router = useRouter();
@@ -73,190 +72,105 @@ export default function RegisterScreen() {
 
   if (authLoading) {
     return (
-      <AppScreen backgroundColor={colors.background}>
+      <AppScreen backgroundColor={colors.bgDark}>
         <View style={styles.loadingState}><Text style={styles.loadingText}>טוען...</Text></View>
       </AppScreen>
     );
   }
 
   return (
-    <AppScreen backgroundColor={colors.background}>
-      <View style={styles.screenContent}>
-        <View style={styles.backgroundGlow} />
-        <View style={styles.backgroundGlowSecondary} />
+    <AuthScreenShell
+      title="פתיחת חשבון"
+      subtitle="הצטרפו ל +GOLDEN והתחילו לצבור נקודות"
+      activeTab="register"
+      onRegisterPress={() => undefined}
+      onLoginPress={() => router.push('/(auth)/login')}>
+      <AppInput
+        label="שם מלא *"
+        placeholder="הכניסו שם מלא"
+        style={styles.input}
+        value={fullName}
+        onChangeText={setFullName}
+      />
 
-        <View style={styles.heroSection}>
-          <Image
-            source={require('../assets/images/golden-light-logo-black.png')}
-            style={styles.logo}
-            resizeMode="contain"
+      <AppInput
+        label="טלפון *"
+        placeholder="050-1234567"
+        keyboardType="phone-pad"
+        style={styles.input}
+        value={phone}
+        onChangeText={setPhone}
+      />
+
+      <View style={styles.professionWrapper}>
+        <Text style={styles.professionLabel}>מקצוע</Text>
+        <Pressable style={styles.professionField} accessibilityRole="button">
+          <TextInput
+            placeholder="בחרו מקצוע..."
+            value={profession}
+            onChangeText={setProfession}
+            style={styles.professionPlaceholder}
+            placeholderTextColor={colors.textMuted}
           />
-          <Text style={styles.title}>פתיחת חשבון</Text>
-          <Text style={styles.subtitle}>הצטרפו ל +GOLDEN והתחילו לצבור נקודות</Text>
-
-          <AuthSegmentedControl
-            activeTab="register"
-            onRegisterPress={() => undefined}
-            onLoginPress={() => router.push('/(auth)/login')}
-          />
-        </View>
-
-        <AppCard style={styles.card}>
-          <View style={styles.formSection}>
-            <AppInput
-              label="שם מלא *"
-              placeholder="הכניסו שם מלא"
-              style={styles.input}
-              value={fullName}
-              onChangeText={setFullName}
-            />
-
-            <AppInput
-              label="טלפון *"
-              placeholder="050-1234567"
-              keyboardType="phone-pad"
-              style={styles.input}
-              value={phone}
-              onChangeText={setPhone}
-            />
-
-            <View style={styles.professionWrapper}>
-              <Text style={styles.professionLabel}>מקצוע</Text>
-              <Pressable style={styles.professionField} accessibilityRole="button">
-                <TextInput
-                  placeholder="בחרו מקצוע..."
-                  value={profession}
-                  onChangeText={setProfession}
-                  style={styles.professionPlaceholder}
-                  placeholderTextColor={colors.textMuted}
-                />
-              </Pressable>
-            </View>
-
-            <AppInput
-              label="אימייל *"
-              placeholder="you@example.com"
-              keyboardType="email-address"
-              autoCapitalize="none"
-              autoCorrect={false}
-              style={styles.input}
-              textAlign="left"
-              writingDirection="ltr"
-              value={email}
-              onChangeText={setEmail}
-            />
-
-            <View style={styles.passwordFieldWrapper}>
-              <AppInput
-                label="סיסמה *"
-                placeholder="לפחות 8 תווים"
-                secureTextEntry={!showPassword}
-                style={styles.input}
-                inputStyle={styles.passwordInput}
-                value={password}
-                onChangeText={setPassword}
-              />
-              <TouchableOpacity
-                style={styles.passwordToggle}
-                onPress={() => setShowPassword((value) => !value)}
-                accessibilityRole="button"
-                accessibilityLabel={showPassword ? 'הסתר סיסמה' : 'הצג סיסמה'}
-                activeOpacity={0.8}>
-                <Ionicons
-                  name={showPassword ? 'eye-outline' : 'eye-off-outline'}
-                  size={20}
-                  color={colors.textMuted}
-                />
-              </TouchableOpacity>
-            </View>
-
-            {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
-            {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
-
-            <PrimaryButton title="פתיחת חשבון" onPress={handleRegister} loading={loading} disabled={loading} style={styles.button} />
-
-            <View style={styles.registerRow}>
-              <Text style={styles.registerPrompt}>כבר רשומים?</Text>
-              <TouchableOpacity
-                onPress={() => router.push('/(auth)/login')}
-                accessibilityRole="link"
-                activeOpacity={0.8}>
-                <Text style={styles.registerAction}>התחברו</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </AppCard>
+        </Pressable>
       </View>
-    </AppScreen>
+
+      <AppInput
+        label="אימייל *"
+        placeholder="you@example.com"
+        keyboardType="email-address"
+        autoCapitalize="none"
+        autoCorrect={false}
+        style={styles.input}
+        textAlign="left"
+        writingDirection="ltr"
+        value={email}
+        onChangeText={setEmail}
+      />
+
+      <View style={styles.passwordFieldWrapper}>
+        <AppInput
+          label="סיסמה *"
+          placeholder="לפחות 8 תווים"
+          secureTextEntry={!showPassword}
+          style={styles.input}
+          inputStyle={styles.passwordInput}
+          value={password}
+          onChangeText={setPassword}
+        />
+        <TouchableOpacity
+          style={styles.passwordToggle}
+          onPress={() => setShowPassword((value) => !value)}
+          accessibilityRole="button"
+          accessibilityLabel={showPassword ? 'הסתר סיסמה' : 'הצג סיסמה'}
+          activeOpacity={0.8}>
+          <Ionicons
+            name={showPassword ? 'eye-outline' : 'eye-off-outline'}
+            size={20}
+            color={colors.textMuted}
+          />
+        </TouchableOpacity>
+      </View>
+
+      {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
+      {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
+
+      <PrimaryButton title="פתיחת חשבון" onPress={handleRegister} loading={loading} disabled={loading} style={styles.button} />
+
+      <View style={styles.registerRow}>
+        <Text style={styles.registerPrompt}>כבר רשומים?</Text>
+        <TouchableOpacity
+          onPress={() => router.push('/(auth)/login')}
+          accessibilityRole="link"
+          activeOpacity={0.8}>
+          <Text style={styles.registerAction}>התחברו</Text>
+        </TouchableOpacity>
+      </View>
+    </AuthScreenShell>
   );
 }
 
 const styles = StyleSheet.create({
-  screenContent: {
-    flex: 1,
-    width: '100%',
-    justifyContent: 'center',
-    position: 'relative',
-  },
-  backgroundGlow: {
-    position: 'absolute',
-    top: -40,
-    left: -40,
-    width: 180,
-    height: 180,
-    borderRadius: 90,
-    backgroundColor: colors.primarySoft,
-    opacity: 0.7,
-  },
-  backgroundGlowSecondary: {
-    position: 'absolute',
-    top: 80,
-    right: -30,
-    width: 140,
-    height: 140,
-    borderRadius: 70,
-    backgroundColor: colors.surfaceMuted,
-    opacity: 0.8,
-  },
-  heroSection: {
-    alignItems: 'center',
-    marginBottom: spacing.xxl,
-    paddingTop: spacing.lg,
-    zIndex: 1,
-  },
-  logo: {
-    width: 420,
-    height: 210,
-    alignSelf: 'center',
-  },
-  title: {
-    fontSize: typography.heading.fontSize,
-    lineHeight: typography.heading.lineHeight,
-    fontWeight: typography.heading.fontWeight,
-    color: colors.text,
-    textAlign: 'center',
-    marginBottom: spacing.sm,
-  },
-  subtitle: {
-    fontSize: typography.body.fontSize,
-    lineHeight: typography.body.lineHeight,
-    color: colors.textMuted,
-    textAlign: 'center',
-    maxWidth: 280,
-    marginBottom: spacing.lg,
-  },
-  card: {
-    width: '100%',
-    maxWidth: 380,
-    alignSelf: 'center',
-    borderRadius: radius.xl,
-    backgroundColor: colors.surface,
-    ...shadows.premiumCard,
-  },
-  formSection: {
-    width: '100%',
-    alignItems: 'stretch',
-  },
   input: {
     marginBottom: spacing.md,
   },
@@ -315,10 +229,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   loadingText: {
-    color: colors.textMuted,
+    color: colors.textOnDark,
     fontSize: typography.body.fontSize,
     textAlign: 'center',
   },
+  // The form card is light again (colors.cardLight) - back to the standard
+  // light-surface error color.
   errorText: {
     color: colors.error,
     fontSize: typography.caption.fontSize,

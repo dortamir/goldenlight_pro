@@ -14,16 +14,26 @@ export default function AppInput({
   inputStyle,
   textAlign = 'right',
   writingDirection = 'rtl',
+  // Optional overrides for the field's own surface and the label text,
+  // e.g. so a screen on a dark background can theme its inputs without
+  // this component needing to know it's ever used on anything but a light
+  // surface. Both are purely additive - omitted everywhere except the auth
+  // screens, so every existing call site renders exactly as before. Applied
+  // *after* the focus/error state colors below so a caller's default-state
+  // override never accidentally masks the focus/error indicator.
+  containerStyle,
+  labelStyle,
   ...props
 }) {
   const [isFocused, setIsFocused] = useState(false);
 
   return (
     <View style={[styles.wrapper, style]}>
-      {label ? <Text style={styles.label}>{label}</Text> : null}
+      {label ? <Text style={[styles.label, labelStyle]}>{label}</Text> : null}
       <Pressable
         style={[
           styles.container,
+          containerStyle,
           isFocused && styles.focused,
           error ? styles.error : null,
         ]}>

@@ -1,3 +1,5 @@
+import { colors } from './colors';
+
 export const shadows = {
   none: {
     shadowColor: 'transparent',
@@ -45,6 +47,27 @@ export const shadows = {
     shadowRadius: 26,
     shadowOffset: { width: 0, height: 14 },
     elevation: 7,
+  },
+  // A turquoise glow (not a black shadow) for dark hero cards - e.g. the
+  // points-balance card. Kept low-opacity/large-blur so it reads as an
+  // ambient glow, never a harsh colored drop shadow.
+  glow: {
+    shadowColor: colors.primary,
+    shadowOpacity: 0.25,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
+  },
+  // Subtle turquoise lift for primary CTAs. Values intentionally match what
+  // PrimaryButton.js currently hardcodes inline - that inline copy will be
+  // migrated to reference this token directly in the next stage, not
+  // changed visually.
+  buttonGlow: {
+    shadowColor: colors.primaryPressed,
+    shadowOpacity: 0.22,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
 };
 

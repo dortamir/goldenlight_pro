@@ -1,11 +1,24 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Font from 'expo-font';
-import { Stack } from 'expo-router';
+import { DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 import { useEffect } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { AuthProvider } from '../src/context/AuthContext';
 import { supabase, supabaseConfigStatus } from '../src/services/supabase';
+
+// React Navigation wraps every screen in its own opaque "Background",
+// filled with the current navigation theme's `colors.background` (the
+// stock default is rgb(242, 242, 242)) - independent of any screen's own
+// content. Every screen in this app already paints its own explicit,
+// opaque background via AppScreen, so overriding just this one theme color
+// to transparent app-wide is invisible everywhere except where a screen
+// deliberately wants to see through it (AuthScreenShell, for the Login/
+// Register dark gradient - see app/(auth)/_layout.js).
+const transparentBackgroundTheme = {
+  ...DefaultTheme,
+  colors: { ...DefaultTheme.colors, background: 'transparent' },
+};
 
 export default function RootLayout() {
   useEffect(() => {
@@ -43,7 +56,9 @@ export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <AuthProvider>
-        <Stack screenOptions={{ headerShown: false }} />
+        <ThemeProvider value={transparentBackgroundTheme}>
+          <Stack screenOptions={{ headerShown: false }} />
+        </ThemeProvider>
       </AuthProvider>
     </SafeAreaProvider>
   );

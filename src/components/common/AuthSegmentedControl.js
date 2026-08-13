@@ -28,16 +28,19 @@ export default function AuthSegmentedControl({
 }
 
 const styles = StyleSheet.create({
+  // This control is only ever rendered on the dark auth-screen gradient (see
+  // AuthScreenShell) - styled for that context specifically, not as a
+  // general-purpose light-background component.
   segmentedControl: {
     flexDirection: I18nManager.isRTL ? 'row-reverse' : 'row',
     width: '100%',
     maxWidth: 380,
     alignSelf: 'center',
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: 'rgba(245, 247, 247, 0.16)',
     borderRadius: 20,
     padding: 4,
-    backgroundColor: 'rgba(255,255,255,0.7)',
+    backgroundColor: 'rgba(245, 247, 247, 0.08)',
     marginBottom: spacing.lg,
   },
   segmentTab: {
@@ -49,6 +52,9 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
     paddingHorizontal: spacing.md,
   },
+  // Turquoise is the only active-state indicator, matching every other
+  // active-state treatment in the app (active tab, primary CTA) - no glow
+  // added here, it stays a plain, clear fill.
   activeTab: {
     backgroundColor: colors.primary,
     marginHorizontal: 2,
@@ -57,7 +63,7 @@ const styles = StyleSheet.create({
     fontSize: typography.button.fontSize,
     lineHeight: typography.button.lineHeight,
     fontWeight: '600',
-    color: colors.textMuted,
+    color: colors.mutedOnDark,
   },
   activeSegmentText: {
     color: colors.black,

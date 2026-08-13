@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
+import PointsBalanceCard from '../components/common/PointsBalanceCard';
 import { useAuth } from '../context/AuthContext';
 import { getProfile } from '../services/profileService';
 import { colors, shadows, spacing, typography } from '../theme';
@@ -112,35 +113,21 @@ export default function RewardsScreen() {
           <Text style={styles.subtitle}>ממשו את הנקודות שלכם להטבות ומתנות</Text>
         </View>
 
-        <View style={styles.summaryCard}>
-          <Text style={styles.summaryLabel}>יתרת הנקודות שלך</Text>
-          {loading ? (
-            <View style={styles.summaryLoading}>
-              <ActivityIndicator color={colors.primary} size="small" />
-            </View>
-          ) : error ? (
-            <View style={styles.summaryErrorWrap}>
-              <Text style={styles.summaryErrorText}>{error}</Text>
-              <Pressable
-                onPress={() =>
-                  user?.id &&
-                  getProfile(user.id)
-                    .then((data) => {
-                      setProfile(data);
-                      setError('');
-                    })
-                    .catch(() => setError('לא הצלחנו לטעון את יתרת הנקודות'))
-                }>
-                <Text style={styles.retryText}>נסו שוב</Text>
-              </Pressable>
-            </View>
-          ) : (
-            <>
-              <Text style={styles.pointsValue}>{`${formatNumber(pointsBalance)} נק׳`}</Text>
-              <Text style={styles.summaryMeta}>זמינות למימוש</Text>
-            </>
-          )}
-        </View>
+        <PointsBalanceCard
+          pointsBalance={pointsBalance}
+          meta="זמינות למימוש"
+          loading={loading}
+          error={error}
+          onRetry={() =>
+            user?.id &&
+            getProfile(user.id)
+              .then((data) => {
+                setProfile(data);
+                setError('');
+              })
+              .catch(() => setError('לא הצלחנו לטעון את יתרת הנקודות'))
+          }
+        />
 
         <View style={styles.filterRow}>
           {filters.map((filter) => {
@@ -241,60 +228,6 @@ const styles = StyleSheet.create({
     textAlign: 'right',
     marginTop: spacing.xs,
     lineHeight: 18,
-  },
-  summaryCard: {
-    backgroundColor: colors.charcoal,
-    borderRadius: 20,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.lg,
-    borderWidth: 1,
-    borderColor: colors.charcoalBorder,
-    ...shadows.premiumCard,
-    alignItems: 'flex-end',
-  },
-  summaryLabel: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '600',
-    color: colors.mutedOnDark,
-    textAlign: 'right',
-  },
-  pointsValue: {
-    fontSize: 28,
-    fontWeight: '700',
-    color: colors.primary,
-    textAlign: 'right',
-    marginTop: spacing.xs,
-  },
-  summaryMeta: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '500',
-    color: colors.mutedOnDark,
-    textAlign: 'right',
-    marginTop: 2,
-  },
-  summaryLoading: {
-    minHeight: 40,
-    justifyContent: 'center',
-    alignItems: 'flex-end',
-    marginTop: spacing.xs,
-  },
-  summaryErrorWrap: {
-    minHeight: 40,
-    alignItems: 'flex-end',
-    gap: spacing.xs,
-    marginTop: spacing.xs,
-  },
-  summaryErrorText: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '600',
-    color: colors.error,
-    textAlign: 'right',
-  },
-  retryText: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '700',
-    color: colors.primary,
-    textAlign: 'right',
   },
   filterRow: {
     flexDirection: 'row-reverse',
