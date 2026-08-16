@@ -1,12 +1,15 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import { useMemo, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { router } from 'expo-router';
+import { useCallback, useMemo, useState } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
+import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
 import { submitPurchaseReceipt } from '../services/purchaseReportService';
-import { colors, shadows, spacing, typography } from '../theme';
+import { colors, radius, shadows, spacing, typography } from '../theme';
 
 const uploadOptions = [
   {
@@ -47,6 +50,31 @@ export default function PurchaseScreen() {
   const [status, setStatus] = useState('מוכן לשליחה');
   const [error, setError] = useState('');
   const [isUploading, setIsUploading] = useState(false);
+  const [rootHeight, setRootHeight] = useState(0);
+  const [heroHeight, setHeroHeight] = useState(0);
+
+  // Same measured-minHeight approach as HomeScreen/ProfileScreen's dark
+  // hero + light sheet (see HomeScreen for the full explanation) -
+  // guarantees the light sheet reaches the bottom of the real screen
+  // regardless of the flex-grow chain between here and the ScrollView.
+  const onRootLayout = useCallback((event) => {
+    setRootHeight(event.nativeEvent.layout.height);
+  }, []);
+  const onHeroLayout = useCallback((event) => {
+    setHeroHeight(event.nativeEvent.layout.height);
+  }, []);
+  const sheetMinHeight =
+    rootHeight > 0 && heroHeight > 0 ? rootHeight - heroHeight + radius.xl : undefined;
+
+  // Normal back-navigation history only - no hardcoded destination. If this
+  // screen was somehow reached with no history to return to (e.g. a direct
+  // deep link), this intentionally does nothing rather than guessing a
+  // fallback route.
+  const handleBack = () => {
+    if (router.canGoBack()) {
+      router.back();
+    }
+  };
 
   const handlePickReceipt = async (mode) => {
     try {
@@ -151,24 +179,44 @@ export default function PurchaseScreen() {
       return null;
     }
 
+    const isSent = status === 'החשבונית נשלחה לבדיקה';
+
     return (
       <View style={styles.receiptCard}>
         <View style={styles.receiptHeader}>
           <Text style={styles.receiptTitle}>חשבונית נבחרה</Text>
-          <Text style={styles.receiptStatus}>{status}</Text>
+          <View style={[styles.receiptStatusPill, isSent && styles.receiptStatusPillSent]}>
+            <Text style={[styles.receiptStatusText, isSent && styles.receiptStatusTextSent]} numberOfLines={1}>
+              {status}
+            </Text>
+          </View>
         </View>
 
-        <Text style={styles.receiptName}>{selectedReceipt.name}</Text>
-        <Text style={styles.receiptMeta}>מוכן לשליחה</Text>
+        <View style={styles.receiptFileRow}>
+          <View style={styles.receiptFileIconWrap}>
+            <Ionicons name="document-attach-outline" size={18} color={colors.primary} />
+          </View>
+          <View style={styles.receiptFileInfo}>
+            <Text style={styles.receiptName} numberOfLines={1}>
+              {selectedReceipt.name}
+            </Text>
+            <Text style={styles.receiptMeta}>מוכן לשליחה</Text>
+          </View>
+        </View>
 
-        {status === 'החשבונית נשלחה לבדיקה' ? (
+        {isSent ? (
           <View style={styles.successBox}>
+            <Ionicons name="checkmark-circle-outline" size={18} color={colors.success} />
             <Text style={styles.successText}>נעדכן אתכם כשהנקודות יתווספו לחשבון</Text>
           </View>
         ) : (
-          <Pressable style={[styles.submitButton, isUploading && styles.submitButtonDisabled]} onPress={handleSubmit} disabled={isUploading}>
-            {isUploading ? <ActivityIndicator color={colors.white} /> : <Text style={styles.submitButtonText}>שליחה לסריקה</Text>}
-          </Pressable>
+          <PrimaryButton
+            title="שליחה לסריקה"
+            onPress={handleSubmit}
+            loading={isUploading}
+            disabled={isUploading}
+            style={styles.submitButton}
+          />
         )}
 
         {error ? <Text style={styles.errorText}>{error}</Text> : null}
@@ -177,148 +225,262 @@ export default function PurchaseScreen() {
   }, [error, handleSubmit, isUploading, selectedReceipt, status]);
 
   return (
-    <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
-      <View style={styles.container}>
-        <View style={styles.header}>
-          <Text style={styles.title}>דיווח רכישה</Text>
-          <Text style={styles.subtitle}>צלמו או העלו חשבונית ואנחנו נחשב את הנקודות שלכם</Text>
+    <View style={styles.root} onLayout={onRootLayout}>
+      {/* Full-bleed dark hero, same technique/tokens as HomeScreen/
+          ProfileScreen's own hero (see HomeScreen for the full
+          explanation) - keeps every premium dark surface visually
+          identical across screens. */}
+      <LinearGradient
+        colors={[colors.bgDark, colors.charcoal]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={styles.heroGradient}
+      />
+
+      <AppScreen
+        backgroundColor="transparent"
+        contentContainerStyle={styles.screenContent}
+        style={styles.screenInner}
+        // No bottom edge - same reasoning as HomeScreen/ProfileScreen
+        // (nested under the (tabs) bottom bar, which already provides its
+        // own clearance).
+        edges={['top', 'left', 'right']}>
+        <View style={styles.heroSection} onLayout={onHeroLayout}>
+          <View style={styles.heroInner}>
+            <Pressable
+              onPress={handleBack}
+              hitSlop={6}
+              accessibilityRole="button"
+              accessibilityLabel="חזרה"
+              style={({ pressed }) => [styles.backButton, pressed && styles.backButtonPressed]}>
+              <Ionicons name="chevron-forward" size={24} color={colors.textOnDark} />
+            </Pressable>
+            <View style={styles.heroTitleBlock}>
+              <Text style={styles.title}>דיווח רכישה</Text>
+              <Text style={styles.subtitle}>צלמו או העלו חשבונית ואנחנו נחשב את הנקודות שלכם</Text>
+            </View>
+          </View>
         </View>
 
-        <View style={styles.uploadCard}>
-          <View style={styles.uploadHeader}>
-            <Text style={styles.cardTitle}>העלאת חשבונית</Text>
-            <Text style={styles.cardSubtitle}>ניתן לצלם חשבונית חדשה או לבחור תמונה קיימת</Text>
-          </View>
+        {/* Light content sheet - same full-bleed/rounded-top/measured-
+            minHeight pattern as HomeScreen/ProfileScreen's own sheet. */}
+        <View style={[styles.sheet, sheetMinHeight ? { minHeight: sheetMinHeight } : null]}>
+          <View style={styles.sheetInner}>
+            <View style={styles.section}>
 
-          <View style={styles.actionsStack}>
-            {uploadOptions.map((option) => (
-              <Pressable
-                key={option.key}
-                style={({ pressed }) => [
-                  styles.optionCard,
-                  pressed && !isUploading && styles.optionCardPressed,
-                  isUploading && styles.optionCardDisabled,
-                ]}
-                onPress={() => handlePickReceipt(option.key === 'camera' ? 'camera' : 'gallery')}
-                disabled={isUploading}>
-                <View style={styles.optionIconWrap}>
-                  <Ionicons name={option.icon} size={20} color={colors.primary} />
+              <View style={styles.optionsRow}>
+                {uploadOptions.map((option) => (
+                  <Pressable
+                    key={option.key}
+                    style={({ pressed }) => [
+                      styles.optionCard,
+                      pressed && !isUploading && styles.optionCardPressed,
+                      isUploading && styles.optionCardDisabled,
+                    ]}
+                    onPress={() => handlePickReceipt(option.key === 'camera' ? 'camera' : 'gallery')}
+                    disabled={isUploading}>
+                    <View style={styles.optionIconWrap}>
+                      <Ionicons name={option.icon} size={20} color={colors.primary} />
+                    </View>
+                    <Text style={styles.optionTitle}>{option.title}</Text>
+                    <Text style={styles.optionSubtitle}>{option.subtitle}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+
+            {receiptCard}
+
+            <View style={styles.tipsCard}>
+              <Text style={styles.tipsTitle}>כדי שנוכל לזהות את החשבונית</Text>
+              <View style={styles.tipsList}>
+                {tips.map((tip) => (
+                  <Text key={tip} style={styles.tipItem}>• {tip}</Text>
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.infoCard}>
+              <View style={styles.infoHeader}>
+                <View style={styles.infoIconWrap}>
+                  <Ionicons name="information-circle-outline" size={18} color={colors.primary} />
                 </View>
-                <Text style={styles.optionTitle}>{option.title}</Text>
-                <Text style={styles.optionSubtitle}>{option.subtitle}</Text>
-              </Pressable>
-            ))}
+                <Text style={styles.infoTitle}>מה קורה אחרי ההעלאה?</Text>
+              </View>
+              <View style={styles.stepsList}>
+                <Text style={styles.stepItem}>1. אנחנו סורקים את החשבונית</Text>
+                <Text style={styles.stepItem}>2. מזהים את מוצרי Golden Light</Text>
+                <Text style={styles.stepItem}>3. מחשבים ומעדכנים את הנקודות</Text>
+              </View>
+            </View>
           </View>
         </View>
-
-        {receiptCard}
-
-        <View style={styles.infoCard}>
-          <Text style={styles.infoTitle}>מה קורה אחרי ההעלאה?</Text>
-          <View style={styles.stepsList}>
-            <Text style={styles.stepItem}>1. אנחנו סורקים את החשבונית</Text>
-            <Text style={styles.stepItem}>2. מזהים את מוצרי Golden Light</Text>
-            <Text style={styles.stepItem}>3. מחשבים ומעדכנים את הנקודות</Text>
-          </View>
-        </View>
-
-        <View style={styles.tipsCard}>
-          <Text style={styles.tipsTitle}>כדי שנוכל לזהות את החשבונית</Text>
-          <View style={styles.tipsList}>
-            {tips.map((tip) => (
-              <Text key={tip} style={styles.tipItem}>• {tip}</Text>
-            ))}
-          </View>
-        </View>
-      </View>
-    </AppScreen>
+      </AppScreen>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  screenContent: {
-    justifyContent: 'flex-start',
-    alignItems: 'stretch',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xl,
+  root: {
+    flex: 1,
+    backgroundColor: colors.background,
   },
-  container: {
+  heroGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  // Same cancel-AppScreen's-own-wrapper technique as HomeScreen/ProfileScreen
+  // (see HomeScreen's screenInner comment for the full flex-chain
+  // explanation).
+  screenInner: {
+    flex: 1,
     width: '100%',
-    gap: spacing.lg,
+    maxWidth: '100%',
+    alignSelf: 'stretch',
+    paddingHorizontal: 0,
+    paddingVertical: 0,
   },
-  header: {
+  screenContent: {
+    flexGrow: 1,
+  },
+  heroSection: {
+    paddingTop: spacing.sm,
+    // Extra bottom padding absorbs the sheet's negative marginTop overlap
+    // below (see `sheet`), so the rounded corners never cut into the hero
+    // text.
+    paddingBottom: spacing.xxl + radius.xl,
+  },
+  heroInner: {
+    width: '100%',
+    maxWidth: 480,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.lg,
+    position: 'relative',
+  },
+  // Absolute top-right, same technique as ChangePasswordScreen/
+  // EditProfileScreen's own header back button - anchored independently of
+  // heroTitleBlock's own text flow, which reserves matching space via
+  // paddingEnd below so the title/subtitle never run under it.
+  backButton: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    zIndex: 1,
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  backButtonPressed: {
+    opacity: 0.6,
+  },
+  heroTitleBlock: {
+    width: '100%',
     alignItems: 'flex-end',
-    paddingBottom: spacing.xs,
+    paddingEnd: 56,
   },
   title: {
     fontSize: typography.title.fontSize,
     fontWeight: typography.title.fontWeight,
-    color: colors.text,
+    color: colors.textOnDark,
     textAlign: 'right',
   },
   subtitle: {
     fontSize: typography.caption.fontSize,
     fontWeight: '500',
-    color: colors.textMuted,
+    color: colors.mutedOnDark,
     textAlign: 'right',
     marginTop: spacing.xs,
     lineHeight: 18,
   },
-  uploadCard: {
-    backgroundColor: colors.white,
-    borderRadius: 20,
-    padding: spacing.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
-    ...shadows.softCard,
+  sheet: {
+    flex: 1,
+    backgroundColor: colors.background,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    marginTop: -radius.xl,
   },
-  uploadHeader: {
-    alignItems: 'flex-end',
-    marginBottom: spacing.md,
+  sheetInner: {
+    width: '100%',
+    maxWidth: 480,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.xl,
+    paddingBottom: spacing.xxl,
+    gap: spacing.lg,
   },
-  cardTitle: {
-    fontSize: typography.body.fontSize,
+  section: {
+    gap: spacing.md,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+  },
+  sectionHeadingGroup: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  sectionTitle: {
+    fontSize: 18,
     fontWeight: '700',
+    lineHeight: 24,
     color: colors.text,
     textAlign: 'right',
   },
-  cardSubtitle: {
+  sectionAccentDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.primary,
+  },
+  // Negative marginTop pulls this right under the heading row (matching
+  // `section`'s own gap:spacing.md rhythm) instead of stacking an extra
+  // gap on top of it, since it isn't part of `section`'s own gap flow.
+  sectionSubtitle: {
     fontSize: typography.caption.fontSize,
     fontWeight: '500',
     color: colors.textMuted,
     textAlign: 'right',
-    marginTop: spacing.xs,
+    marginTop: -spacing.sm,
   },
-  actionsStack: {
-    gap: spacing.sm,
+  // Same flex:1-in-a-gap-row pattern as HomeScreen's actionsRow/actionCard -
+  // the two upload choices read as one consistent pair of premium action
+  // cards, the same visual language as Quick Actions on Home.
+  optionsRow: {
+    flexDirection: 'row-reverse',
+    gap: spacing.md,
+    alignItems: 'stretch',
   },
   optionCard: {
+    flex: 1,
     backgroundColor: colors.white,
-    borderRadius: 14,
+    borderRadius: radius.lg,
     paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    paddingVertical: spacing.xl,
     borderWidth: 1,
     borderColor: colors.border,
-    alignItems: 'flex-end',
-    minHeight: 84,
-    justifyContent: 'center',
     ...shadows.softCard,
+    alignItems: 'flex-end',
+    minHeight: 132,
+    justifyContent: 'center',
   },
+  // Subtle turquoise border on press instead of a heavier neon glow/opacity
+  // dip - stays premium and restrained (matching actionCardPressed on Home).
   optionCardPressed: {
-    backgroundColor: colors.primarySoft,
     borderColor: colors.primary,
+    opacity: 0.97,
   },
   optionCardDisabled: {
-    opacity: 0.7,
+    opacity: 0.6,
   },
   optionIconWrap: {
-    width: 34,
-    height: 34,
-    borderRadius: 11,
+    width: 40,
+    height: 40,
+    borderRadius: 14,
     backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: spacing.xs,
+    marginBottom: spacing.sm,
   },
   optionTitle: {
     fontSize: typography.body.fontSize,
@@ -331,20 +493,21 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     color: colors.textMuted,
     textAlign: 'right',
-    marginTop: 4,
+    marginTop: spacing.xs,
   },
   receiptCard: {
     backgroundColor: colors.white,
-    borderRadius: 18,
+    borderRadius: radius.lg,
     padding: spacing.lg,
     borderWidth: 1,
-    borderColor: colors.primarySoft,
+    borderColor: colors.border,
     ...shadows.softCard,
   },
   receiptHeader: {
     flexDirection: 'row-reverse',
     justifyContent: 'space-between',
     alignItems: 'center',
+    gap: spacing.sm,
   },
   receiptTitle: {
     fontSize: typography.body.fontSize,
@@ -352,49 +515,70 @@ const styles = StyleSheet.create({
     color: colors.text,
     textAlign: 'right',
   },
-  receiptStatus: {
-    fontSize: typography.caption.fontSize,
+  receiptStatusPill: {
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    backgroundColor: colors.primarySoft,
+    flexShrink: 1,
+  },
+  receiptStatusPillSent: {
+    backgroundColor: colors.successSoft,
+  },
+  receiptStatusText: {
+    fontSize: 11,
     fontWeight: '700',
-    color: colors.primary,
-    textAlign: 'right',
+    color: colors.primaryPressed,
+    textAlign: 'center',
+  },
+  receiptStatusTextSent: {
+    color: colors.success,
+  },
+  receiptFileRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  receiptFileIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  receiptFileInfo: {
+    flex: 1,
+    alignItems: 'flex-end',
   },
   receiptName: {
     fontSize: typography.caption.fontSize,
-    fontWeight: '500',
-    color: colors.textMuted,
+    fontWeight: '600',
+    color: colors.text,
     textAlign: 'right',
-    marginTop: spacing.sm,
   },
   receiptMeta: {
-    fontSize: typography.caption.fontSize,
+    fontSize: 11,
     fontWeight: '500',
     color: colors.textMuted,
     textAlign: 'right',
     marginTop: 2,
   },
   submitButton: {
-    marginTop: spacing.md,
-    backgroundColor: colors.primary,
-    borderRadius: 12,
-    paddingVertical: spacing.md,
-    alignItems: 'center',
-  },
-  submitButtonDisabled: {
-    opacity: 0.7,
-  },
-  submitButtonText: {
-    fontSize: typography.button.fontSize,
-    fontWeight: typography.button.fontWeight,
-    color: colors.white,
-    textAlign: 'center',
+    marginTop: spacing.lg,
   },
   successBox: {
-    marginTop: spacing.md,
-    backgroundColor: colors.primarySoft,
-    borderRadius: 12,
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginTop: spacing.lg,
+    backgroundColor: colors.successSoft,
+    borderRadius: radius.md,
     padding: spacing.md,
   },
   successText: {
+    flex: 1,
     fontSize: typography.caption.fontSize,
     fontWeight: '600',
     color: colors.text,
@@ -407,12 +591,26 @@ const styles = StyleSheet.create({
     textAlign: 'right',
     marginTop: spacing.sm,
   },
+  // Light turquoise tint (not a heavy shadowed white card) - reads as the
+  // primary explainer, one step more prominent than the neutral tips card
+  // below it.
   infoCard: {
-    backgroundColor: colors.white,
-    borderRadius: 18,
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.lg,
     padding: spacing.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
+  },
+  infoHeader: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  infoIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 10,
+    backgroundColor: colors.white,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   infoTitle: {
     fontSize: typography.body.fontSize,
@@ -427,13 +625,15 @@ const styles = StyleSheet.create({
   stepItem: {
     fontSize: typography.caption.fontSize,
     fontWeight: '500',
-    color: colors.textMuted,
+    color: colors.text,
     textAlign: 'right',
     lineHeight: 18,
   },
+  // Neutral (not turquoise-tinted) - lower visual priority than infoCard
+  // above, matching "do not overload the screen" / clear hierarchy.
   tipsCard: {
     backgroundColor: colors.surfaceElevated,
-    borderRadius: 16,
+    borderRadius: radius.md,
     padding: spacing.md,
     borderWidth: 1,
     borderColor: colors.border,
