@@ -38,6 +38,17 @@ export default function TabsLayout() {
 
   return (
     <Tabs
+      // Default bottom-tabs backBehavior is 'firstRoute', which makes
+      // goBack()/router.back() always jump to the first-declared
+      // Tabs.Screen below ("profile") no matter which tab was actually
+      // visited before - the cause of PurchaseScreen's back arrow always
+      // landing on "אזור אישי" regardless of real navigation history.
+      // 'history' makes back navigation follow the tabs actually visited,
+      // in visitation order - only affects tab-level back navigation (this
+      // Tabs navigator itself); each tab's own nested Stack (e.g.
+      // profile/edit, profile/change-password) still governs its own back
+      // button via its own Stack navigator, unaffected by this.
+      backBehavior="history"
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: colors.primary,

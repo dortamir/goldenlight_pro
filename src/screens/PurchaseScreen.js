@@ -1,7 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
@@ -65,16 +64,6 @@ export default function PurchaseScreen() {
   }, []);
   const sheetMinHeight =
     rootHeight > 0 && heroHeight > 0 ? rootHeight - heroHeight + radius.xl : undefined;
-
-  // Normal back-navigation history only - no hardcoded destination. If this
-  // screen was somehow reached with no history to return to (e.g. a direct
-  // deep link), this intentionally does nothing rather than guessing a
-  // fallback route.
-  const handleBack = () => {
-    if (router.canGoBack()) {
-      router.back();
-    }
-  };
 
   const handlePickReceipt = async (mode) => {
     try {
@@ -247,18 +236,8 @@ export default function PurchaseScreen() {
         edges={['top', 'left', 'right']}>
         <View style={styles.heroSection} onLayout={onHeroLayout}>
           <View style={styles.heroInner}>
-            <Pressable
-              onPress={handleBack}
-              hitSlop={6}
-              accessibilityRole="button"
-              accessibilityLabel="חזרה"
-              style={({ pressed }) => [styles.backButton, pressed && styles.backButtonPressed]}>
-              <Ionicons name="chevron-forward" size={24} color={colors.textOnDark} />
-            </Pressable>
-            <View style={styles.heroTitleBlock}>
-              <Text style={styles.title}>דיווח רכישה</Text>
-              <Text style={styles.subtitle}>צלמו או העלו חשבונית ואנחנו נחשב את הנקודות שלכם</Text>
-            </View>
+            <Text style={styles.title}>דיווח רכישה</Text>
+            <Text style={styles.subtitle}>צלמו או העלו חשבונית ואנחנו נחשב את הנקודות שלכם</Text>
           </View>
         </View>
 
@@ -354,29 +333,7 @@ const styles = StyleSheet.create({
     maxWidth: 480,
     alignSelf: 'center',
     paddingHorizontal: spacing.lg,
-    position: 'relative',
-  },
-  // Absolute top-right, same technique as ChangePasswordScreen/
-  // EditProfileScreen's own header back button - anchored independently of
-  // heroTitleBlock's own text flow, which reserves matching space via
-  // paddingEnd below so the title/subtitle never run under it.
-  backButton: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    zIndex: 1,
-    width: 44,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  backButtonPressed: {
-    opacity: 0.6,
-  },
-  heroTitleBlock: {
-    width: '100%',
     alignItems: 'flex-end',
-    paddingEnd: 56,
   },
   title: {
     fontSize: typography.title.fontSize,

@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
 import PointsBalanceCard from '../components/common/PointsBalanceCard';
+import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
 import { getProfile } from '../services/profileService';
-import { colors, shadows, spacing, typography } from '../theme';
+import { colors, radius, shadows, spacing, typography } from '../theme';
 
 const mockRewards = [
   {
@@ -37,6 +40,22 @@ export default function RewardsScreen() {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [rootHeight, setRootHeight] = useState(0);
+  const [heroHeight, setHeroHeight] = useState(0);
+
+  // Same measured-minHeight approach as HomeScreen/ProfileScreen/
+  // PurchaseScreen's dark hero + light sheet (see HomeScreen for the full
+  // explanation) - guarantees the light sheet reaches the bottom of the
+  // real screen regardless of the flex-grow chain between here and the
+  // ScrollView.
+  const onRootLayout = useCallback((event) => {
+    setRootHeight(event.nativeEvent.layout.height);
+  }, []);
+  const onHeroLayout = useCallback((event) => {
+    setHeroHeight(event.nativeEvent.layout.height);
+  }, []);
+  const sheetMinHeight =
+    rootHeight > 0 && heroHeight > 0 ? rootHeight - heroHeight + radius.xl : undefined;
 
   useEffect(() => {
     let isActive = true;
@@ -106,139 +125,224 @@ export default function RewardsScreen() {
   }, [activeFilter]);
 
   return (
-    <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
-      <View style={styles.container}>
-        <View style={styles.header}>
-          <Text style={styles.title}>הטבות</Text>
-          <Text style={styles.subtitle}>ממשו את הנקודות שלכם להטבות ומתנות</Text>
+    <View style={styles.root} onLayout={onRootLayout}>
+      {/* Full-bleed dark hero, same technique/tokens as HomeScreen/
+          ProfileScreen/PurchaseScreen's own hero (see HomeScreen for the
+          full explanation) - keeps every premium dark surface visually
+          identical across screens. */}
+      <LinearGradient
+        colors={[colors.bgDark, colors.charcoal]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={styles.heroGradient}
+      />
+
+      <AppScreen
+        backgroundColor="transparent"
+        contentContainerStyle={styles.screenContent}
+        style={styles.screenInner}
+        // No bottom edge - same reasoning as the other tab screens (nested
+        // under the (tabs) bottom bar, which already provides its own
+        // clearance).
+        edges={['top', 'left', 'right']}>
+        <View style={styles.heroSection} onLayout={onHeroLayout}>
+          <View style={styles.heroInner}>
+            <Text style={styles.title}>הטבות</Text>
+            <Text style={styles.subtitle}>ממשו את הנקודות שלכם להטבות ומתנות</Text>
+
+            <PointsBalanceCard
+              pointsBalance={pointsBalance}
+              meta="זמינות למימוש"
+              loading={loading}
+              error={error}
+              onRetry={() =>
+                user?.id &&
+                getProfile(user.id)
+                  .then((data) => {
+                    setProfile(data);
+                    setError('');
+                  })
+                  .catch(() => setError('לא הצלחנו לטעון את יתרת הנקודות'))
+              }
+              style={styles.pointsCard}
+            />
+          </View>
         </View>
 
-        <PointsBalanceCard
-          pointsBalance={pointsBalance}
-          meta="זמינות למימוש"
-          loading={loading}
-          error={error}
-          onRetry={() =>
-            user?.id &&
-            getProfile(user.id)
-              .then((data) => {
-                setProfile(data);
-                setError('');
-              })
-              .catch(() => setError('לא הצלחנו לטעון את יתרת הנקודות'))
-          }
-        />
+        {/* Light content sheet - same full-bleed/rounded-top/measured-
+            minHeight pattern as HomeScreen/ProfileScreen/PurchaseScreen's
+            own sheet. */}
+        <View style={[styles.sheet, sheetMinHeight ? { minHeight: sheetMinHeight } : null]}>
+          <View style={styles.sheetInner}>
+            <View style={styles.filterRow}>
+              {filters.map((filter) => {
+                const active = filter === activeFilter;
+                return (
+                  <Pressable
+                    key={filter}
+                    style={[styles.filterChip, active && styles.filterChipActive]}
+                    onPress={() => setActiveFilter(filter)}>
+                    <Text style={[styles.filterText, active && styles.filterTextActive]}>{filter}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
 
-        <View style={styles.filterRow}>
-          {filters.map((filter) => {
-            const active = filter === activeFilter;
-            return (
-              <Pressable
-                key={filter}
-                style={[styles.filterChip, active && styles.filterChipActive]}
-                onPress={() => setActiveFilter(filter)}>
-                <Text style={[styles.filterText, active && styles.filterTextActive]}>{filter}</Text>
-              </Pressable>
-            );
-          })}
-        </View>
-
-        <Text style={styles.sectionTitle}>הטבות זמינות</Text>
-
-        {visibleRewards.map((reward) => {
-          const isSelected = selectedRewardId === reward.id;
-          const { isAvailable, message: unavailableMessage } = getAvailability(reward);
-
-          return (
-            <View key={reward.id} style={styles.rewardCard}>
-              <View style={styles.rewardHeader}>
-                <Text style={styles.rewardCategory}>{reward.category}</Text>
-                {reward.title.includes('BUYME') ? (
-                  <View style={styles.titleWrap}>
-                    <Text style={styles.rewardTitle}>שובר</Text>
-                    <Text style={styles.rewardTitleInline}>BUYME</Text>
-                    <Text style={styles.rewardTitle}>בסך 100 ₪</Text>
-                  </View>
-                ) : reward.title.includes('Golden Light') ? (
-                  <View style={styles.titleWrap}>
-                    <Text style={styles.rewardTitle}>שובר</Text>
-                    <Text style={styles.rewardTitleInline}>Golden Light</Text>
-                    <Text style={styles.rewardTitle}>בסך 200 ₪</Text>
-                  </View>
-                ) : (
-                  <Text style={styles.rewardTitle}>{reward.title}</Text>
-                )}
-                <View style={styles.rewardCostRow}>
-                  <Text style={styles.rewardCost}>{reward.cost.toLocaleString('he-IL')} נק׳</Text>
+            <View style={styles.section}>
+              <View style={styles.sectionHeaderRow}>
+                <View style={styles.sectionHeadingGroup}>
+                  <Text style={styles.sectionTitle}>הטבות זמינות</Text>
+                  <View style={styles.sectionAccentDot} />
                 </View>
               </View>
 
-              {isSelected ? (
-                <View style={styles.selectedState}>
-                  <Text style={styles.selectedTitle}>ההטבה נבחרה למימוש</Text>
-                  <Text style={styles.selectedText}>קוד המימוש יוצג כאן לאחר חיבור המערכת</Text>
+              {visibleRewards.length === 0 ? (
+                <View style={styles.emptyState}>
+                  <Text style={styles.emptyStateText}>אין הטבות להצגה בקטגוריה זו</Text>
                 </View>
-              ) : null}
-
-              {isAvailable ? (
-                <Pressable
-                  style={styles.actionButton}
-                  onPress={() => setSelectedRewardId(reward.id)}>
-                  <Text style={styles.actionButtonText}>מימוש ההטבה</Text>
-                </Pressable>
               ) : (
-                <View style={styles.disabledBox}>
-                  <Text style={styles.disabledText}>{unavailableMessage}</Text>
+                <View style={styles.rewardsList}>
+                  {visibleRewards.map((reward) => {
+                    const isSelected = selectedRewardId === reward.id;
+                    const { isAvailable, message: unavailableMessage } = getAvailability(reward);
+
+                    return (
+                      <View
+                        key={reward.id}
+                        style={[styles.rewardCard, !isAvailable && styles.rewardCardLocked]}>
+                        <View style={styles.rewardHeader}>
+                          <Text style={styles.rewardCategory}>{reward.category}</Text>
+                          {reward.title.includes('BUYME') ? (
+                            <View style={styles.titleWrap}>
+                              <Text style={styles.rewardTitle}>שובר</Text>
+                              <Text style={styles.rewardTitleInline}>BUYME</Text>
+                              <Text style={styles.rewardTitle}>בסך 100 ₪</Text>
+                            </View>
+                          ) : reward.title.includes('Golden Light') ? (
+                            <View style={styles.titleWrap}>
+                              <Text style={styles.rewardTitle}>שובר</Text>
+                              <Text style={styles.rewardTitleInline}>Golden Light</Text>
+                              <Text style={styles.rewardTitle}>בסך 200 ₪</Text>
+                            </View>
+                          ) : (
+                            <Text style={styles.rewardTitle}>{reward.title}</Text>
+                          )}
+                          <View style={styles.rewardCostPill}>
+                            <Text style={styles.rewardCostText}>{reward.cost.toLocaleString('he-IL')} נק׳</Text>
+                          </View>
+                        </View>
+
+                        {isSelected ? (
+                          <View style={styles.selectedState}>
+                            <Text style={styles.selectedTitle}>ההטבה נבחרה למימוש</Text>
+                            <Text style={styles.selectedText}>קוד המימוש יוצג כאן לאחר חיבור המערכת</Text>
+                          </View>
+                        ) : null}
+
+                        {isAvailable ? (
+                          <PrimaryButton
+                            title="מימוש ההטבה"
+                            onPress={() => setSelectedRewardId(reward.id)}
+                            style={styles.actionButton}
+                          />
+                        ) : (
+                          <View style={styles.disabledBox}>
+                            <Ionicons name="lock-closed-outline" size={14} color={colors.textMuted} />
+                            <Text style={styles.disabledText}>{unavailableMessage}</Text>
+                          </View>
+                        )}
+                      </View>
+                    );
+                  })}
                 </View>
               )}
             </View>
-          );
-        })}
-      </View>
-    </AppScreen>
+          </View>
+        </View>
+      </AppScreen>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  screenContent: {
-    justifyContent: 'flex-start',
-    alignItems: 'stretch',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xl,
-    paddingBottom: spacing.huge,
+  root: {
+    flex: 1,
+    backgroundColor: colors.background,
   },
-  container: {
+  heroGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  // Same cancel-AppScreen's-own-wrapper technique as HomeScreen/
+  // ProfileScreen/PurchaseScreen (see HomeScreen's screenInner comment for
+  // the full flex-chain explanation).
+  screenInner: {
+    flex: 1,
     width: '100%',
-    gap: spacing.md,
+    maxWidth: '100%',
+    alignSelf: 'stretch',
+    paddingHorizontal: 0,
+    paddingVertical: 0,
   },
-  header: {
+  screenContent: {
+    flexGrow: 1,
+  },
+  heroSection: {
+    paddingTop: spacing.sm,
+    // Extra bottom padding absorbs the sheet's negative marginTop overlap
+    // below (see `sheet`), so the rounded corners never cut into the
+    // points card.
+    paddingBottom: spacing.xxl + radius.xl,
+  },
+  heroInner: {
+    width: '100%',
+    maxWidth: 480,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.lg,
     alignItems: 'flex-end',
-    paddingBottom: 2,
   },
   title: {
     fontSize: typography.title.fontSize,
     fontWeight: typography.title.fontWeight,
-    color: colors.text,
+    color: colors.textOnDark,
     textAlign: 'right',
   },
   subtitle: {
     fontSize: typography.caption.fontSize,
     fontWeight: '500',
-    color: colors.textMuted,
+    color: colors.mutedOnDark,
     textAlign: 'right',
     marginTop: spacing.xs,
     lineHeight: 18,
+  },
+  pointsCard: {
+    width: '100%',
+    marginTop: spacing.xl,
+  },
+  sheet: {
+    flex: 1,
+    backgroundColor: colors.background,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    marginTop: -radius.xl,
+  },
+  sheetInner: {
+    width: '100%',
+    maxWidth: 480,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.xl,
+    paddingBottom: spacing.xxl,
+    gap: spacing.lg,
   },
   filterRow: {
     flexDirection: 'row-reverse',
     flexWrap: 'wrap',
     gap: spacing.sm,
-    marginTop: 2,
   },
   filterChip: {
     paddingHorizontal: spacing.md,
     paddingVertical: 8,
-    borderRadius: 999,
+    borderRadius: radius.pill,
     backgroundColor: colors.surfaceMuted,
     borderWidth: 1,
     borderColor: colors.border,
@@ -258,21 +362,51 @@ const styles = StyleSheet.create({
   filterTextActive: {
     color: colors.primary,
   },
+  section: {
+    gap: spacing.md,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+  },
+  sectionHeadingGroup: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
   sectionTitle: {
-    fontSize: typography.body.fontSize,
+    fontSize: 18,
     fontWeight: '700',
+    lineHeight: 24,
     color: colors.text,
     textAlign: 'right',
-    marginTop: spacing.xs,
+  },
+  sectionAccentDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.primary,
+  },
+  rewardsList: {
+    gap: spacing.md,
   },
   rewardCard: {
     backgroundColor: colors.white,
-    borderRadius: 16,
+    borderRadius: radius.lg,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
     borderWidth: 1,
     borderColor: colors.border,
     ...shadows.softCard,
+  },
+  // Not-eligible rewards read as quietly muted rather than a fully separate
+  // treatment - a softer border only, no opacity dip on the whole card
+  // (which would also fade the real point-cost text), keeping the
+  // disabledBox below as the one clear "locked" signal.
+  rewardCardLocked: {
+    borderColor: colors.border,
+    shadowOpacity: 0,
+    elevation: 0,
   },
   rewardHeader: {
     alignItems: 'flex-end',
@@ -304,20 +438,26 @@ const styles = StyleSheet.create({
     textAlign: 'right',
     marginHorizontal: 4,
   },
-  rewardCostRow: {
-    marginTop: 4,
-    alignItems: 'flex-end',
+  // Compact turquoise pill instead of plain muted text - easy to scan at a
+  // glance, matching PurchaseScreen's receiptStatusPill treatment.
+  rewardCostPill: {
+    marginTop: spacing.sm,
+    alignSelf: 'flex-end',
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    backgroundColor: colors.primarySoft,
   },
-  rewardCost: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '500',
-    color: colors.textMuted,
-    textAlign: 'right',
+  rewardCostText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.primaryPressed,
+    textAlign: 'center',
   },
   selectedState: {
-    marginTop: spacing.sm,
+    marginTop: spacing.md,
     backgroundColor: colors.primarySoft,
-    borderRadius: 12,
+    borderRadius: radius.md,
     padding: spacing.md,
   },
   selectedTitle: {
@@ -334,28 +474,16 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   actionButton: {
-    marginTop: spacing.sm,
-    backgroundColor: colors.primary,
-    borderRadius: 12,
-    paddingVertical: spacing.md,
-    alignItems: 'center',
-    shadowColor: colors.primaryPressed,
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 5 },
-    elevation: 3,
-  },
-  actionButtonText: {
-    fontSize: typography.button.fontSize,
-    fontWeight: typography.button.fontWeight,
-    color: colors.black,
-    textAlign: 'center',
+    marginTop: spacing.md,
   },
   disabledBox: {
-    marginTop: spacing.sm,
-    borderRadius: 12,
-    paddingVertical: spacing.md,
+    flexDirection: 'row-reverse',
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    marginTop: spacing.md,
+    borderRadius: radius.md,
+    paddingVertical: spacing.md,
     backgroundColor: colors.surfaceMuted,
     borderWidth: 1,
     borderColor: colors.border,
@@ -363,6 +491,21 @@ const styles = StyleSheet.create({
   disabledText: {
     fontSize: typography.caption.fontSize,
     fontWeight: '600',
+    color: colors.textMuted,
+    textAlign: 'center',
+  },
+  emptyState: {
+    minHeight: 96,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.white,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  emptyStateText: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '500',
     color: colors.textMuted,
     textAlign: 'center',
   },
