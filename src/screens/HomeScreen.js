@@ -15,12 +15,13 @@ function isPdfFile(name) {
   return /\.pdf$/i.test(String(name || ''));
 }
 
-// Compact 2-column receipt grid: tile width is computed from the grid's own
-// measured layout width (see onGridLayout below) rather than a hardcoded
-// percentage, so it can never overflow regardless of screen padding/gap at
-// any viewport.
-const GRID_GAP = spacing.sm;
-const THUMB_HEIGHT = 108;
+// Fixed-size receipt preview container for the two side-by-side horizontal
+// recent-activity cards - width/height stay constant regardless of the
+// source image's real proportions (portrait phone photo, landscape scan,
+// screenshot, ...), see activityRowThumbnailWrap/activityRowThumbnailImage
+// below.
+const RECEIPT_IMAGE_WIDTH = 68;
+const RECEIPT_IMAGE_HEIGHT = 92;
 
 const quickActions = [
   {
@@ -46,13 +47,8 @@ export default function HomeScreen() {
   const [reportsLoading, setReportsLoading] = useState(true);
   const [reportsError, setReportsError] = useState('');
   const [previewUrls, setPreviewUrls] = useState({});
-  const [gridWidth, setGridWidth] = useState(0);
   const [rootHeight, setRootHeight] = useState(0);
   const [heroHeight, setHeroHeight] = useState(0);
-
-  const onGridLayout = useCallback((event) => {
-    setGridWidth(event.nativeEvent.layout.width);
-  }, []);
 
   // Measures the screen's own real available height and the hero's own
   // real rendered height directly, instead of trusting flexGrow/flex:1 to
@@ -116,9 +112,9 @@ export default function HomeScreen() {
     };
   }, [user?.id]);
 
-  // Thumbnails are only requested for the 4 reports actually rendered in
+  // Thumbnails are only requested for the 2 reports actually rendered in
   // "פעילות אחרונה" (see recentReports.slice below), never the full report
-  // list - keeps this bounded to at most 4 signed-URL requests per focus,
+  // list - keeps this bounded to at most 2 signed-URL requests per focus,
   // the same private-Storage pattern already used by PurchaseHistoryScreen
   // (never getPublicUrl, never a public bucket).
   const loadThumbnails = useCallback((items, isActiveRef) => {
@@ -163,7 +159,7 @@ export default function HomeScreen() {
 
           if (isActiveRef.current) {
             setReports(data);
-            loadThumbnails(data.slice(0, 4), isActiveRef);
+            loadThumbnails(data.slice(0, 2), isActiveRef);
           }
         } catch (err) {
           if (isActiveRef.current) {
@@ -236,8 +232,7 @@ export default function HomeScreen() {
     }
   };
 
-  const recentReports = reports.slice(0, 4);
-  const tileWidth = gridWidth > 0 ? (gridWidth - GRID_GAP) / 2 : undefined;
+  const recentReports = reports.slice(0, 2);
 
   return (
     <View style={styles.root} onLayout={onRootLayout}>
@@ -355,7 +350,7 @@ export default function HomeScreen() {
                           .then((data) => {
                             setReports(data);
                             setReportsError('');
-                            loadThumbnails(data.slice(0, 4), { current: true });
+                            loadThumbnails(data.slice(0, 2), { current: true });
                           })
                           .catch(() => setReportsError('לא הצלחנו לטעון את הפעילות האחרונה'))
                       }>
@@ -371,56 +366,61 @@ export default function HomeScreen() {
                   </View>
                 </View>
               ) : (
-                <View style={styles.activityGrid} onLayout={onGridLayout}>
+                <View style={styles.activityList}>
                   {recentReports.map((report) => {
-                  const statusMeta = getStatusMeta(report.status);
-                  const showPoints = report.status === 'approved' && report.points_awarded > 0;
-                  const isPdf = isPdfFile(report.original_filename);
-                  const preview = previewUrls[report.id];
+                    const statusMeta = getStatusMeta(report.status);
+                    const showPoints = report.status === 'approved' && report.points_awarded > 0;
+                    const isPdf = isPdfFile(report.original_filename);
+                    const preview = previewUrls[report.id];
 
-                  return (
-                    <Pressable
-                      key={report.id}
-                      style={({ pressed }) => [
-                        styles.activityTile,
-                        tileWidth ? { width: tileWidth } : { width: '48%' },
-                        pressed && styles.activityTilePressed,
-                      ]}
-                      onPress={() =>
-                        router.push({ pathname: '/(tabs)/activity/[id]', params: { id: report.id, from: 'home' } })
-                      }
-                      accessibilityRole="button"
-                      accessibilityLabel="פתיחת פרטי חשבונית">
-                      <View style={styles.activityTileThumbnailWrap}>
-                        {isPdf ? (
-                          <View style={styles.activityTilePlaceholder}>
-                            <Text style={styles.activityTilePlaceholderText}>PDF</Text>
+                    return (
+                      <Pressable
+                        key={report.id}
+                        style={({ pressed }) => [styles.activityRow, pressed && styles.activityRowPressed]}
+                        onPress={() =>
+                          router.push({ pathname: '/(tabs)/activity/[id]', params: { id: report.id, from: 'home' } })
+                        }
+                        accessibilityRole="button"
+                        accessibilityLabel="פתיחת פרטי חשבונית">
+                        {/* Image on the RIGHT, info on the LEFT: this is the
+                            first JSX child inside a row-reverse container,
+                            which places it at the visual end (right) of the
+                            row explicitly, rather than relying on default
+                            browser/OS direction behavior. */}
+                        <View style={styles.activityRowThumbnailWrap}>
+                          {isPdf ? (
+                            <View style={styles.activityRowPlaceholder}>
+                              <Text style={styles.activityRowPlaceholderText}>PDF</Text>
+                            </View>
+                          ) : preview?.status === 'ready' && preview.url ? (
+                            <Image source={{ uri: preview.url }} style={styles.activityRowThumbnailImage} resizeMode="contain" />
+                          ) : preview?.status === 'loading' ? (
+                            <View style={styles.activityRowPlaceholder}>
+                              <ActivityIndicator color={colors.primary} size="small" />
+                            </View>
+                          ) : (
+                            <View style={styles.activityRowPlaceholder}>
+                              <Text style={styles.activityRowPlaceholderText}>חשבונית</Text>
+                            </View>
+                          )}
+                        </View>
+
+                        <View style={styles.activityRowInfo}>
+                          <Text style={styles.activityRowTitle} numberOfLines={1}>חשבונית</Text>
+                          <Text style={styles.activityRowDate} numberOfLines={1}>{formatReportDate(report.created_at)}</Text>
+
+                          <View style={[styles.statusBadge, { backgroundColor: statusMeta.backgroundColor }]}>
+                            <Text style={[styles.statusBadgeText, { color: statusMeta.textColor }]} numberOfLines={1}>
+                              {statusMeta.label}
+                            </Text>
                           </View>
-                        ) : preview?.status === 'ready' && preview.url ? (
-                          <Image source={{ uri: preview.url }} style={styles.activityTileThumbnailImage} resizeMode="contain" />
-                        ) : preview?.status === 'loading' ? (
-                          <View style={styles.activityTilePlaceholder}>
-                            <ActivityIndicator color={colors.primary} size="small" />
-                          </View>
-                        ) : (
-                          <View style={styles.activityTilePlaceholder}>
-                            <Text style={styles.activityTilePlaceholderText}>חשבונית</Text>
-                          </View>
-                        )}
-                      </View>
 
-                      <Text style={styles.activityTileTitle}>חשבונית</Text>
-                      <Text style={styles.activityTileDate}>{formatReportDate(report.created_at)}</Text>
-
-                      <View style={[styles.statusBadge, { backgroundColor: statusMeta.backgroundColor }]}>
-                        <Text style={[styles.statusBadgeText, { color: statusMeta.textColor }]}>{statusMeta.label}</Text>
-                      </View>
-
-                      {showPoints ? (
-                        <Text style={styles.activityPoints}>{`+${formatNumber(report.points_awarded)} נק׳`}</Text>
-                      ) : null}
-                    </Pressable>
-                  );
+                          {showPoints ? (
+                            <Text style={styles.activityPoints} numberOfLines={1}>{`+${formatNumber(report.points_awarded)} נק׳`}</Text>
+                          ) : null}
+                        </View>
+                      </Pressable>
+                    );
                   })}
                 </View>
               )}
@@ -647,75 +647,106 @@ root: {
     textAlign: 'right',
     marginTop: spacing.xs,
   },
-  activityGrid: {
+  // Two cards side by side, sharing the EXACT same row/gap system as
+  // actionsRow above (not a separately invented width calculation), so the
+  // two rows of cards align into one consistent 2-column grid. row-reverse
+  // so the first-rendered (most recent) report lands on the right, matching
+  // RTL reading order.
+  activityList: {
     flexDirection: 'row-reverse',
-    flexWrap: 'wrap',
-    rowGap: GRID_GAP,
-    columnGap: GRID_GAP,
+    gap: spacing.md,
+    alignItems: 'stretch',
   },
-  // width is set per-tile at render time from the grid's own measured
-  // layout width (see onGridLayout/tileWidth) - this is just the shared
-  // visual styling.
-  activityTile: {
+  // flex:1 (matching actionCard's own flex:1 below) gives both cards the
+  // same width as the Quick Action cards automatically, without measuring
+  // anything. image-right/info-left internally via row-reverse - first JSX
+  // child (thumbnail) lands at the visual right, second (info block) at the
+  // visual left - explicit RTL order, not incidental browser/OS direction.
+  // justifyContent:'center' (paired with activityRowInfo NOT being flex:1
+  // below) is what makes the image+info group read as one centered unit
+  // rather than the image sitting on the border with info stretched flush
+  // to the opposite edge.
+  activityRow: {
+    flex: 1,
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: colors.white,
-    borderRadius: radius.md,
+    borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    padding: spacing.xs,
-    alignItems: 'flex-end',
+    // Kept thin - at the narrowest supported width (360px, ~142px card)
+    // every extra pixel here comes straight out of the info column's text
+    // budget. The "not edge-flush" feel comes from justifyContent:'center'
+    // + activityRowInfo no longer being flex:1 (so the image+info group is
+    // only as wide as it needs to be and centers with room on both sides),
+    // not from padding size.
+    paddingHorizontal: spacing.xs,
+    paddingVertical: spacing.sm,
+    gap: spacing.lg,
+    minHeight: 122,
     ...shadows.softCard,
   },
-  activityTilePressed: {
+  activityRowPressed: {
     opacity: 0.85,
   },
-  // Fixed height, not an aspect ratio tied to the tile width - the
+  // Fixed-size container (not tied to the image's real aspect ratio) - the
   // CONTAINER dictates the box, and the image (resizeMode="contain" below)
   // scales down to fit inside it however it needs to, so a receipt's real
-  // proportions (portrait photo, landscape scan, square crop, ...) never
-  // get stretched or aggressively cropped, at the cost of some empty
-  // letterboxing space, which is an acceptable and expected trade-off for a
-  // homescreen preview.
-  activityTileThumbnailWrap: {
-    width: '100%',
-    height: THUMB_HEIGHT,
+  // proportions (portrait phone photo, landscape scan, screenshot, ...)
+  // never get stretched or cropped, at the cost of some empty letterboxing
+  // space - an acceptable trade-off for a homescreen preview.
+  activityRowThumbnailWrap: {
+    width: RECEIPT_IMAGE_WIDTH,
+    height: RECEIPT_IMAGE_HEIGHT,
     borderRadius: radius.sm,
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surfaceMuted,
-    marginBottom: 4,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  activityTileThumbnailImage: {
+  activityRowThumbnailImage: {
     width: '100%',
     height: '100%',
   },
-  activityTilePlaceholder: {
+  activityRowPlaceholder: {
     width: '100%',
     height: '100%',
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: colors.surfaceMuted,
   },
-  activityTilePlaceholderText: {
-    fontSize: 10,
+  activityRowPlaceholderText: {
+    fontSize: 11,
     fontWeight: '700',
     color: colors.textMuted,
     textAlign: 'center',
   },
-  activityTileTitle: {
-    fontSize: 12,
+  // No flex:1 here (unlike the previous full-width version) - sizing to its
+  // own natural content width, instead of stretching to fill the card, is
+  // what lets activityRow's justifyContent:'center' actually center the
+  // image+info group as one unit. flexShrink:1 is a safety net: if a card
+  // ever ends up narrower than the natural content needs, this lets the
+  // column shrink rather than overflow the card (numberOfLines on each
+  // Text below then truncates gracefully instead of clipping the layout).
+  activityRowInfo: {
+    flexShrink: 1,
+    alignItems: 'flex-end',
+  },
+  activityRowTitle: {
+    fontSize: 13,
     fontWeight: '700',
     color: colors.text,
     textAlign: 'right',
   },
-  activityTileDate: {
+  activityRowDate: {
     fontSize: 10,
     fontWeight: '500',
     color: colors.textMuted,
     textAlign: 'right',
-    marginTop: 1,
+    marginTop: 2,
   },
   activityLoadingWrap: {
     minHeight: 64,
