@@ -34,15 +34,21 @@ export default function AuthLayout() {
     return <Redirect href="/(tabs)" />;
   }
 
-  // Login/Register's dark gradient background lives here, not inside
-  // AuthScreenShell (see that file for the full explanation) - this layout
-  // component is never remounted while navigating between sibling routes in
-  // the same Stack, so a gradient rendered here mounts once and never
-  // re-measures, avoiding the onLayout race that made it disappear after
-  // switching between Login and Register. Scoped to exactly those two
-  // routes so forgot-password/reset-password keep their own unrelated
-  // (light) background untouched.
-  const showAuthBackground = pathname === '/login' || pathname === '/register';
+  // Login/Register/ForgotPassword/ResetPassword's dark gradient background
+  // lives here, not inside AuthScreenShell (see that file for the full
+  // explanation) - this layout component is never remounted while
+  // navigating between sibling routes in the same Stack, so a gradient
+  // rendered here mounts once and never re-measures, avoiding the onLayout
+  // race that made it disappear after switching between auth screens.
+  // reset-password uses the same AuthScreenShell/dark background as
+  // Login/Register/ForgotPassword (see ResetPasswordScreen) for all of its
+  // states (validating/invalid-link/form), so the gradient must already be
+  // showing before the recovery link even finishes validating.
+  const showAuthBackground =
+    pathname === '/login' ||
+    pathname === '/register' ||
+    pathname === '/forgot-password' ||
+    pathname === '/reset-password';
 
   return (
     <View style={styles.root}>

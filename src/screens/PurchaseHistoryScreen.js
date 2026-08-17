@@ -1,3 +1,4 @@
+import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
@@ -7,7 +8,15 @@ import AppScreen from '../components/common/AppScreen';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
 import { getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
-import { colors, shadows, spacing, typography } from '../theme';
+import { colors, radius, shadows, spacing, typography } from '../theme';
+
+// Fixed-size receipt preview container - same portrait dimensions as
+// HomeScreen's own recent-activity thumbnails (see that file), so a
+// receipt's real proportions (portrait phone photo, landscape scan,
+// screenshot, ...) never get stretched or cropped, at the cost of some
+// empty letterboxing space.
+const RECEIPT_IMAGE_WIDTH = 68;
+const RECEIPT_IMAGE_HEIGHT = 92;
 
 const historyFilters = [
   { key: 'all', label: 'הכל' },
@@ -63,6 +72,22 @@ export default function PurchaseHistoryScreen() {
   const [error, setError] = useState('');
   const [activeFilter, setActiveFilter] = useState('all');
   const [previewUrls, setPreviewUrls] = useState({});
+  const [rootHeight, setRootHeight] = useState(0);
+  const [heroHeight, setHeroHeight] = useState(0);
+
+  // Same measured-minHeight approach as HomeScreen/ProfileScreen/
+  // PurchaseScreen/RewardsScreen's dark hero + light sheet (see HomeScreen
+  // for the full explanation) - guarantees the light sheet reaches the
+  // bottom of the real screen regardless of the flex-grow chain between
+  // here and the ScrollView.
+  const onRootLayout = useCallback((event) => {
+    setRootHeight(event.nativeEvent.layout.height);
+  }, []);
+  const onHeroLayout = useCallback((event) => {
+    setHeroHeight(event.nativeEvent.layout.height);
+  }, []);
+  const sheetMinHeight =
+    rootHeight > 0 && heroHeight > 0 ? rootHeight - heroHeight + radius.xl : undefined;
 
   const loadThumbnails = useCallback((items, isActiveRef) => {
     items
@@ -169,133 +194,187 @@ export default function PurchaseHistoryScreen() {
   const hasFilteredReports = filteredReports.length > 0;
 
   return (
-    <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
-      <View style={styles.container}>
-        <View style={styles.header}>
-          <AppBackButton deterministicRoute="/(tabs)" style={styles.headerBackButton} />
-          <View style={styles.headerTextBlock}>
-            <Text style={styles.title}>היסטוריית רכישות</Text>
-            <Text style={styles.subtitle}>כל החשבוניות והדיווחים שהעליתם</Text>
+    <View style={styles.root} onLayout={onRootLayout}>
+      {/* Compact dark hero, same technique/tokens as the tab screens' own
+          hero (see HomeScreen for the full explanation), just much
+          shorter - this is a secondary/utility screen (back button +
+          title only, no points card), not a main tab. */}
+      <LinearGradient
+        colors={[colors.bgDark, colors.charcoal]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={styles.heroGradient}
+      />
+
+      <AppScreen
+        backgroundColor="transparent"
+        contentContainerStyle={styles.screenContent}
+        style={styles.screenInner}
+        // No bottom edge - this screen sits above the tab bar as a pushed
+        // route, but still renders within the same safe-area chain as the
+        // tab screens; matches their own edges usage.
+        edges={['top', 'left', 'right']}>
+        <View style={styles.heroSection} onLayout={onHeroLayout}>
+          <View style={styles.heroInner}>
+            {/* mutedOnDark, not textMuted - the same gray character as the
+                rest of the app's secondary-screen back buttons, just
+                calibrated for a dark surface instead of a light one (see
+                colors.js: textMuted drops below WCAG AA on dark surfaces). */}
+            <AppBackButton
+              deterministicRoute="/(tabs)"
+              color={colors.mutedOnDark}
+              style={styles.headerBackButton}
+            />
+            <View style={styles.headerTextBlock}>
+              <Text style={styles.title}>היסטוריית רכישות</Text>
+              <Text style={styles.subtitle}>כל החשבוניות והדיווחים שהעליתם</Text>
+            </View>
           </View>
         </View>
 
-        {!loading && !error && hasAnyReports ? (
-          <View style={styles.filterRow}>
-            {historyFilters.map((filter) => {
-              const active = filter.key === activeFilter;
-              return (
-                <Pressable
-                  key={filter.key}
-                  style={[styles.filterChip, active && styles.filterChipActive]}
-                  onPress={() => setActiveFilter(filter.key)}>
-                  <Text style={[styles.filterText, active && styles.filterTextActive]}>{filter.label}</Text>
+        {/* Light content sheet - same full-bleed/rounded-top/measured-
+            minHeight pattern as the tab screens' own sheet. */}
+        <View style={[styles.sheet, sheetMinHeight ? { minHeight: sheetMinHeight } : null]}>
+          <View style={styles.sheetInner}>
+            {!loading && !error && hasAnyReports ? (
+              <View style={styles.filterRow}>
+                {historyFilters.map((filter) => {
+                  const active = filter.key === activeFilter;
+                  return (
+                    <Pressable
+                      key={filter.key}
+                      style={[styles.filterChip, active && styles.filterChipActive]}
+                      onPress={() => setActiveFilter(filter.key)}>
+                      <Text style={[styles.filterText, active && styles.filterTextActive]}>{filter.label}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ) : null}
+
+            {loading ? (
+              <View style={styles.loadingState}>
+                <ActivityIndicator color={colors.primary} size="small" />
+              </View>
+            ) : error ? (
+              <View style={styles.errorCard}>
+                <Text style={styles.errorText}>{error}</Text>
+                <Pressable onPress={retryLoad} accessibilityRole="button">
+                  <Text style={styles.retryText}>נסו שוב</Text>
                 </Pressable>
-              );
-            })}
-          </View>
-        ) : null}
+              </View>
+            ) : !hasAnyReports ? (
+              <View style={styles.emptyCard}>
+                <Text style={styles.emptyTitle}>עדיין לא העליתם חשבוניות</Text>
+                <Text style={styles.emptySubtitle}>העלו חשבונית ראשונה כדי להתחיל לצבור נקודות</Text>
+                <PrimaryButton
+                  title="דיווח רכישה"
+                  onPress={() => router.push('/(tabs)/purchase')}
+                  style={styles.emptyButton}
+                />
+              </View>
+            ) : !hasFilteredReports ? (
+              <View style={styles.filterEmptyCard}>
+                <Text style={styles.filterEmptyText}>אין דיווחים בקטגוריה הזו</Text>
+              </View>
+            ) : (
+              <View style={styles.reportList}>
+                {filteredReports.map((report) => {
+                  const statusMeta = getStatusMeta(report.status);
+                  const showPoints = report.status === 'approved' && report.points_awarded > 0;
+                  const isPdf = isPdfFile(report.original_filename);
+                  const preview = previewUrls[report.id];
 
-        {loading ? (
-          <View style={styles.loadingState}>
-            <ActivityIndicator color={colors.primary} size="small" />
-          </View>
-        ) : error ? (
-          <View style={styles.errorCard}>
-            <Text style={styles.errorText}>{error}</Text>
-            <Pressable onPress={retryLoad} accessibilityRole="button">
-              <Text style={styles.retryText}>נסו שוב</Text>
-            </Pressable>
-          </View>
-        ) : !hasAnyReports ? (
-          <View style={styles.emptyCard}>
-            <Text style={styles.emptyTitle}>עדיין לא העליתם חשבוניות</Text>
-            <Text style={styles.emptySubtitle}>העלו חשבונית ראשונה כדי להתחיל לצבור נקודות</Text>
-            <PrimaryButton
-              title="דיווח רכישה"
-              onPress={() => router.push('/(tabs)/purchase')}
-              style={styles.emptyButton}
-            />
-          </View>
-        ) : !hasFilteredReports ? (
-          <View style={styles.filterEmptyCard}>
-            <Text style={styles.filterEmptyText}>אין דיווחים בקטגוריה הזו</Text>
-          </View>
-        ) : (
-          <View style={styles.reportList}>
-            {filteredReports.map((report) => {
-              const statusMeta = getStatusMeta(report.status);
-              const showPoints = report.status === 'approved' && report.points_awarded > 0;
-              const isPdf = isPdfFile(report.original_filename);
-              const preview = previewUrls[report.id];
-
-              return (
-                <Pressable
-                  key={report.id}
-                  style={({ pressed }) => [styles.reportCard, pressed && styles.reportCardPressed]}
-                  onPress={() => openReportDetails(report)}
-                  accessibilityRole="button"
-                  accessibilityLabel="פתיחת פרטי חשבונית">
-                  <View style={styles.thumbnailWrap}>
-                    {isPdf ? (
-                      <View style={styles.thumbnailPlaceholder}>
-                        <Text style={styles.thumbnailPlaceholderText}>PDF</Text>
+                  return (
+                    <Pressable
+                      key={report.id}
+                      style={({ pressed }) => [styles.reportCard, pressed && styles.reportCardPressed]}
+                      onPress={() => openReportDetails(report)}
+                      accessibilityRole="button"
+                      accessibilityLabel="פתיחת פרטי חשבונית">
+                      <View style={styles.thumbnailWrap}>
+                        {isPdf ? (
+                          <View style={styles.thumbnailPlaceholder}>
+                            <Text style={styles.thumbnailPlaceholderText}>PDF</Text>
+                          </View>
+                        ) : preview?.status === 'ready' && preview.url ? (
+                          <Image source={{ uri: preview.url }} style={styles.thumbnailImage} resizeMode="contain" />
+                        ) : preview?.status === 'loading' ? (
+                          <View style={styles.thumbnailPlaceholder}>
+                            <ActivityIndicator color={colors.primary} size="small" />
+                          </View>
+                        ) : (
+                          <View style={styles.thumbnailPlaceholder}>
+                            <Text style={styles.thumbnailPlaceholderText}>חשבונית</Text>
+                          </View>
+                        )}
                       </View>
-                    ) : preview?.status === 'ready' && preview.url ? (
-                      <Image source={{ uri: preview.url }} style={styles.thumbnailImage} resizeMode="cover" />
-                    ) : preview?.status === 'loading' ? (
-                      <View style={styles.thumbnailPlaceholder}>
-                        <ActivityIndicator color={colors.primary} size="small" />
-                      </View>
-                    ) : (
-                      <View style={styles.thumbnailPlaceholder}>
-                        <Text style={styles.thumbnailPlaceholderText}>חשבונית</Text>
-                      </View>
-                    )}
-                  </View>
 
-                  <View style={styles.reportInfo}>
-                    <Text style={styles.reportTitle}>חשבונית</Text>
-                    <Text style={styles.reportFilename} numberOfLines={1} ellipsizeMode="tail">
-                      {report.original_filename || 'חשבונית'}
-                    </Text>
-                    <Text style={styles.reportDate}>{formatReportDate(report.created_at)}</Text>
-                  </View>
+                      <View style={styles.reportInfo}>
+                        <Text style={styles.reportTitle}>חשבונית</Text>
+                        <Text style={styles.reportFilename} numberOfLines={1} ellipsizeMode="tail">
+                          {report.original_filename || 'חשבונית'}
+                        </Text>
+                        <Text style={styles.reportDate}>{formatReportDate(report.created_at)}</Text>
+                      </View>
 
-                  <View style={styles.statusColumn}>
-                    <View style={[styles.statusBadge, { backgroundColor: statusMeta.backgroundColor }]}>
-                      <Text style={[styles.statusBadgeText, { color: statusMeta.textColor }]}>{statusMeta.label}</Text>
-                    </View>
-                    {showPoints ? (
-                      <Text style={styles.reportPoints}>{`+${formatNumber(report.points_awarded)} נק׳`}</Text>
-                    ) : null}
-                  </View>
-                </Pressable>
-              );
-            })}
+                      <View style={styles.statusColumn}>
+                        <View style={[styles.statusBadge, { backgroundColor: statusMeta.backgroundColor }]}>
+                          <Text style={[styles.statusBadgeText, { color: statusMeta.textColor }]}>{statusMeta.label}</Text>
+                        </View>
+                        {showPoints ? (
+                          <Text style={styles.reportPoints}>{`+${formatNumber(report.points_awarded)} נק׳`}</Text>
+                        ) : null}
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
           </View>
-        )}
-      </View>
-    </AppScreen>
+        </View>
+      </AppScreen>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  screenContent: {
-    justifyContent: 'flex-start',
-    alignItems: 'stretch',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xl,
-    paddingBottom: spacing.huge,
+  root: {
+    flex: 1,
+    backgroundColor: colors.background,
   },
-  container: {
+  heroGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  // Same cancel-AppScreen's-own-wrapper technique as the tab screens (see
+  // HomeScreen's screenInner comment for the full flex-chain explanation).
+  screenInner: {
+    flex: 1,
     width: '100%',
-    gap: spacing.md,
+    maxWidth: '100%',
+    alignSelf: 'stretch',
+    paddingHorizontal: 0,
+    paddingVertical: 0,
   },
-  header: {
+  screenContent: {
+    flexGrow: 1,
+  },
+  // Deliberately short - back button + title/subtitle only, no points card
+  // or other bulky content, since this is a secondary/utility screen, not
+  // a main tab.
+  heroSection: {
+    paddingTop: spacing.sm,
+    // Extra bottom padding absorbs the sheet's negative marginTop overlap
+    // below (see `sheet`), so the rounded corners never cut into the
+    // header text.
+    paddingBottom: spacing.xl + radius.xl,
+  },
+  heroInner: {
+    width: '100%',
+    maxWidth: 480,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.lg,
     position: 'relative',
-    alignItems: 'flex-end',
-    paddingTop: 2,
-    paddingBottom: 2,
   },
   headerBackButton: {
     position: 'absolute',
@@ -311,27 +390,42 @@ const styles = StyleSheet.create({
   title: {
     fontSize: typography.title.fontSize,
     fontWeight: typography.title.fontWeight,
-    color: colors.text,
+    color: colors.textOnDark,
     textAlign: 'right',
   },
   subtitle: {
     fontSize: typography.caption.fontSize,
     fontWeight: '500',
-    color: colors.textMuted,
+    color: colors.mutedOnDark,
     textAlign: 'right',
     marginTop: spacing.xs,
     lineHeight: 18,
+  },
+  sheet: {
+    flex: 1,
+    backgroundColor: colors.background,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    marginTop: -radius.xl,
+  },
+  sheetInner: {
+    width: '100%',
+    maxWidth: 480,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.xl,
+    paddingBottom: spacing.xxl,
+    gap: spacing.md,
   },
   filterRow: {
     flexDirection: 'row-reverse',
     flexWrap: 'wrap',
     gap: spacing.sm,
-    marginTop: 2,
   },
   filterChip: {
     paddingHorizontal: spacing.md,
     paddingVertical: 8,
-    borderRadius: 999,
+    borderRadius: radius.pill,
     backgroundColor: colors.surfaceMuted,
     borderWidth: 1,
     borderColor: colors.border,
@@ -359,12 +453,13 @@ const styles = StyleSheet.create({
   },
   errorCard: {
     backgroundColor: colors.white,
-    borderRadius: 16,
+    borderRadius: radius.lg,
     padding: spacing.lg,
     borderWidth: 1,
     borderColor: colors.border,
     alignItems: 'flex-end',
     gap: spacing.sm,
+    ...shadows.softCard,
   },
   errorText: {
     fontSize: typography.body.fontSize,
@@ -380,12 +475,13 @@ const styles = StyleSheet.create({
   },
   emptyCard: {
     backgroundColor: colors.white,
-    borderRadius: 20,
+    borderRadius: radius.lg,
     padding: spacing.xl,
     borderWidth: 1,
     borderColor: colors.border,
     alignItems: 'center',
     gap: spacing.xs,
+    ...shadows.softCard,
   },
   emptyTitle: {
     fontSize: typography.body.fontSize,
@@ -406,11 +502,12 @@ const styles = StyleSheet.create({
   },
   filterEmptyCard: {
     backgroundColor: colors.white,
-    borderRadius: 16,
+    borderRadius: radius.lg,
     padding: spacing.lg,
     borderWidth: 1,
     borderColor: colors.border,
     alignItems: 'center',
+    ...shadows.softCard,
   },
   filterEmptyText: {
     fontSize: typography.caption.fontSize,
@@ -423,9 +520,9 @@ const styles = StyleSheet.create({
   },
   reportCard: {
     backgroundColor: colors.white,
-    borderRadius: 18,
+    borderRadius: radius.lg,
     paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.lg,
+    paddingVertical: spacing.md,
     borderWidth: 1,
     borderColor: colors.border,
     flexDirection: 'row-reverse',
@@ -437,15 +534,23 @@ const styles = StyleSheet.create({
   reportCardPressed: {
     opacity: 0.85,
   },
+  // Fixed-size container (not tied to the image's real aspect ratio) - the
+  // CONTAINER dictates the box, and the image (resizeMode="contain" below)
+  // scales down to fit inside it however it needs to, so a receipt's real
+  // proportions never get stretched or cropped, at the cost of some empty
+  // letterboxing space - same technique as HomeScreen's own receipt
+  // thumbnails.
   thumbnailWrap: {
-    width: 56,
-    height: 56,
-    borderRadius: 12,
+    width: RECEIPT_IMAGE_WIDTH,
+    height: RECEIPT_IMAGE_HEIGHT,
+    borderRadius: radius.sm,
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surfaceMuted,
     flexShrink: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   thumbnailImage: {
     width: '100%',
@@ -504,7 +609,7 @@ const styles = StyleSheet.create({
   },
   statusBadge: {
     flexShrink: 0,
-    borderRadius: 999,
+    borderRadius: radius.pill,
     paddingHorizontal: spacing.sm,
     paddingVertical: 6,
     alignSelf: 'flex-start',

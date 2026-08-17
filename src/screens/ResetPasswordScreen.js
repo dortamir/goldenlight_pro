@@ -3,9 +3,9 @@ import { router } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import AppCard from '../components/common/AppCard';
 import AppInput from '../components/common/AppInput';
 import AppScreen from '../components/common/AppScreen';
+import AuthScreenShell from '../components/common/AuthScreenShell';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { MIN_PASSWORD_LENGTH, PASSWORD_TOO_SHORT_MESSAGE } from '../constants/validation';
 import { useAuth } from '../context/AuthContext';
@@ -125,8 +125,13 @@ export default function ResetPasswordScreen() {
   const stillValidating = !authLoading && !passwordRecovery && !recoveryError && !validationTimedOut;
 
   if (authLoading || stillValidating) {
+    // Bare, card-less state (no title/form to anchor a full AuthScreenShell
+    // around yet) - still sits on the same shared dark gradient background
+    // as Login/Register/ForgotPassword (see app/(auth)/_layout.js) via
+    // AppScreen's transparent background, so there is no light flash before
+    // the recovery link finishes validating.
     return (
-      <AppScreen backgroundColor={colors.background}>
+      <AppScreen backgroundColor="transparent">
         <View style={styles.loadingState}>
           <Text style={styles.loadingText}>מאמת קישור...</Text>
         </View>
@@ -136,134 +141,84 @@ export default function ResetPasswordScreen() {
 
   if (recoveryError || (validationTimedOut && !passwordRecovery)) {
     return (
-      <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
-        <View style={styles.container}>
-          <View style={styles.header}>
-            <Text style={styles.title}>איפוס סיסמה</Text>
-          </View>
-
-          <AppCard style={styles.card}>
-            <Text style={styles.invalidText}>קישור איפוס הסיסמה אינו תקין או שפג תוקפו.</Text>
-            <PrimaryButton title="שליחת קישור חדש" onPress={handleRequestNewLink} style={styles.button} />
-          </AppCard>
-        </View>
-      </AppScreen>
+      <AuthScreenShell title="איפוס סיסמה" showTabs={false}>
+        <Text style={styles.invalidText}>קישור איפוס הסיסמה אינו תקין או שפג תוקפו.</Text>
+        <PrimaryButton title="שליחת קישור חדש" onPress={handleRequestNewLink} style={styles.button} />
+      </AuthScreenShell>
     );
   }
 
   return (
-    <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
-      <View style={styles.container}>
-        <View style={styles.header}>
-          <Text style={styles.title}>איפוס סיסמה</Text>
-          <Text style={styles.subtitle}>הגדירו סיסמה חדשה לחשבון</Text>
-        </View>
-
-        <AppCard style={styles.card}>
-          <View style={styles.passwordFieldWrapper}>
-            <AppInput
-              label="סיסמה חדשה"
-              placeholder="לפחות 8 תווים"
-              secureTextEntry={!showNewPassword}
-              value={newPassword}
-              onChangeText={setNewPassword}
-              style={styles.input}
-              inputStyle={styles.passwordInput}
-              editable={!submitting}
-            />
-            <Pressable
-              style={styles.passwordToggle}
-              onPress={() => setShowNewPassword((value) => !value)}
-              accessibilityRole="button"
-              accessibilityLabel={showNewPassword ? 'הסתר סיסמה' : 'הצג סיסמה'}
-              hitSlop={8}>
-              <Ionicons
-                name={showNewPassword ? 'eye-outline' : 'eye-off-outline'}
-                size={20}
-                color={colors.textMuted}
-              />
-            </Pressable>
-          </View>
-          {fieldErrors.newPassword ? <Text style={styles.fieldErrorText}>{fieldErrors.newPassword}</Text> : null}
-
-          <View style={styles.passwordFieldWrapper}>
-            <AppInput
-              label="וידוא סיסמה חדשה"
-              placeholder="הזינו שוב את הסיסמה"
-              secureTextEntry={!showConfirmPassword}
-              value={confirmPassword}
-              onChangeText={setConfirmPassword}
-              style={styles.input}
-              inputStyle={styles.passwordInput}
-              editable={!submitting}
-            />
-            <Pressable
-              style={styles.passwordToggle}
-              onPress={() => setShowConfirmPassword((value) => !value)}
-              accessibilityRole="button"
-              accessibilityLabel={showConfirmPassword ? 'הסתר סיסמה' : 'הצג סיסמה'}
-              hitSlop={8}>
-              <Ionicons
-                name={showConfirmPassword ? 'eye-outline' : 'eye-off-outline'}
-                size={20}
-                color={colors.textMuted}
-              />
-            </Pressable>
-          </View>
-          {fieldErrors.confirmPassword ? (
-            <Text style={styles.fieldErrorText}>{fieldErrors.confirmPassword}</Text>
-          ) : null}
-
-          {submitError ? <Text style={styles.submitErrorText}>{submitError}</Text> : null}
-          {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
-
-          <PrimaryButton
-            title={submitting ? 'מעדכן...' : 'עדכון סיסמה'}
-            onPress={handleSubmit}
-            loading={submitting}
-            disabled={submitting}
-            style={styles.button}
+    <AuthScreenShell title="איפוס סיסמה" subtitle="הגדירו סיסמה חדשה לחשבון" showTabs={false}>
+      <View style={styles.passwordFieldWrapper}>
+        <AppInput
+          label="סיסמה חדשה"
+          placeholder="לפחות 8 תווים"
+          secureTextEntry={!showNewPassword}
+          value={newPassword}
+          onChangeText={setNewPassword}
+          style={styles.input}
+          inputStyle={styles.passwordInput}
+          editable={!submitting}
+        />
+        <Pressable
+          style={styles.passwordToggle}
+          onPress={() => setShowNewPassword((value) => !value)}
+          accessibilityRole="button"
+          accessibilityLabel={showNewPassword ? 'הסתר סיסמה' : 'הצג סיסמה'}
+          hitSlop={8}>
+          <Ionicons
+            name={showNewPassword ? 'eye-outline' : 'eye-off-outline'}
+            size={20}
+            color={colors.textMuted}
           />
-        </AppCard>
+        </Pressable>
       </View>
-    </AppScreen>
+      {fieldErrors.newPassword ? <Text style={styles.fieldErrorText}>{fieldErrors.newPassword}</Text> : null}
+
+      <View style={styles.passwordFieldWrapper}>
+        <AppInput
+          label="וידוא סיסמה חדשה"
+          placeholder="הזינו שוב את הסיסמה"
+          secureTextEntry={!showConfirmPassword}
+          value={confirmPassword}
+          onChangeText={setConfirmPassword}
+          style={styles.input}
+          inputStyle={styles.passwordInput}
+          editable={!submitting}
+        />
+        <Pressable
+          style={styles.passwordToggle}
+          onPress={() => setShowConfirmPassword((value) => !value)}
+          accessibilityRole="button"
+          accessibilityLabel={showConfirmPassword ? 'הסתר סיסמה' : 'הצג סיסמה'}
+          hitSlop={8}>
+          <Ionicons
+            name={showConfirmPassword ? 'eye-outline' : 'eye-off-outline'}
+            size={20}
+            color={colors.textMuted}
+          />
+        </Pressable>
+      </View>
+      {fieldErrors.confirmPassword ? (
+        <Text style={styles.fieldErrorText}>{fieldErrors.confirmPassword}</Text>
+      ) : null}
+
+      {submitError ? <Text style={styles.submitErrorText}>{submitError}</Text> : null}
+      {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
+
+      <PrimaryButton
+        title={submitting ? 'מעדכן...' : 'עדכון סיסמה'}
+        onPress={handleSubmit}
+        loading={submitting}
+        disabled={submitting}
+        style={styles.button}
+      />
+    </AuthScreenShell>
   );
 }
 
 const styles = StyleSheet.create({
-  screenContent: {
-    justifyContent: 'flex-start',
-    alignItems: 'stretch',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xl,
-    paddingBottom: spacing.huge,
-  },
-  container: {
-    width: '100%',
-    gap: spacing.md,
-  },
-  header: {
-    alignItems: 'flex-end',
-    paddingTop: 2,
-    paddingBottom: 2,
-  },
-  title: {
-    fontSize: typography.title.fontSize,
-    fontWeight: typography.title.fontWeight,
-    color: colors.text,
-    textAlign: 'right',
-  },
-  subtitle: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '500',
-    color: colors.textMuted,
-    textAlign: 'right',
-    marginTop: spacing.xs,
-    lineHeight: 18,
-  },
-  card: {
-    width: '100%',
-  },
   input: {
     marginBottom: spacing.md,
   },
@@ -324,7 +279,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   loadingText: {
-    color: colors.textMuted,
+    color: colors.textOnDark,
     fontSize: typography.body.fontSize,
     textAlign: 'center',
   },

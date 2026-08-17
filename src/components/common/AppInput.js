@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { colors, radius, spacing, typography } from '../../theme';
 
@@ -83,6 +83,11 @@ const styles = StyleSheet.create({
     textAlign: 'right',
     textAlignVertical: 'center',
     writingDirection: 'rtl',
+    // On web, TextInput renders a real DOM <input>, which gets the browser's
+    // own square focus outline on top of this component's rounded turquoise
+    // focus ring (see `focused` below) - suppress only that native ring;
+    // `focused` remains the sole visual focus indicator.
+    ...Platform.select({ web: { outlineStyle: 'none' } }),
   },
   // A soft turquoise glow (not the generic black card shadow) reads as an
   // intentional focus state rather than "this input is elevated like a

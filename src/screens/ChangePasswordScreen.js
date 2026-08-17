@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppBackButton from '../components/common/AppBackButton';
@@ -10,7 +11,7 @@ import AppScreen from '../components/common/AppScreen';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { MIN_PASSWORD_LENGTH, PASSWORD_TOO_SHORT_MESSAGE } from '../constants/validation';
 import { supabase } from '../services/supabase';
-import { colors, spacing, typography } from '../theme';
+import { colors, radius, spacing, typography } from '../theme';
 
 export default function ChangePasswordScreen() {
   const [newPassword, setNewPassword] = useState('');
@@ -21,6 +22,21 @@ export default function ChangePasswordScreen() {
   const [submitError, setSubmitError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [rootHeight, setRootHeight] = useState(0);
+  const [heroHeight, setHeroHeight] = useState(0);
+
+  // Same measured-minHeight approach as ProfileScreen/EditProfileScreen's
+  // dark hero + light sheet (see HomeScreen for the full explanation) -
+  // guarantees the light sheet reaches the bottom of the real screen
+  // regardless of the flex-grow chain between here and the ScrollView.
+  const onRootLayout = useCallback((event) => {
+    setRootHeight(event.nativeEvent.layout.height);
+  }, []);
+  const onHeroLayout = useCallback((event) => {
+    setHeroHeight(event.nativeEvent.layout.height);
+  }, []);
+  const sheetMinHeight =
+    rootHeight > 0 && heroHeight > 0 ? rootHeight - heroHeight + radius.xl : undefined;
 
   const handleSubmit = async () => {
     if (submitting) {
@@ -98,102 +114,152 @@ export default function ChangePasswordScreen() {
   };
 
   return (
-    <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
-      <View style={styles.container}>
-        <View style={styles.header}>
-          <AppBackButton fallbackRoute="/(tabs)/profile" style={styles.headerBackButton} />
-          <View style={styles.headerTextBlock}>
-            <Text style={styles.title}>שינוי סיסמה</Text>
-            <Text style={styles.subtitle}>עדכנו את הסיסמה לחשבון שלכם</Text>
+    <View style={styles.root} onLayout={onRootLayout}>
+      {/* Full-bleed dark hero, same technique/tokens as ProfileScreen/
+          EditProfileScreen's own hero (see HomeScreen for the full
+          explanation), kept compact - back button + title/subtitle only,
+          no bulky content. */}
+      <LinearGradient
+        colors={[colors.bgDark, colors.charcoal]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={styles.heroGradient}
+      />
+
+      <AppScreen
+        backgroundColor="transparent"
+        contentContainerStyle={styles.screenContent}
+        style={styles.screenInner}
+        // No bottom edge - same reasoning as the other tab-adjacent screens
+        // (this route lives under (tabs), which already provides its own
+        // clearance below the content).
+        edges={['top', 'left', 'right']}>
+        <View style={styles.heroSection} onLayout={onHeroLayout}>
+          <View style={styles.heroInner}>
+            <AppBackButton
+              fallbackRoute="/(tabs)/profile"
+              color={colors.mutedOnDark}
+              style={styles.headerBackButton}
+            />
+            <View style={styles.headerTextBlock}>
+              <Text style={styles.title}>שינוי סיסמה</Text>
+              <Text style={styles.subtitle}>עדכנו את הסיסמה לחשבון שלכם</Text>
+            </View>
           </View>
         </View>
 
-        <AppCard style={styles.card}>
-          <View style={styles.passwordFieldWrapper}>
-            <AppInput
-              label="סיסמה חדשה"
-              placeholder="לפחות 8 תווים"
-              secureTextEntry={!showNewPassword}
-              value={newPassword}
-              onChangeText={setNewPassword}
-              style={styles.input}
-              inputStyle={styles.passwordInput}
-            />
-            <Pressable
-              style={styles.passwordToggle}
-              onPress={() => setShowNewPassword((value) => !value)}
-              accessibilityRole="button"
-              accessibilityLabel={showNewPassword ? 'הסתר סיסמה' : 'הצג סיסמה'}
-              hitSlop={8}>
-              <Ionicons
-                name={showNewPassword ? 'eye-outline' : 'eye-off-outline'}
-                size={20}
-                color={colors.textMuted}
+        {/* Light content sheet - same full-bleed/rounded-top/measured-
+            minHeight pattern as the other screens' own sheet. */}
+        <View style={[styles.sheet, sheetMinHeight ? { minHeight: sheetMinHeight } : null]}>
+          <View style={styles.sheetInner}>
+            <AppCard style={styles.card}>
+              <View style={styles.passwordFieldWrapper}>
+                <AppInput
+                  label="סיסמה חדשה"
+                  placeholder="לפחות 8 תווים"
+                  secureTextEntry={!showNewPassword}
+                  value={newPassword}
+                  onChangeText={setNewPassword}
+                  style={styles.input}
+                  inputStyle={styles.passwordInput}
+                />
+                <Pressable
+                  style={styles.passwordToggle}
+                  onPress={() => setShowNewPassword((value) => !value)}
+                  accessibilityRole="button"
+                  accessibilityLabel={showNewPassword ? 'הסתר סיסמה' : 'הצג סיסמה'}
+                  hitSlop={8}>
+                  <Ionicons
+                    name={showNewPassword ? 'eye-outline' : 'eye-off-outline'}
+                    size={20}
+                    color={colors.textMuted}
+                  />
+                </Pressable>
+              </View>
+              {fieldErrors.newPassword ? <Text style={styles.fieldErrorText}>{fieldErrors.newPassword}</Text> : null}
+
+              <View style={styles.passwordFieldWrapper}>
+                <AppInput
+                  label="וידוא סיסמה חדשה"
+                  placeholder="הזינו שוב את הסיסמה"
+                  secureTextEntry={!showConfirmPassword}
+                  value={confirmPassword}
+                  onChangeText={setConfirmPassword}
+                  style={styles.input}
+                  inputStyle={styles.passwordInput}
+                />
+                <Pressable
+                  style={styles.passwordToggle}
+                  onPress={() => setShowConfirmPassword((value) => !value)}
+                  accessibilityRole="button"
+                  accessibilityLabel={showConfirmPassword ? 'הסתר סיסמה' : 'הצג סיסמה'}
+                  hitSlop={8}>
+                  <Ionicons
+                    name={showConfirmPassword ? 'eye-outline' : 'eye-off-outline'}
+                    size={20}
+                    color={colors.textMuted}
+                  />
+                </Pressable>
+              </View>
+              {fieldErrors.confirmPassword ? (
+                <Text style={styles.fieldErrorText}>{fieldErrors.confirmPassword}</Text>
+              ) : null}
+
+              {submitError ? <Text style={styles.submitErrorText}>{submitError}</Text> : null}
+              {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
+
+              <PrimaryButton
+                title={submitting ? 'מעדכן...' : 'עדכון סיסמה'}
+                onPress={handleSubmit}
+                loading={submitting}
+                disabled={submitting}
+                style={styles.button}
               />
-            </Pressable>
+            </AppCard>
           </View>
-          {fieldErrors.newPassword ? <Text style={styles.fieldErrorText}>{fieldErrors.newPassword}</Text> : null}
-
-          <View style={styles.passwordFieldWrapper}>
-            <AppInput
-              label="וידוא סיסמה חדשה"
-              placeholder="הזינו שוב את הסיסמה"
-              secureTextEntry={!showConfirmPassword}
-              value={confirmPassword}
-              onChangeText={setConfirmPassword}
-              style={styles.input}
-              inputStyle={styles.passwordInput}
-            />
-            <Pressable
-              style={styles.passwordToggle}
-              onPress={() => setShowConfirmPassword((value) => !value)}
-              accessibilityRole="button"
-              accessibilityLabel={showConfirmPassword ? 'הסתר סיסמה' : 'הצג סיסמה'}
-              hitSlop={8}>
-              <Ionicons
-                name={showConfirmPassword ? 'eye-outline' : 'eye-off-outline'}
-                size={20}
-                color={colors.textMuted}
-              />
-            </Pressable>
-          </View>
-          {fieldErrors.confirmPassword ? (
-            <Text style={styles.fieldErrorText}>{fieldErrors.confirmPassword}</Text>
-          ) : null}
-
-          {submitError ? <Text style={styles.submitErrorText}>{submitError}</Text> : null}
-          {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
-
-          <PrimaryButton
-            title={submitting ? 'מעדכן...' : 'עדכון סיסמה'}
-            onPress={handleSubmit}
-            loading={submitting}
-            disabled={submitting}
-            style={styles.button}
-          />
-        </AppCard>
-      </View>
-    </AppScreen>
+        </View>
+      </AppScreen>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  screenContent: {
-    justifyContent: 'flex-start',
-    alignItems: 'stretch',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xl,
-    paddingBottom: spacing.huge,
+  root: {
+    flex: 1,
+    backgroundColor: colors.background,
   },
-  container: {
+  heroGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  // Same cancel-AppScreen's-own-wrapper technique as the other screens (see
+  // HomeScreen's screenInner comment for the full flex-chain explanation).
+  screenInner: {
+    flex: 1,
     width: '100%',
-    gap: spacing.md,
+    maxWidth: '100%',
+    alignSelf: 'stretch',
+    paddingHorizontal: 0,
+    paddingVertical: 0,
   },
-  header: {
+  screenContent: {
+    flexGrow: 1,
+  },
+  // Deliberately short - back button + title/subtitle only, no bulky
+  // content, matching ProfileScreen/EditProfileScreen's own compact
+  // secondary-screen hero.
+  heroSection: {
+    paddingTop: spacing.sm,
+    // Extra bottom padding absorbs the sheet's negative marginTop overlap
+    // below (see `sheet`), so the rounded corners never cut into the
+    // header text.
+    paddingBottom: spacing.xl + radius.xl,
+  },
+  heroInner: {
+    width: '100%',
+    maxWidth: 480,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.lg,
     position: 'relative',
-    alignItems: 'flex-end',
-    paddingTop: 2,
-    paddingBottom: 2,
   },
   headerBackButton: {
     position: 'absolute',
@@ -209,19 +275,38 @@ const styles = StyleSheet.create({
   title: {
     fontSize: typography.title.fontSize,
     fontWeight: typography.title.fontWeight,
-    color: colors.text,
+    color: colors.textOnDark,
     textAlign: 'right',
   },
   subtitle: {
     fontSize: typography.caption.fontSize,
     fontWeight: '500',
-    color: colors.textMuted,
+    color: colors.mutedOnDark,
     textAlign: 'right',
     marginTop: spacing.xs,
     lineHeight: 18,
   },
+  sheet: {
+    flex: 1,
+    backgroundColor: colors.background,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    marginTop: -radius.xl,
+  },
+  sheetInner: {
+    width: '100%',
+    maxWidth: 480,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.xl,
+    paddingBottom: spacing.xxl,
+  },
+  // AppCard's own default is radius.lg - bumped to radius.xl here so the
+  // form card reads as an intentionally-designed premium surface, not a
+  // generic form container.
   card: {
     width: '100%',
+    borderRadius: radius.xl,
   },
   input: {
     marginBottom: spacing.md,

@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Platform, Pressable, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 import AppInput from '../components/common/AppInput';
 import AppScreen from '../components/common/AppScreen';
@@ -200,6 +200,9 @@ const styles = StyleSheet.create({
     lineHeight: typography.body.lineHeight,
     textAlign: 'right',
     writingDirection: 'rtl',
+    // Same web-only browser-focus-ring suppression as AppInput - this field
+    // renders a raw TextInput directly rather than going through AppInput.
+    ...Platform.select({ web: { outlineStyle: 'none' } }),
   },
   passwordFieldWrapper: {
     position: 'relative',

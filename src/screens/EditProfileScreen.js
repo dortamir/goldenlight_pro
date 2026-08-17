@@ -1,6 +1,8 @@
+import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import { router } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppBackButton from '../components/common/AppBackButton';
@@ -16,7 +18,9 @@ import {
   updateProfile,
   uploadProfileAvatar,
 } from '../services/profileService';
-import { colors, spacing, typography } from '../theme';
+import { colors, radius, spacing, typography } from '../theme';
+
+const AVATAR_SIZE = 112;
 
 const supportedAvatarTypes = ['image/jpeg', 'image/png', 'image/webp'];
 
@@ -48,6 +52,22 @@ export default function EditProfileScreen() {
   const [localAvatarUri, setLocalAvatarUri] = useState(null);
   const [pickedAsset, setPickedAsset] = useState(null);
   const [avatarError, setAvatarError] = useState('');
+  const [rootHeight, setRootHeight] = useState(0);
+  const [heroHeight, setHeroHeight] = useState(0);
+
+  // Same measured-minHeight approach as ProfileScreen/PurchaseHistoryScreen/
+  // PurchaseReportDetailsScreen's dark hero + light sheet (see HomeScreen
+  // for the full explanation) - guarantees the light sheet reaches the
+  // bottom of the real screen regardless of the flex-grow chain between
+  // here and the ScrollView.
+  const onRootLayout = useCallback((event) => {
+    setRootHeight(event.nativeEvent.layout.height);
+  }, []);
+  const onHeroLayout = useCallback((event) => {
+    setHeroHeight(event.nativeEvent.layout.height);
+  }, []);
+  const sheetMinHeight =
+    rootHeight > 0 && heroHeight > 0 ? rootHeight - heroHeight + radius.xl : undefined;
 
   useEffect(() => {
     let isActive = true;
@@ -241,16 +261,6 @@ export default function EditProfileScreen() {
     }
   };
 
-  if (loading) {
-    return (
-      <AppScreen backgroundColor={colors.background}>
-        <View style={styles.loadingState}>
-          <ActivityIndicator color={colors.primary} size="small" />
-        </View>
-      </AppScreen>
-    );
-  }
-
   const avatarLetter = (() => {
     const source = fullName || user?.email || 'G';
     const visible = String(source).trim();
@@ -259,122 +269,182 @@ export default function EditProfileScreen() {
   const avatarPreviewUri = localAvatarUri || (avatarState.status === 'ready' ? avatarState.url : null);
 
   return (
-    <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
-      <View style={styles.container}>
-        <View style={styles.header}>
-          <AppBackButton fallbackRoute="/(tabs)/profile" style={styles.headerBackButton} />
-          <View style={styles.headerTextBlock}>
-            <Text style={styles.title}>עריכת פרטים אישיים</Text>
-            <Text style={styles.subtitle}>עדכנו את פרטי החשבון שלכם</Text>
+    <View style={styles.root} onLayout={onRootLayout}>
+      {/* Full-bleed dark hero, same technique/tokens as ProfileScreen/
+          PurchaseHistoryScreen/PurchaseReportDetailsScreen's own hero (see
+          HomeScreen for the full explanation), kept compact - back button +
+          title/subtitle only, no bulky content. */}
+      <LinearGradient
+        colors={[colors.bgDark, colors.charcoal]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={styles.heroGradient}
+      />
+
+      <AppScreen
+        backgroundColor="transparent"
+        contentContainerStyle={styles.screenContent}
+        style={styles.screenInner}
+        // No bottom edge - same reasoning as the other tab-adjacent screens
+        // (this route lives under (tabs), which already provides its own
+        // clearance below the content).
+        edges={['top', 'left', 'right']}>
+        <View style={styles.heroSection} onLayout={onHeroLayout}>
+          <View style={styles.heroInner}>
+            <AppBackButton
+              fallbackRoute="/(tabs)/profile"
+              color={colors.mutedOnDark}
+              style={styles.headerBackButton}
+            />
+            <View style={styles.headerTextBlock}>
+              <Text style={styles.title}>עריכת פרטים אישיים</Text>
+              <Text style={styles.subtitle}>עדכנו את פרטי החשבון שלכם</Text>
+            </View>
           </View>
         </View>
 
-        <View style={styles.avatarSection}>
-          <View style={styles.avatarCircle}>
-            {avatarPreviewUri ? (
-              <Image
-                source={{ uri: avatarPreviewUri }}
-                style={styles.avatarImage}
-                resizeMode="cover"
-                fadeDuration={200}
-              />
-            ) : !localAvatarUri && avatarState.status === 'loading' ? (
-              <View style={styles.avatarLoadingWrap}>
+        {/* Light content sheet - same full-bleed/rounded-top/measured-
+            minHeight pattern as the other screens' own sheet. */}
+        <View style={[styles.sheet, sheetMinHeight ? { minHeight: sheetMinHeight } : null]}>
+          <View style={styles.sheetInner}>
+            {loading ? (
+              <View style={styles.loadingState}>
                 <ActivityIndicator color={colors.primary} size="small" />
               </View>
             ) : (
-              <Text style={styles.avatarLetter}>{avatarLetter}</Text>
+              <>
+                <View style={styles.avatarSection}>
+                  <View style={styles.avatarRing}>
+                    <View style={styles.avatarCircle}>
+                      {avatarPreviewUri ? (
+                        <Image
+                          source={{ uri: avatarPreviewUri }}
+                          style={styles.avatarImage}
+                          resizeMode="cover"
+                          fadeDuration={200}
+                        />
+                      ) : !localAvatarUri && avatarState.status === 'loading' ? (
+                        <View style={styles.avatarLoadingWrap}>
+                          <ActivityIndicator color={colors.primary} size="small" />
+                        </View>
+                      ) : (
+                        <Text style={styles.avatarLetter}>{avatarLetter}</Text>
+                      )}
+                    </View>
+                  </View>
+
+                  <Pressable
+                    onPress={handlePickImage}
+                    disabled={saving}
+                    accessibilityRole="button"
+                    accessibilityLabel="עריכת תמונה"
+                    style={styles.avatarEditAction}>
+                    <Text style={styles.avatarEditText}>עריכת תמונה</Text>
+                    <Ionicons name="create-outline" size={16} color={colors.primary} />
+                  </Pressable>
+
+                  {avatarError ? <Text style={styles.avatarErrorText}>{avatarError}</Text> : null}
+                </View>
+
+                <AppCard style={styles.card}>
+                  {loadError ? <Text style={styles.loadErrorText}>{loadError}</Text> : null}
+
+                  <AppInput
+                    label="שם מלא"
+                    placeholder="הכניסו שם מלא"
+                    value={fullName}
+                    onChangeText={setFullName}
+                    error={fieldErrors.fullName}
+                    style={styles.input}
+                  />
+
+                  <AppInput
+                    label="טלפון"
+                    placeholder="050-1234567"
+                    keyboardType="phone-pad"
+                    value={phone}
+                    onChangeText={setPhone}
+                    error={fieldErrors.phone}
+                    style={styles.input}
+                  />
+
+                  <AppInput
+                    label="מקצוע"
+                    placeholder="הכניסו מקצוע"
+                    value={profession}
+                    onChangeText={setProfession}
+                    style={styles.input}
+                  />
+
+                  {user?.email ? (
+                    <View style={styles.emailWrapper}>
+                      <Text style={styles.emailLabel}>אימייל</Text>
+                      <Text style={styles.emailValue}>{user.email}</Text>
+                    </View>
+                  ) : null}
+
+                  {saveError ? <Text style={styles.saveErrorText}>{saveError}</Text> : null}
+                  {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
+
+                  <PrimaryButton
+                    title={saving ? 'שומר...' : 'שמירת שינויים'}
+                    onPress={handleSave}
+                    loading={saving}
+                    disabled={saving}
+                    style={styles.button}
+                  />
+                </AppCard>
+              </>
             )}
           </View>
-
-          <Pressable
-            onPress={handlePickImage}
-            disabled={saving}
-            accessibilityRole="button"
-            accessibilityLabel="עריכת תמונה"
-            style={styles.avatarEditAction}>
-            <Text style={styles.avatarEditText}>עריכת תמונה</Text>
-            <Text style={styles.avatarEditIcon}>✎</Text>
-          </Pressable>
-
-          {avatarError ? <Text style={styles.avatarErrorText}>{avatarError}</Text> : null}
         </View>
-
-        <AppCard style={styles.card}>
-          {loadError ? <Text style={styles.loadErrorText}>{loadError}</Text> : null}
-
-          <AppInput
-            label="שם מלא"
-            placeholder="הכניסו שם מלא"
-            value={fullName}
-            onChangeText={setFullName}
-            error={fieldErrors.fullName}
-            style={styles.input}
-          />
-
-          <AppInput
-            label="טלפון"
-            placeholder="050-1234567"
-            keyboardType="phone-pad"
-            value={phone}
-            onChangeText={setPhone}
-            error={fieldErrors.phone}
-            style={styles.input}
-          />
-
-          <AppInput
-            label="מקצוע"
-            placeholder="הכניסו מקצוע"
-            value={profession}
-            onChangeText={setProfession}
-            style={styles.input}
-          />
-
-          {user?.email ? (
-            <View style={styles.emailWrapper}>
-              <Text style={styles.emailLabel}>אימייל</Text>
-              <Text style={styles.emailValue}>{user.email}</Text>
-            </View>
-          ) : null}
-
-          {saveError ? <Text style={styles.saveErrorText}>{saveError}</Text> : null}
-          {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
-
-          <PrimaryButton
-            title={saving ? 'שומר...' : 'שמירת שינויים'}
-            onPress={handleSave}
-            loading={saving}
-            disabled={saving}
-            style={styles.button}
-          />
-        </AppCard>
-      </View>
-    </AppScreen>
+      </AppScreen>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  loadingState: {
+  root: {
     flex: 1,
+    backgroundColor: colors.background,
+  },
+  heroGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  // Same cancel-AppScreen's-own-wrapper technique as the other screens (see
+  // HomeScreen's screenInner comment for the full flex-chain explanation).
+  screenInner: {
+    flex: 1,
+    width: '100%',
+    maxWidth: '100%',
+    alignSelf: 'stretch',
+    paddingHorizontal: 0,
+    paddingVertical: 0,
+  },
+  screenContent: {
+    flexGrow: 1,
+  },
+  loadingState: {
+    minHeight: 200,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  screenContent: {
-    justifyContent: 'flex-start',
-    alignItems: 'stretch',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xl,
-    paddingBottom: spacing.huge,
+  // Deliberately short - back button + title/subtitle only, no bulky
+  // content, matching PurchaseHistoryScreen/PurchaseReportDetailsScreen's
+  // own compact secondary-screen hero.
+  heroSection: {
+    paddingTop: spacing.sm,
+    // Extra bottom padding absorbs the sheet's negative marginTop overlap
+    // below (see `sheet`), so the rounded corners never cut into the
+    // header text.
+    paddingBottom: spacing.xl + radius.xl,
   },
-  container: {
+  heroInner: {
     width: '100%',
-    gap: spacing.md,
-  },
-  header: {
+    maxWidth: 480,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.lg,
     position: 'relative',
-    alignItems: 'flex-end',
-    paddingTop: 2,
-    paddingBottom: 2,
   },
   headerBackButton: {
     position: 'absolute',
@@ -390,31 +460,64 @@ const styles = StyleSheet.create({
   title: {
     fontSize: typography.title.fontSize,
     fontWeight: typography.title.fontWeight,
-    color: colors.text,
+    color: colors.textOnDark,
     textAlign: 'right',
   },
   subtitle: {
     fontSize: typography.caption.fontSize,
     fontWeight: '500',
-    color: colors.textMuted,
+    color: colors.mutedOnDark,
     textAlign: 'right',
     marginTop: spacing.xs,
     lineHeight: 18,
+  },
+  sheet: {
+    flex: 1,
+    backgroundColor: colors.background,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    marginTop: -radius.xl,
+  },
+  sheetInner: {
+    width: '100%',
+    maxWidth: 480,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.xl,
+    paddingBottom: spacing.xxl,
+    gap: spacing.lg,
   },
   avatarSection: {
     width: '100%',
     alignItems: 'center',
   },
+  // Turquoise ring + a very subtle glow (not a heavy shadow) - same
+  // treatment as ProfileScreen's own avatar, so both screens' avatars read
+  // as the same premium component. The ring is a separate wrapper around
+  // avatarCircle (not a border directly on it) so the border never clips
+  // into the circular image itself.
+  avatarRing: {
+    width: AVATAR_SIZE + 8,
+    height: AVATAR_SIZE + 8,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: colors.primary,
+    shadowOpacity: 0.18,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 4,
+  },
   avatarCircle: {
-    width: 112,
-    height: 112,
-    borderRadius: 56,
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: 999,
     backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: colors.border,
   },
   avatarImage: {
     width: '100%',
@@ -440,12 +543,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 6,
   },
-  avatarEditIcon: {
-    fontSize: 17,
-    lineHeight: typography.caption.lineHeight,
-    color: colors.primary,
-    transform: [{ scaleX: -1 }],
-  },
   avatarEditText: {
     fontSize: typography.caption.fontSize,
     fontWeight: '600',
@@ -459,18 +556,26 @@ const styles = StyleSheet.create({
     color: colors.error,
     textAlign: 'center',
   },
+  // AppCard's own default is radius.lg - bumped to radius.xl here so the
+  // form card reads as an intentionally-designed premium surface, not a
+  // generic form container.
   card: {
     width: '100%',
+    borderRadius: radius.xl,
   },
   input: {
     marginBottom: spacing.md,
   },
+  // Soft muted box (not just a divided row) - subtly distinguishes this
+  // read-only field from the editable AppInput fields above it, without
+  // reading as a broken/disabled input.
   emailWrapper: {
     alignItems: 'flex-end',
-    paddingTop: spacing.sm,
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
     marginBottom: spacing.md,
-    borderTopWidth: 1,
-    borderTopColor: colors.surfaceMuted,
   },
   emailLabel: {
     fontSize: 11,
@@ -481,7 +586,7 @@ const styles = StyleSheet.create({
   emailValue: {
     fontSize: typography.caption.fontSize,
     fontWeight: '600',
-    color: colors.text,
+    color: colors.textMuted,
     textAlign: 'left',
     writingDirection: 'ltr',
     marginTop: 4,

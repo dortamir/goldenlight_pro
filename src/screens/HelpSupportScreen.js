@@ -1,10 +1,11 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useState } from 'react';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useCallback, useState } from 'react';
 import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppBackButton from '../components/common/AppBackButton';
 import AppScreen from '../components/common/AppScreen';
-import { colors, shadows, spacing, typography } from '../theme';
+import { colors, radius, shadows, spacing, typography } from '../theme';
 
 const PHONE_NUMBER = '08-8695112';
 const FAX_NUMBER = '08-8695110';
@@ -48,6 +49,22 @@ async function openUrlSafely(url) {
 
 export default function HelpSupportScreen() {
   const [expandedKey, setExpandedKey] = useState(null);
+  const [rootHeight, setRootHeight] = useState(0);
+  const [heroHeight, setHeroHeight] = useState(0);
+
+  // Same measured-minHeight approach as ProfileScreen/EditProfileScreen/
+  // ChangePasswordScreen's dark hero + light sheet (see HomeScreen for the
+  // full explanation) - guarantees the light sheet reaches the bottom of
+  // the real screen regardless of the flex-grow chain between here and the
+  // ScrollView.
+  const onRootLayout = useCallback((event) => {
+    setRootHeight(event.nativeEvent.layout.height);
+  }, []);
+  const onHeroLayout = useCallback((event) => {
+    setHeroHeight(event.nativeEvent.layout.height);
+  }, []);
+  const sheetMinHeight =
+    rootHeight > 0 && heroHeight > 0 ? rootHeight - heroHeight + radius.xl : undefined;
 
   const handleCall = () => {
     openUrlSafely(`tel:${PHONE_NUMBER}`);
@@ -62,107 +79,165 @@ export default function HelpSupportScreen() {
   };
 
   return (
-    <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
-      <View style={styles.container}>
-        <View style={styles.header}>
-          <AppBackButton fallbackRoute="/(tabs)/profile" style={styles.headerBackButton} />
-          <View style={styles.headerTextBlock}>
-            <Text style={styles.title}>עזרה ותמיכה</Text>
-            <Text style={styles.subtitle}>אנחנו כאן כדי לעזור</Text>
-          </View>
-        </View>
+    <View style={styles.root} onLayout={onRootLayout}>
+      {/* Full-bleed dark hero, same technique/tokens as ProfileScreen/
+          EditProfileScreen/ChangePasswordScreen's own hero (see HomeScreen
+          for the full explanation), kept compact - back button +
+          title/subtitle only, no bulky content. */}
+      <LinearGradient
+        colors={[colors.bgDark, colors.charcoal]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={styles.heroGradient}
+      />
 
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>צרו איתנו קשר</Text>
-
-          <Pressable style={styles.contactRow} onPress={handleCall} accessibilityRole="button">
-            <View style={styles.contactIconWrap}>
-              <Ionicons name="call-outline" size={20} color={colors.primary} />
-            </View>
-            <View style={styles.contactTextWrap}>
-              <Text style={styles.contactLabel}>טלפון</Text>
-              <Text style={styles.contactValue}>{PHONE_NUMBER}</Text>
-            </View>
-          </Pressable>
-
-          <Pressable style={styles.contactRow} onPress={handleEmail} accessibilityRole="button">
-            <View style={styles.contactIconWrap}>
-              <Ionicons name="mail-outline" size={20} color={colors.primary} />
-            </View>
-            <View style={styles.contactTextWrap}>
-              <Text style={styles.contactLabel}>אימייל</Text>
-              <Text style={styles.contactValue}>{EMAIL_ADDRESS}</Text>
-            </View>
-          </Pressable>
-
-          <View style={[styles.contactRow, styles.contactRowLast]}>
-            <View style={styles.contactIconWrap}>
-              <Ionicons name="document-text-outline" size={20} color={colors.primary} />
-            </View>
-            <View style={styles.contactTextWrap}>
-              <Text style={styles.contactLabel}>פקס</Text>
-              <Text style={styles.contactValue}>{FAX_NUMBER}</Text>
+      <AppScreen
+        backgroundColor="transparent"
+        contentContainerStyle={styles.screenContent}
+        style={styles.screenInner}
+        // No bottom edge - same reasoning as the other tab-adjacent screens
+        // (this route lives under (tabs), which already provides its own
+        // clearance below the content).
+        edges={['top', 'left', 'right']}>
+        <View style={styles.heroSection} onLayout={onHeroLayout}>
+          <View style={styles.heroInner}>
+            <AppBackButton
+              fallbackRoute="/(tabs)/profile"
+              color={colors.mutedOnDark}
+              style={styles.headerBackButton}
+            />
+            <View style={styles.headerTextBlock}>
+              <Text style={styles.title}>עזרה ותמיכה</Text>
+              <Text style={styles.subtitle}>אנחנו כאן כדי לעזור</Text>
             </View>
           </View>
         </View>
 
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>קצת על Golden Light</Text>
-          <Text style={styles.aboutText}>
-            גולדן לייט מתמחה בייבוא, ייצור ושיווק גופי תאורה ופתרונות תאורה בישראל. החברה מספקת
-            פתרונות ללקוחות פרטיים ועסקיים, מוסדות, אדריכלים ומעצבים.
-          </Text>
-        </View>
+        {/* Light content sheet - same full-bleed/rounded-top/measured-
+            minHeight pattern as the other screens' own sheet. */}
+        <View style={[styles.sheet, sheetMinHeight ? { minHeight: sheetMinHeight } : null]}>
+          <View style={styles.sheetInner}>
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>צרו איתנו קשר</Text>
 
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>שאלות נפוצות</Text>
-          <View style={styles.faqList}>
-            {faqItems.map((item, index) => {
-              const isExpanded = expandedKey === item.key;
-              return (
-                <View
-                  key={item.key}
-                  style={[styles.faqItem, index === faqItems.length - 1 && styles.faqItemLast]}>
-                  <Pressable
-                    style={styles.faqQuestionRow}
-                    onPress={() => toggleFaq(item.key)}
-                    accessibilityRole="button"
-                    accessibilityState={{ expanded: isExpanded }}>
-                    <Ionicons
-                      name={isExpanded ? 'chevron-up-outline' : 'chevron-down-outline'}
-                      size={18}
-                      color={colors.textMuted}
-                    />
-                    <Text style={styles.faqQuestionText}>{item.question}</Text>
-                  </Pressable>
-                  {isExpanded ? <Text style={styles.faqAnswerText}>{item.answer}</Text> : null}
+              <Pressable
+                style={({ pressed }) => [styles.contactRow, pressed && styles.contactRowPressed]}
+                onPress={handleCall}
+                accessibilityRole="button">
+                <View style={styles.contactIconWrap}>
+                  <Ionicons name="call-outline" size={18} color={colors.primary} />
                 </View>
-              );
-            })}
+                <View style={styles.contactTextWrap}>
+                  <Text style={styles.contactLabel}>טלפון</Text>
+                  <Text style={styles.contactValue}>{PHONE_NUMBER}</Text>
+                </View>
+                <Ionicons name="chevron-back" size={16} color={colors.textMuted} />
+              </Pressable>
+
+              <Pressable
+                style={({ pressed }) => [styles.contactRow, pressed && styles.contactRowPressed]}
+                onPress={handleEmail}
+                accessibilityRole="button">
+                <View style={styles.contactIconWrap}>
+                  <Ionicons name="mail-outline" size={18} color={colors.primary} />
+                </View>
+                <View style={styles.contactTextWrap}>
+                  <Text style={styles.contactLabel}>אימייל</Text>
+                  <Text style={styles.contactValue}>{EMAIL_ADDRESS}</Text>
+                </View>
+                <Ionicons name="chevron-back" size={16} color={colors.textMuted} />
+              </Pressable>
+
+              <View style={[styles.contactRow, styles.contactRowLast]}>
+                <View style={styles.contactIconWrap}>
+                  <Ionicons name="document-text-outline" size={18} color={colors.primary} />
+                </View>
+                <View style={styles.contactTextWrap}>
+                  <Text style={styles.contactLabel}>פקס</Text>
+                  <Text style={styles.contactValue}>{FAX_NUMBER}</Text>
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>קצת על Golden Light</Text>
+              <Text style={styles.aboutText}>
+                גולדן לייט מתמחה בייבוא, ייצור ושיווק גופי תאורה ופתרונות תאורה בישראל. החברה מספקת
+                פתרונות ללקוחות פרטיים ועסקיים, מוסדות, אדריכלים ומעצבים.
+              </Text>
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>שאלות נפוצות</Text>
+              <View style={styles.faqList}>
+                {faqItems.map((item, index) => {
+                  const isExpanded = expandedKey === item.key;
+                  return (
+                    <View
+                      key={item.key}
+                      style={[styles.faqItem, index === faqItems.length - 1 && styles.faqItemLast]}>
+                      <Pressable
+                        style={styles.faqQuestionRow}
+                        onPress={() => toggleFaq(item.key)}
+                        accessibilityRole="button"
+                        accessibilityState={{ expanded: isExpanded }}>
+                        <Ionicons
+                          name={isExpanded ? 'chevron-up-outline' : 'chevron-down-outline'}
+                          size={18}
+                          color={colors.textMuted}
+                        />
+                        <Text style={styles.faqQuestionText}>{item.question}</Text>
+                      </Pressable>
+                      {isExpanded ? <Text style={styles.faqAnswerText}>{item.answer}</Text> : null}
+                    </View>
+                  );
+                })}
+              </View>
+            </View>
           </View>
         </View>
-      </View>
-    </AppScreen>
+      </AppScreen>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  screenContent: {
-    justifyContent: 'flex-start',
-    alignItems: 'stretch',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xl,
-    paddingBottom: spacing.huge,
+  root: {
+    flex: 1,
+    backgroundColor: colors.background,
   },
-  container: {
+  heroGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  // Same cancel-AppScreen's-own-wrapper technique as the other screens (see
+  // HomeScreen's screenInner comment for the full flex-chain explanation).
+  screenInner: {
+    flex: 1,
     width: '100%',
-    gap: spacing.md,
+    maxWidth: '100%',
+    alignSelf: 'stretch',
+    paddingHorizontal: 0,
+    paddingVertical: 0,
   },
-  header: {
+  screenContent: {
+    flexGrow: 1,
+  },
+  // Deliberately short - back button + title/subtitle only, no bulky
+  // content, matching ProfileScreen/EditProfileScreen/ChangePasswordScreen's
+  // own compact secondary-screen hero.
+  heroSection: {
+    paddingTop: spacing.sm,
+    // Extra bottom padding absorbs the sheet's negative marginTop overlap
+    // below (see `sheet`), so the rounded corners never cut into the
+    // header text.
+    paddingBottom: spacing.xl + radius.xl,
+  },
+  heroInner: {
+    width: '100%',
+    maxWidth: 480,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.lg,
     position: 'relative',
-    alignItems: 'flex-end',
-    paddingTop: 2,
-    paddingBottom: 2,
   },
   headerBackButton: {
     position: 'absolute',
@@ -178,21 +253,37 @@ const styles = StyleSheet.create({
   title: {
     fontSize: typography.title.fontSize,
     fontWeight: typography.title.fontWeight,
-    color: colors.text,
+    color: colors.textOnDark,
     textAlign: 'right',
   },
   subtitle: {
     fontSize: typography.caption.fontSize,
     fontWeight: '500',
-    color: colors.textMuted,
+    color: colors.mutedOnDark,
     textAlign: 'right',
     marginTop: spacing.xs,
     lineHeight: 18,
   },
+  sheet: {
+    flex: 1,
+    backgroundColor: colors.background,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    marginTop: -radius.xl,
+  },
+  sheetInner: {
+    width: '100%',
+    maxWidth: 480,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.xl,
+    paddingBottom: spacing.xxl,
+    gap: spacing.md,
+  },
   card: {
     width: '100%',
     backgroundColor: colors.white,
-    borderRadius: 16,
+    borderRadius: radius.lg,
     padding: spacing.lg,
     borderWidth: 1,
     borderColor: colors.border,
@@ -210,16 +301,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.md,
     paddingVertical: spacing.md,
+    minHeight: 44,
     borderTopWidth: 1,
     borderTopColor: colors.surfaceMuted,
+  },
+  contactRowPressed: {
+    opacity: 0.7,
   },
   contactRowLast: {
     paddingBottom: 0,
   },
   contactIconWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 34,
+    height: 34,
+    borderRadius: radius.md,
     backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',

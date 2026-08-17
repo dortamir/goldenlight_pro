@@ -1,6 +1,7 @@
 import { Image, StyleSheet, Text, View } from 'react-native';
 
 import { colors, radius, shadows, spacing, typography } from '../../theme';
+import AppBackButton from './AppBackButton';
 import AppCard from './AppCard';
 import AppScreen from './AppScreen';
 import AuthLogoGlow from './AuthLogoGlow';
@@ -29,12 +30,30 @@ export default function AuthScreenShell({
   activeTab,
   onRegisterPress,
   onLoginPress,
+  // Both opt-in and fully backward-compatible: every existing caller
+  // (Login/Register) leaves these unset, which keeps their current
+  // rendering byte-for-byte identical. A secondary auth action (e.g.
+  // ForgotPasswordScreen) that isn't part of the login/register toggle can
+  // set showTabs={false} to omit AuthSegmentedControl entirely, and pass
+  // backFallbackRoute to render a back button (reusing AppBackButton's own
+  // canGoBack()-then-fallback behavior, not new navigation logic) in the
+  // same top-right position every other secondary screen uses.
+  showTabs = true,
+  backFallbackRoute,
   children,
 }) {
   return (
     <View style={styles.root}>
       <AppScreen backgroundColor="transparent">
         <View style={styles.screenContent}>
+          {backFallbackRoute ? (
+            <AppBackButton
+              fallbackRoute={backFallbackRoute}
+              color={colors.mutedOnDark}
+              style={styles.backButton}
+            />
+          ) : null}
+
           <View style={styles.heroSection}>
             {/* Single true radial-gradient glow (see AuthLogoGlow) - one
                 continuous falloff, not stacked flat-opacity rings. */}
@@ -54,11 +73,13 @@ export default function AuthScreenShell({
             <Text style={styles.title}>{title}</Text>
             {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
 
-            <AuthSegmentedControl
-              activeTab={activeTab}
-              onRegisterPress={onRegisterPress}
-              onLoginPress={onLoginPress}
-            />
+            {showTabs ? (
+              <AuthSegmentedControl
+                activeTab={activeTab}
+                onRegisterPress={onRegisterPress}
+                onLoginPress={onLoginPress}
+              />
+            ) : null}
           </View>
 
           <AppCard style={styles.card}>
@@ -78,6 +99,15 @@ const styles = StyleSheet.create({
     flex: 1,
     width: '100%',
     justifyContent: 'center',
+    position: 'relative',
+  },
+  // Top-right, same position every other secondary screen's back button
+  // uses - only rendered when backFallbackRoute is passed in (see above).
+  backButton: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    zIndex: 1,
   },
   heroSection: {
     alignItems: 'center',

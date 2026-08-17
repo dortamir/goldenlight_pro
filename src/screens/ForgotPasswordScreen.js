@@ -1,11 +1,9 @@
 import * as Linking from 'expo-linking';
 import { useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text } from 'react-native';
 
-import AppBackButton from '../components/common/AppBackButton';
-import AppCard from '../components/common/AppCard';
 import AppInput from '../components/common/AppInput';
-import AppScreen from '../components/common/AppScreen';
+import AuthScreenShell from '../components/common/AuthScreenShell';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { supabase } from '../services/supabase';
 import { colors, spacing, typography } from '../theme';
@@ -81,94 +79,41 @@ export default function ForgotPasswordScreen() {
   };
 
   return (
-    <AppScreen backgroundColor={colors.background} contentContainerStyle={styles.screenContent}>
-      <View style={styles.container}>
-        <View style={styles.header}>
-          <AppBackButton fallbackRoute="/(auth)/login" style={styles.headerBackButton} />
-          <View style={styles.headerTextBlock}>
-            <Text style={styles.title}>שכחתי סיסמה</Text>
-            <Text style={styles.subtitle}>הזינו את כתובת האימייל שלכם ונשלח לכם קישור לאיפוס הסיסמה</Text>
-          </View>
-        </View>
+    <AuthScreenShell
+      title="שכחתי סיסמה"
+      subtitle="הזינו את כתובת האימייל שלכם ונשלח לכם קישור לאיפוס הסיסמה"
+      showTabs={false}
+      backFallbackRoute="/(auth)/login">
+      <AppInput
+        label="אימייל"
+        placeholder="הכניסו כתובת אימייל"
+        keyboardType="email-address"
+        autoCapitalize="none"
+        autoCorrect={false}
+        style={styles.input}
+        textAlign="left"
+        writingDirection="ltr"
+        value={email}
+        onChangeText={setEmail}
+        editable={!submitting}
+      />
+      {fieldError ? <Text style={styles.fieldErrorText}>{fieldError}</Text> : null}
 
-        <AppCard style={styles.card}>
-          <AppInput
-            label="אימייל"
-            placeholder="הכניסו כתובת אימייל"
-            keyboardType="email-address"
-            autoCapitalize="none"
-            autoCorrect={false}
-            style={styles.input}
-            textAlign="left"
-            writingDirection="ltr"
-            value={email}
-            onChangeText={setEmail}
-            editable={!submitting}
-          />
-          {fieldError ? <Text style={styles.fieldErrorText}>{fieldError}</Text> : null}
+      {submitError ? <Text style={styles.submitErrorText}>{submitError}</Text> : null}
+      {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
 
-          {submitError ? <Text style={styles.submitErrorText}>{submitError}</Text> : null}
-          {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
-
-          <PrimaryButton
-            title={submitting ? 'שולח...' : 'שליחת קישור לאיפוס'}
-            onPress={handleSubmit}
-            loading={submitting}
-            disabled={submitting}
-            style={styles.button}
-          />
-        </AppCard>
-      </View>
-    </AppScreen>
+      <PrimaryButton
+        title={submitting ? 'שולח...' : 'שליחת קישור לאיפוס'}
+        onPress={handleSubmit}
+        loading={submitting}
+        disabled={submitting}
+        style={styles.button}
+      />
+    </AuthScreenShell>
   );
 }
 
 const styles = StyleSheet.create({
-  screenContent: {
-    justifyContent: 'flex-start',
-    alignItems: 'stretch',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xl,
-    paddingBottom: spacing.huge,
-  },
-  container: {
-    width: '100%',
-    gap: spacing.md,
-  },
-  header: {
-    position: 'relative',
-    alignItems: 'flex-end',
-    paddingTop: 2,
-    paddingBottom: 2,
-  },
-  headerBackButton: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    zIndex: 1,
-  },
-  headerTextBlock: {
-    width: '100%',
-    alignItems: 'flex-end',
-    paddingEnd: 56,
-  },
-  title: {
-    fontSize: typography.title.fontSize,
-    fontWeight: typography.title.fontWeight,
-    color: colors.text,
-    textAlign: 'right',
-  },
-  subtitle: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '500',
-    color: colors.textMuted,
-    textAlign: 'right',
-    marginTop: spacing.xs,
-    lineHeight: 18,
-  },
-  card: {
-    width: '100%',
-  },
   input: {
     marginBottom: spacing.md,
   },
