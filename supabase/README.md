@@ -323,6 +323,59 @@ This foundation cannot produce a real `matched` result until actual Golden Light
 
 Matching failures are isolated from OCR: the matching call is wrapped in its own `try/catch` in `index.ts`. Since OCR is already durably persisted by the time matching runs, a matching error (e.g. a catalog query failure) is logged server-side and swallowed rather than failing the whole request - the purchase report still reaches `needs_review` either way, and a future retry of this function re-runs matching from scratch (safe, since `persistLineMatches()` upserts on `ocr_line_id`).
 
+## Admin authorization foundation
+
+`public.admin_users` (added in `008_create_admin_users.sql`) determines who may access the `/admin` area of the app. This is a foundation only - it does not yet back any privileged read/write beyond the admin route guard itself.
+
+### Why a separate table, not a `profiles.is_admin` flag
+
+Authenticated users already hold a column-level UPDATE grant on their own `profiles` row (`full_name`, `phone`, `profession`, `avatar_path`). Putting an admin flag in that same table would mean every future grant/policy change on `profiles` has to remember to keep excluding it, forever. A separate table with no `authenticated` INSERT/UPDATE/DELETE access at all removes that risk structurally - self-promotion to admin is not possible from the mobile/web client no matter what happens to `profiles`' own grants later.
+
+### Schema
+
+- `user_id` - primary key, references `auth.users(id)`, cascades on delete.
+- `created_at` - defaults to `now()`.
+- `created_by` - optional provenance only (which admin/service action added this row). Nullable, never required, never used for authorization itself.
+
+### RLS behavior
+
+Row Level Security is enabled. There is no INSERT/UPDATE/DELETE policy for any role - under Postgres RLS, the absence of a policy for an operation denies it by default, so admin membership cannot be written through the app's Supabase client under any circumstance. A narrowly-scoped SELECT policy (`auth.uid() = user_id`) lets a signed-in user check only their own membership, which is all the admin route guard needs; nobody can list or infer another user's admin status. Table-level grants mirror this: only `SELECT` is granted to `authenticated`, and `anon` has no access at all.
+
+### Adding the first admin
+
+There is no UI for this yet, and none is created automatically - assigning an admin requires knowing which real Supabase Auth user should have that access, which only you know. In the Supabase SQL Editor, run:
+
+```sql
+insert into public.admin_users (user_id)
+values ('<the target user''s auth.users id>');
+```
+
+Find the target user's id in the Supabase Dashboard under Authentication > Users (or `select id, email from auth.users where email = '...';`).
+
+### Client-side admin check is not a security boundary
+
+`src/services/adminService.js` (`isCurrentUserAdmin()`) and `app/admin/_layout.js` control only whether the admin UI/routes render for the current user in this app. They are not, and must never be treated as, the security boundary for any privileged database write. Every future admin-only mutation (approving a purchase report, awarding points, editing another user's data, ...) must be independently enforced by its own RLS policy or a trusted/service-role backend - never by trusting a client-side `isAdmin` boolean alone, which is trivial to bypass by anyone inspecting or modifying the app.
+
+## Admin read access (dashboard + review queue)
+
+`009_admin_read_access.sql` adds read-only admin visibility across customer purchase-report data, used by the admin dashboard/review queue/report-detail screens (`src/screens/AdminHomeScreen.js`, `src/screens/AdminReportDetailScreen.js`).
+
+### `public.is_admin()`
+
+A `stable`, `security definer` SQL function with `set search_path = ''` (same convention as every other definer/trigger function in this schema). It takes no parameters and returns whether `auth.uid()` (the calling user) has a row in `public.admin_users` - it cannot be used to ask about anyone else. `security definer` makes its result independent of `admin_users`' own RLS/grants, which is the standard, recommended pattern for a role-check helper referenced from other tables' policies. `execute` is granted to `authenticated` only (not `anon`).
+
+### What gained an admin policy
+
+Additive `for select using (public.is_admin())` policies were added to `purchase_reports`, `profiles`, `receipt_ocr_results`, `receipt_ocr_lines`, `receipt_line_matches`, and `storage.objects` (receipts bucket only). Every one of these tables already had its own customer-scoped SELECT policy (`auth.uid() = user_id` or an ownership-chain `exists (...)`); Postgres combines multiple policies for the same command with OR, so a normal user's visibility is unchanged - they still only ever satisfy their own policy, never the admin one, since `is_admin()` evaluates false for them. No existing policy was edited or removed, no table's RLS was disabled, and no column-level grant was widened (the `receipt_ocr_results.error_message` and `receipt_line_matches.review_note` columns remain excluded from the client-readable grant entirely, for every role, including admin, since Postgres column grants are role-level rather than policy/row-specific and this stage does not need them for the admin UI).
+
+### Why an admin needs its own Storage policy
+
+Generating a Storage signed URL for a receipt still goes through Storage's own RLS on `storage.objects`. Without a dedicated admin policy there, `public.is_admin()` on `purchase_reports` alone would let an admin read the report *row*, but `createSignedUrl` for another user's `receipts/<their-id>/...` object would still be denied by the existing customer-only Storage policy. The new `"Admins can view any receipt in storage"` policy closes that gap the same way, scoped to the `receipts` bucket only.
+
+### Client-side services
+
+`src/services/adminReportService.js` holds every admin data read (`getAdminDashboardSummary`, `getAdminReviewQueue`, `getAdminReportDetail`, `getAdminReceiptSignedUrl`) - kept separate from `purchaseReportService.js`, whose functions are written for a customer's own data. These functions have no special client-side privilege: they succeed only because the signed-in caller's session is genuinely an `admin_users` member and the policies above admit the rows/objects. A non-admin session calling the same functions gets the same permission-denied result Postgres would give anyone else.
+
 ## Notes
 
 - Email is still managed by Supabase Auth and is not duplicated in profiles.
