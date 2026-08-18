@@ -42,6 +42,22 @@ async function fetchProfileNamesByIds(userIds) {
   return new Map((data || []).map((profile) => [profile.id, profile.full_name]));
 }
 
+const MANUAL_ITEM_COLUMNS = 'id, line_index, description, sku, quantity, unit_price, line_total, created_at, updated_at';
+
+async function fetchManualItems(reportId) {
+  const { data, error } = await supabase
+    .from('receipt_manual_items')
+    .select(MANUAL_ITEM_COLUMNS)
+    .eq('purchase_report_id', reportId)
+    .order('line_index', { ascending: true });
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
 // Real counts only - no revenue/points/user-growth metrics, since nothing in
 // the current schema supports those meaningfully yet.
 export async function getAdminDashboardSummary() {
@@ -120,7 +136,9 @@ export async function getAdminReportDetail(reportId) {
 
   const { data: report, error: reportError } = await supabase
     .from('purchase_reports')
-    .select('id, user_id, receipt_path, original_filename, status, points_awarded, created_at, updated_at')
+    .select(
+      'id, user_id, receipt_path, original_filename, status, points_awarded, reviewed_at, rejection_reason, created_at, updated_at',
+    )
     .eq('id', reportId)
     .maybeSingle();
 
@@ -174,13 +192,122 @@ export async function getAdminReportDetail(reportId) {
     }
   }
 
+  // Deliberately isolated in its own try/catch, unlike the reads above: the
+  // manual-items table/RPC is a separate, secondary part of this screen
+  // (see AdminReportDetailScreen's manual-entry section), and any failure
+  // here (e.g. the underlying migration missing) must never take down the
+  // rest of an otherwise-working report load - the receipt image, OCR
+  // section, and approve/reject actions all have to keep rendering
+  // regardless. On failure this resolves to an empty list instead of
+  // rejecting the whole getAdminReportDetail() call.
+  let manualItems = [];
+  try {
+    manualItems = await fetchManualItems(reportId);
+  } catch (err) {
+    if (__DEV__) {
+      console.warn('[Admin] Failed to load manual receipt items', { code: err?.code, message: err?.message });
+    }
+  }
+
   return {
     ...report,
     customerName: nameById.get(report.user_id) || null,
     ocrResult: ocrResult || null,
     ocrLines,
     lineMatches,
+    manualItems,
   };
+}
+
+// Standalone read, exported separately for callers that only need the
+// manual-item set (getAdminReportDetail already includes it for the report
+// detail screen's normal load/refresh path).
+export async function getAdminManualItems(reportId) {
+  if (!supabase || !reportId) {
+    return [];
+  }
+
+  return fetchManualItems(reportId);
+}
+
+// Replaces the FULL manual-item set for one report via the single secure
+// RPC (public.save_manual_receipt_items, migration 011) - there is
+// deliberately no direct `.from('receipt_manual_items').insert/update(...)`
+// anywhere in this module. `items` is a plain array of
+// { description, sku, quantity, unit_price, line_total } objects (any of
+// sku/quantity/unit_price/line_total may be null); line_index is assigned
+// server-side from array order and is never sent from here. The RPC
+// re-validates every field itself and performs the delete+insert replace
+// atomically in one transaction, so a failed save can never leave a report
+// with a half-replaced item set - this function does not attempt any
+// client-side delete/insert sequencing of its own.
+export async function saveAdminManualItems(reportId, items) {
+  if (!supabase || !reportId) {
+    throw new Error('report_not_found');
+  }
+
+  const { error } = await supabase.rpc('save_manual_receipt_items', {
+    p_report_id: reportId,
+    p_items: items,
+  });
+
+  if (error) {
+    throw error;
+  }
+}
+
+// REVIEWABLE_STATUSES mirrors REVIEW_QUEUE_STATUSES (kept as a separate,
+// clearly-named export) - a report can only be finalized while it is still
+// 'submitted' or 'needs_review'. The actual authority for this rule lives
+// in public.review_purchase_report() (migration 010) - this constant is
+// only used by the UI to decide whether to show the approve/reject actions
+// at all, never to bypass what the database itself enforces.
+export const REVIEWABLE_STATUSES = ['submitted', 'needs_review'];
+
+// Finalizes a report as approved or rejected. Both are thin wrappers around
+// the single secure RPC (public.review_purchase_report, migration 010) -
+// there is deliberately NO direct `.from('purchase_reports').update(...)`
+// anywhere in this module. The RPC itself re-verifies admin membership,
+// re-checks the report is still reviewable (raising 'report_not_reviewable'
+// otherwise - e.g. a second admin session that already acted, or a report
+// still 'processing'), and validates the rejection reason; this function
+// only forwards the caller's intent and lets whatever the RPC raises
+// propagate as a real Error for the screen to translate into safe Hebrew
+// text. Neither function awards points or touches public.profiles in any
+// way - that is enforced by the RPC, not by this client code.
+export async function approveAdminReport(reportId) {
+  if (!supabase || !reportId) {
+    throw new Error('report_not_found');
+  }
+
+  const { error } = await supabase.rpc('review_purchase_report', {
+    p_report_id: reportId,
+    p_decision: 'approved',
+  });
+
+  if (error) {
+    throw error;
+  }
+}
+
+// `reason` is sent as-is; public.review_purchase_report() is the actual
+// source of truth for trimming/non-empty/max-length validation (it re-does
+// this itself rather than trusting the client), so a caller cannot bypass
+// those rules by calling this function directly.
+export async function rejectAdminReport(reportId, reason) {
+  if (!supabase || !reportId) {
+    throw new Error('report_not_found');
+  }
+
+  const { error } = await supabase.rpc('review_purchase_report', {
+    p_report_id: reportId,
+    p_decision: 'rejected',
+    p_rejection_reason: reason,
+  });
+
+  if (error) {
+    throw error;
+  }
 }
 
 // Mirrors purchaseReportService.getReceiptSignedUrl's shape exactly, but

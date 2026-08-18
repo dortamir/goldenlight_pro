@@ -9,7 +9,7 @@ import AppBackButton from '../components/common/AppBackButton';
 import AppScreen from '../components/common/AppScreen';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
-import { getPurchaseReportById, getReceiptSignedUrl } from '../services/purchaseReportService';
+import { getPurchaseReportById, getReceiptManualItems, getReceiptSignedUrl } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 
 function formatReportDate(value) {
@@ -71,6 +71,51 @@ function DetectedProductRow({ product }) {
   );
 }
 
+// Renders one admin-entered manual receipt line. Deliberately separate from
+// DetectedProductRow above (reserved for future confirmed Golden Light
+// catalog matches, which this is NOT) - these are simply the line items an
+// admin copied from the real receipt image while reviewing it. Only fields
+// that actually have a value are shown; nothing is invented for a missing
+// sku/quantity/unit_price/line_total.
+// Visual only - same four optional fields as before (sku/quantity/
+// unit_price/line_total), still each shown only when actually present, and
+// no value is ever computed/invented (a missing line_total stays hidden,
+// never derived from quantity × unit_price). The ₪ prefix on unit_price/
+// line_total is display-only formatting for this customer screen - the
+// underlying stored numeric value is unchanged.
+function ManualItemRow({ item }) {
+  const details = [];
+
+  if (item.quantity != null) {
+    details.push({ key: 'quantity', label: 'כמות', value: String(item.quantity) });
+  }
+  if (item.unit_price != null) {
+    details.push({ key: 'unit_price', label: 'מחיר ליחידה', value: `₪${item.unit_price}` });
+  }
+  if (item.line_total != null) {
+    details.push({ key: 'line_total', label: 'סה״כ', value: `₪${item.line_total}` });
+  }
+  if (item.sku) {
+    details.push({ key: 'sku', label: 'מק״ט', value: item.sku });
+  }
+
+  return (
+    <View style={styles.manualItemCard}>
+      <Text style={styles.manualItemDescription}>{item.description}</Text>
+      {details.length > 0 ? (
+        <View style={styles.manualItemDetailsRow}>
+          {details.map((detail) => (
+            <View key={detail.key} style={styles.manualItemDetailCell}>
+              <Text style={styles.manualItemDetailLabel}>{detail.label}</Text>
+              <Text style={styles.manualItemDetailValue}>{detail.value}</Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 // Maps the safe navigation-origin param (never receipt_path/user_id/signed
 // URLs - see HomeScreen.js and PurchaseHistoryScreen.js, the only two
 // places that link into this screen) to a deterministic back destination.
@@ -98,6 +143,7 @@ export default function PurchaseReportDetailsScreen() {
   const [error, setError] = useState('');
   const [notFound, setNotFound] = useState(false);
   const [imageState, setImageState] = useState({ status: 'idle', url: null });
+  const [manualItems, setManualItems] = useState([]);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [rootHeight, setRootHeight] = useState(0);
   const [heroHeight, setHeroHeight] = useState(0);
@@ -137,6 +183,24 @@ export default function PurchaseReportDetailsScreen() {
       });
   }, []);
 
+  // Isolated from the main report load on purpose - if this fails for any
+  // reason, the receipt image/status/points sections must keep working
+  // regardless. An empty result (no manual items) is the normal case for
+  // every report an admin hasn't manually entered data for, not an error.
+  const loadManualItems = useCallback((purchaseReportId, isActiveRef) => {
+    getReceiptManualItems(purchaseReportId)
+      .then((items) => {
+        if (isActiveRef.current) {
+          setManualItems(items);
+        }
+      })
+      .catch(() => {
+        if (isActiveRef.current) {
+          setManualItems([]);
+        }
+      });
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       const isActiveRef = { current: true };
@@ -168,6 +232,8 @@ export default function PurchaseReportDetailsScreen() {
 
           setReport(data);
           loadImage(data, isActiveRef);
+          setManualItems([]);
+          loadManualItems(data.id, isActiveRef);
         } catch (err) {
           if (isActiveRef.current) {
             setReport(null);
@@ -185,7 +251,7 @@ export default function PurchaseReportDetailsScreen() {
       return () => {
         isActiveRef.current = false;
       };
-    }, [id, user?.id, loadImage]),
+    }, [id, user?.id, loadImage, loadManualItems]),
   );
 
   const retryLoad = () => {
@@ -207,6 +273,8 @@ export default function PurchaseReportDetailsScreen() {
 
         setReport(data);
         loadImage(data, isActiveRef);
+        setManualItems([]);
+        loadManualItems(data.id, isActiveRef);
       })
       .catch(() => setError('לא הצלחנו לטעון את פרטי החשבונית'))
       .finally(() => setLoading(false));
@@ -216,6 +284,17 @@ export default function PurchaseReportDetailsScreen() {
   const statusMeta = report ? getStatusMeta(report.status) : null;
   const showPoints = report?.status === 'approved' && report?.points_awarded > 0;
   const canOpenPreview = !isPdf && imageState.status === 'ready' && Boolean(imageState.url);
+
+  // A rejected/approved report is FINALIZED - no further OCR/product-
+  // matching/points/status-update processing will ever happen for it, so
+  // sections implying otherwise (pending product detection, pending
+  // points, "we'll update you") must not render for either. submitted/
+  // processing/needs_review remain genuinely non-final and keep their
+  // existing pending UI unchanged.
+  const isRejected = report?.status === 'rejected';
+  const isApproved = report?.status === 'approved';
+  const isFinalized = isRejected || isApproved;
+  const isPending = !isFinalized;
 
   return (
     <View style={styles.root} onLayout={onRootLayout}>
@@ -321,44 +400,81 @@ export default function PurchaseReportDetailsScreen() {
                   </View>
                 </View>
 
-                <View style={styles.sectionCard}>
-                  <View style={styles.sectionHeaderRow}>
-                    <View style={styles.sectionIconChip}>
-                      <Ionicons name="cube-outline" size={18} color={colors.primary} />
+                {/* Manual items are real, already-saved receipt data, so
+                    they remain visible once approved. They are hidden only
+                    when rejected - the rejected state is final and only
+                    needs to show the rejection itself (see spec: "HIDE:
+                    פריטים בחשבונית" for rejected). */}
+                {!isRejected && manualItems.length > 0 ? (
+                  <View style={styles.sectionCard}>
+                    <View style={styles.sectionHeaderRow}>
+                      <View style={styles.sectionIconChip}>
+                        <Ionicons name="list-outline" size={18} color={colors.primary} />
+                      </View>
+                      <Text style={styles.sectionCardTitle}>פריטים בחשבונית</Text>
                     </View>
-                    <Text style={styles.sectionCardTitle}>מוצרי Golden Light שזוהו</Text>
+                    <Text style={styles.manualItemsNote}>הפרטים עודכנו לאחר בדיקת החשבונית</Text>
+                    <View style={styles.manualItemsList}>
+                      {manualItems.map((item) => (
+                        <ManualItemRow key={item.id} item={item} />
+                      ))}
+                    </View>
                   </View>
-                  <View style={styles.pendingBox}>
-                    <Text style={styles.pendingBoxTitle}>ממתינים לזיהוי המוצרים בחשבונית</Text>
-                    <Text style={styles.pendingBoxSubtitle}>
-                      לאחר סריקת החשבונית יוצגו כאן מוצרי Golden Light שזוהו.
-                    </Text>
-                  </View>
-                </View>
+                ) : null}
 
-                <View style={styles.sectionCard}>
-                  <View style={styles.sectionHeaderRow}>
-                    <View style={styles.sectionIconChip}>
-                      <Ionicons name="star-outline" size={18} color={colors.primary} />
+                {/* Real Golden Light catalog matching does not exist yet -
+                    for a FINALIZED report (approved or rejected) there is
+                    no future scan that could ever populate this, so the
+                    "pending" card would be misleading and is hidden
+                    entirely rather than shown. Only genuinely non-final
+                    reports keep the existing pending state. */}
+                {isPending ? (
+                  <View style={styles.sectionCard}>
+                    <View style={styles.sectionHeaderRow}>
+                      <View style={styles.sectionIconChip}>
+                        <Ionicons name="cube-outline" size={18} color={colors.primary} />
+                      </View>
+                      <Text style={styles.sectionCardTitle}>מוצרי Golden Light שזוהו</Text>
                     </View>
-                    <Text style={styles.sectionCardTitle}>סיכום נקודות</Text>
+                    <View style={styles.pendingBox}>
+                      <Text style={styles.pendingBoxTitle}>ממתינים לזיהוי המוצרים בחשבונית</Text>
+                      <Text style={styles.pendingBoxSubtitle}>
+                        לאחר סריקת החשבונית יוצגו כאן מוצרי Golden Light שזוהו.
+                      </Text>
+                    </View>
                   </View>
-                  {showPoints ? (
-                    <View style={styles.pointsAwardedBox}>
-                      <Text style={styles.pointsAwardedValue}>{`+${formatNumber(report.points_awarded)} נק׳`}</Text>
-                      <Text style={styles.pointsAwardedMeta}>נוספו לחשבון</Text>
+                ) : null}
+
+                {/* Points logic doesn't exist yet. A pending report keeps
+                    the existing "points will be calculated later" message.
+                    An approved report only shows this section when real
+                    points were actually awarded (showPoints) - otherwise
+                    the section is hidden entirely rather than showing "no
+                    points were earned", which would read as a final
+                    business decision rather than "the points engine simply
+                    isn't built yet". A rejected report never shows this
+                    section at all. */}
+                {showPoints || isPending ? (
+                  <View style={styles.sectionCard}>
+                    <View style={styles.sectionHeaderRow}>
+                      <View style={styles.sectionIconChip}>
+                        <Ionicons name="star-outline" size={18} color={colors.primary} />
+                      </View>
+                      <Text style={styles.sectionCardTitle}>סיכום נקודות</Text>
                     </View>
-                  ) : report.status === 'approved' ? (
-                    <View style={styles.pointsNeutralBox}>
-                      <Text style={styles.pointsNeutralText}>לא נצברו נקודות עבור חשבונית זו</Text>
-                    </View>
-                  ) : (
-                    <View style={styles.pointsNeutralBox}>
-                      <Text style={styles.pointsNeutralText}>הנקודות יחושבו לאחר אישור החשבונית</Text>
-                      <Text style={styles.pointsNeutralSubtext}>לאחר אישור החשבונית יתווספו הנקודות לחשבונך.</Text>
-                    </View>
-                  )}
-                </View>
+                    {showPoints ? (
+                      <View style={styles.pointsAwardedBox}>
+                        <Text style={styles.pointsAwardedValue}>{`+${formatNumber(report.points_awarded)} נק׳`}</Text>
+                        <Text style={styles.pointsAwardedMeta}>נוספו לחשבון</Text>
+                      </View>
+                    ) : (
+                      <View style={styles.pointsNeutralBox}>
+                        <Text style={styles.pointsNeutralText}>הנקודות יחושבו לאחר אישור החשבונית</Text>
+                        <Text style={styles.pointsNeutralSubtext}>לאחר אישור החשבונית יתווספו הנקודות לחשבונך.</Text>
+                      </View>
+                    )}
+                  </View>
+                ) : null}
 
                 {report.status === 'needs_review' ? (
                   <View style={styles.infoCard}>
@@ -367,17 +483,27 @@ export default function PurchaseReportDetailsScreen() {
                   </View>
                 ) : null}
 
-                {report.status === 'rejected' ? (
+                {isRejected ? (
                   <View style={styles.errorInfoCard}>
                     <Text style={styles.errorInfoCardTitle}>החשבונית לא אושרה</Text>
+                    {report.rejection_reason ? (
+                      <>
+                        <Text style={styles.rejectionReasonLabel}>סיבת הדחייה</Text>
+                        <Text style={styles.rejectionReasonText}>{report.rejection_reason}</Text>
+                      </>
+                    ) : null}
                   </View>
                 ) : null}
 
-                <View style={styles.noticeCard}>
-                  <Ionicons name="information-circle-outline" size={18} color={colors.primary} style={styles.noticeIconWrap} />
-                  <Text style={styles.noticeTitle}>נעדכן אותך על סטטוס החשבונית</Text>
-                  <Text style={styles.noticeSubtitle}>תקבל/י הודעה לאחר השלמת הטיפול.</Text>
-                </View>
+                {/* Final states need no "we'll update you" notice - there
+                    is nothing further to update them about. */}
+                {isPending ? (
+                  <View style={styles.noticeCard}>
+                    <Ionicons name="information-circle-outline" size={18} color={colors.primary} style={styles.noticeIconWrap} />
+                    <Text style={styles.noticeTitle}>נעדכן אותך על סטטוס החשבונית</Text>
+                    <Text style={styles.noticeSubtitle}>תקבל/י הודעה לאחר השלמת הטיפול.</Text>
+                  </View>
+                ) : null}
               </>
             )}
           </View>
@@ -726,6 +852,21 @@ const styles = StyleSheet.create({
     color: colors.error,
     textAlign: 'right',
   },
+  rejectionReasonLabel: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '700',
+    color: colors.error,
+    textAlign: 'right',
+    marginTop: spacing.sm,
+  },
+  rejectionReasonText: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '500',
+    color: colors.text,
+    textAlign: 'right',
+    marginTop: 2,
+    lineHeight: 18,
+  },
   statusBadge: {
     flexShrink: 0,
     borderRadius: radius.pill,
@@ -785,6 +926,70 @@ const styles = StyleSheet.create({
     fontSize: typography.caption.fontSize,
     fontWeight: '700',
     color: colors.success,
+    textAlign: 'right',
+  },
+  // Manually-entered receipt items (public.receipt_manual_items) - a
+  // separate row family from DetectedProductRow/productRow above, which are
+  // reserved for future confirmed Golden Light catalog matches. These are
+  // simply what an admin copied from the real receipt image; never labeled
+  // as matched products.
+  manualItemsNote: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '500',
+    color: colors.textMuted,
+    textAlign: 'right',
+    marginBottom: spacing.xs,
+  },
+  manualItemsList: {
+    width: '100%',
+    gap: spacing.sm,
+  },
+  // Each manual item gets its own subtle, tinted inner card (not a hairline
+  // -separated text row) so a list of several products reads as distinct,
+  // easy-to-scan cards rather than one dense block of text. primarySoft is
+  // the same "very light turquoise surface" token already used elsewhere
+  // for a premium tinted panel (e.g. PurchaseScreen's infoCard) - no new
+  // color introduced. No border - the tint alone separates it from the
+  // white outer card.
+  manualItemCard: {
+    width: '100%',
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    alignItems: 'flex-end',
+    gap: spacing.xs,
+  },
+  // Visually the dominant element in the card - bolder and a step larger
+  // than the caption-sized detail values below it.
+  manualItemDescription: {
+    fontSize: typography.body.fontSize,
+    fontWeight: '700',
+    color: colors.text,
+    textAlign: 'right',
+  },
+  manualItemDetailsRow: {
+    flexDirection: 'row-reverse',
+    flexWrap: 'wrap',
+    gap: spacing.lg,
+  },
+  manualItemDetailCell: {
+    alignItems: 'flex-end',
+    gap: 1,
+  },
+  // Small/muted label, per the requested hierarchy (name > values > labels).
+  manualItemDetailLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: colors.textMuted,
+    textAlign: 'right',
+  },
+  // Medium emphasis - stronger than the label, still clearly secondary to
+  // the product name above.
+  manualItemDetailValue: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '700',
+    color: colors.text,
     textAlign: 'right',
   },
   // Lighter/more compact than the products/points cards - a closing

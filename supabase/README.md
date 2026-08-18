@@ -376,6 +376,96 @@ Generating a Storage signed URL for a receipt still goes through Storage's own R
 
 `src/services/adminReportService.js` holds every admin data read (`getAdminDashboardSummary`, `getAdminReviewQueue`, `getAdminReportDetail`, `getAdminReceiptSignedUrl`) - kept separate from `purchaseReportService.js`, whose functions are written for a customer's own data. These functions have no special client-side privilege: they succeed only because the signed-in caller's session is genuinely an `admin_users` member and the policies above admit the rows/objects. A non-admin session calling the same functions gets the same permission-denied result Postgres would give anyone else.
 
+## Manual review workflow (approve/reject)
+
+`010_purchase_report_review.sql` adds the manual approve/reject decision recorded by an admin, used by `AdminReportDetailScreen`. Scope is strictly the decision itself - it does not touch points, membership, or approved-purchase counts (see "Points remain out of scope" below).
+
+### New columns on `purchase_reports`
+
+- `reviewed_at timestamptz` - when a decision was recorded.
+- `reviewed_by uuid references auth.users(id)` - which admin recorded it. **Not selectable by any client role** (see below) - excluded from the mobile/admin app entirely, not just from customers.
+- `rejection_reason text` - required, non-empty (after trimming), max 1000 characters whenever `status = 'rejected'`, enforced by two CHECK constraints regardless of write path.
+
+`purchase_reports.admin_note` (already existing since `002_create_purchase_reports.sql`) is intentionally left untouched and unused by this stage - a dedicated `rejection_reason` column was added instead of overloading that free-text field, and admin-notes management remains a separate, future concern.
+
+### Why `reviewed_by` is excluded from every SELECT
+
+`purchase_reports`' SELECT grant is a whole-table grant (`grant select on table public.purchase_reports to authenticated`, from `002_create_purchase_reports.sql`), which automatically covers any new column too - Postgres column grants are role-level, not row/policy-specific. Since customers and admins share the same `authenticated` role, there is no way to grant `reviewed_by` to "admins only" at the column-privilege level without also exposing it to a customer reading their own row. This migration explicitly carves it back out with `revoke select (reviewed_by) on public.purchase_reports from authenticated`, so it is unreadable by anyone through the Supabase client - a deliberate, simple choice over building a role-aware read path this stage doesn't need. `reviewed_at` and `rejection_reason` remain readable (via the existing whole-table grant): neither identifies which admin acted.
+
+### `public.review_purchase_report(p_report_id, p_decision, p_rejection_reason)`
+
+The **only** way `status`/`reviewed_at`/`reviewed_by`/`rejection_reason` can be written - there is still no INSERT/UPDATE grant on `purchase_reports` for `authenticated` at all (only SELECT and a column-restricted INSERT exist), so a direct `.update(...)` call is rejected before this function is even reachable, for any caller including an admin. `security definer` with `set search_path = ''` (same convention as `public.is_admin()`), it:
+
+1. Requires `public.is_admin()` to be true - the FIRST thing it checks, unconditionally. A non-admin caller always fails here before touching any row.
+2. Requires `p_decision` to be exactly `'approved'` or `'rejected'`.
+3. Loads the target report with `select ... for update` - this row lock is what makes it concurrency-safe: if two admin sessions call this for the same report nearly simultaneously, the second blocks until the first commits, then re-reads the now-updated status and correctly fails with `report_not_reviewable` instead of silently overwriting the first decision.
+4. Requires the report's current status to still be `'submitted'` or `'needs_review'` - a report already `'approved'`/`'rejected'`, or still `'processing'`, cannot be finalized again through this function.
+5. For a rejection, requires a real trimmed non-empty reason (max 1000 chars); an approval always clears `rejection_reason` to null regardless of any client-supplied value.
+6. Sets `reviewed_at = now()` and `reviewed_by = auth.uid()` unconditionally - never accepted as input.
+
+It does not require OCR to exist or have completed - a report with no `receipt_ocr_results` row is exactly as reviewable as one with a completed result. It touches nothing on `public.profiles`, `receipt_ocr_results`, `receipt_ocr_lines`, or `receipt_line_matches`.
+
+`execute` is granted to `authenticated` broadly (there is no separate Postgres role for admins in this schema) - authorization happens inside the function itself (step 1), not via the grant.
+
+### Points remain out of scope
+
+No trigger or function anywhere in this schema modifies `profiles.points_balance`, `profiles.membership_level`, or `profiles.approved_purchases_count` in response to a `purchase_reports` status change (verified by inspecting every migration before writing this one - the only place those columns are set is the row-creation trigger/backfill in `001_create_profiles.sql`, both to their defaults). Approving a report through `review_purchase_report()` records the decision only; points/membership logic is a separate, later stage.
+
+### Customer-facing changes
+
+`purchaseReportService.getPurchaseReportById()` now also selects `rejection_reason` (not `reviewed_by`), and `PurchaseReportDetailsScreen` displays it under the existing "החשבונית לא אושרה" notice when a report is rejected. This relies entirely on the customer's existing own-row RLS policy and the already-existing column grant - no RLS or grant change was needed for this. The existing customer status labels (`אושרה`/`נדחתה`/`נדרשת בדיקה`/`נשלחה לבדיקה`) were already correct and were not changed.
+
+## Manual receipt data entry (OCR failure/missing fallback)
+
+`011_receipt_manual_items.sql` adds `public.receipt_manual_items`, used by `AdminReportDetailScreen` when OCR failed, is missing, or produced no usable lines - an admin can enter the receipt's line items by hand instead of being blocked from reviewing it. This is a data-entry foundation only: no points, product matching, or catalog import happens here.
+
+### Why a separate table, not `receipt_ocr_lines`
+
+`receipt_ocr_lines` represents actual OCR output. Manually-entered data is never written there - mixing the two would make it impossible to later tell which lines came from the OCR provider versus an admin's own reading of the receipt image. `receipt_manual_items` is its own table for exactly that reason, and both can coexist for the same report without either overwriting the other.
+
+### Schema
+
+`purchase_report_id`, `line_index` (server-assigned, never trusted from the client), `description` (required, non-blank, max 500 chars), `sku` (optional, max 100 chars), `quantity` (optional, must be `> 0`), `unit_price`/`line_total` (optional, must be `>= 0`), `created_by` (always the acting admin, never client input), `created_at`/`updated_at`. A `(purchase_report_id, line_index)` uniqueness constraint prevents duplicate indices regardless of write path.
+
+### `public.save_manual_receipt_items(p_report_id, p_items)`
+
+Replaces the **entire** manual-item set for one report in a single atomic operation (one Postgres transaction) - repeated saves/edits never create duplicates. `security definer`, `set search_path = ''`. Requires `public.is_admin()`, requires the target report to exist, validates every item in the JSONB array before deleting anything, then deletes and re-inserts the full set with `line_index` assigned from array order and `created_by = auth.uid()` (both never accepted from the client). `execute` is granted broadly to `authenticated` - authorization happens inside the function, matching `public.review_purchase_report()`'s pattern.
+
+### Admin-only until 012_customer_manual_items_read.sql
+
+Originally `receipt_manual_items` had no customer-facing SELECT policy at all - see the next section for how read access was later extended to the report's owner.
+
+## Customer read access to manual receipt items
+
+`012_customer_manual_items_read.sql` lets a customer read the manual items an admin entered for their **own** purchase report, displayed in `PurchaseReportDetailsScreen` under a "פריטים בחשבונית" section. This is read-only: no INSERT/UPDATE/DELETE access is added for `authenticated` anywhere in this migration.
+
+### The exact rule
+
+```sql
+create policy "Customers can view manual items for their own reports"
+  on public.receipt_manual_items
+  for select
+  to authenticated
+  using (
+    exists (
+      select 1
+      from public.purchase_reports pr
+      where pr.id = receipt_manual_items.purchase_report_id
+        and pr.user_id = auth.uid()
+    )
+  );
+```
+
+This is additive alongside the existing admin policy (`"Admins can view manual receipt items"`, `using (public.is_admin())`, from `011_receipt_manual_items.sql`) - Postgres combines multiple SELECT policies for the same table with OR, so a customer still can never satisfy the admin policy, and an admin's existing full read access is completely unaffected. A customer can never list another customer's manual items: the `exists` check only ever matches rows whose `purchase_report_id` resolves to a `purchase_reports` row owned by `auth.uid()`.
+
+### `created_by` stays hidden from customers too
+
+`receipt_manual_items`' SELECT grant (`011_receipt_manual_items.sql`) is a whole-table grant, which would otherwise let a customer reading their own now-visible row also select `created_by` (which admin entered the data). This migration carves that column back out with `revoke select (created_by) on public.receipt_manual_items from authenticated` - the same pattern already used for `purchase_reports.reviewed_by` in `010_purchase_report_review.sql`. The admin's own read query never selected this column either, so nothing about the existing admin manual-entry workflow changes.
+
+### Client read
+
+`purchaseReportService.getReceiptManualItems(purchaseReportId)` selects only `id, description, sku, quantity, unit_price, line_total`, ordered by `line_index` - never `created_by`, never any other internal/admin field. It has no special privilege of its own: it returns exactly whatever rows the caller's own RLS policy admits, nothing more.
+
 ## Notes
 
 - Email is still managed by Supabase Auth and is not duplicated in profiles.

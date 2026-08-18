@@ -137,7 +137,7 @@ export async function getPurchaseReportById(reportId, userId) {
 
   const { data, error } = await supabase
     .from('purchase_reports')
-    .select('id, original_filename, receipt_path, status, points_awarded, created_at, updated_at')
+    .select('id, original_filename, receipt_path, status, points_awarded, rejection_reason, created_at, updated_at')
     .eq('id', reportId)
     .eq('user_id', userId)
     .maybeSingle();
@@ -147,6 +147,36 @@ export async function getPurchaseReportById(reportId, userId) {
   }
 
   return data;
+}
+
+// Read-only: the receipt line items an admin manually entered while
+// reviewing this report (see public.receipt_manual_items /
+// public.save_manual_receipt_items, supabase/migrations/011_receipt_manual_items.sql
+// and 012_customer_manual_items_read.sql). This function has no special
+// privilege of its own - it only ever returns rows the caller's own
+// ownership-based RLS policy admits (purchase_reports.user_id = auth.uid()),
+// so a customer can never read another customer's manual items through it.
+// created_by (which admin entered the data) is intentionally excluded, both
+// here and at the database column-grant level - never expose internal admin
+// identity to the customer. These are manually copied receipt lines, not a
+// confirmed match against the Golden Light product catalog - callers must
+// not relabel them as matched products.
+export async function getReceiptManualItems(purchaseReportId) {
+  if (!supabase || !purchaseReportId) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from('receipt_manual_items')
+    .select('id, description, sku, quantity, unit_price, line_total')
+    .eq('purchase_report_id', purchaseReportId)
+    .order('line_index', { ascending: true });
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
 }
 
 export async function getReceiptSignedUrl(receiptPath, expiresInSeconds = 300) {

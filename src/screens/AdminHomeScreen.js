@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { useCallback, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AdminShell from '../components/admin/AdminShell';
@@ -98,10 +98,18 @@ export default function AdminHomeScreen() {
       .finally(() => setQueueLoading(false));
   }, []);
 
-  useEffect(() => {
-    loadSummary();
-    loadQueue();
-  }, [loadSummary, loadQueue]);
+  // useFocusEffect (not a plain mount-only useEffect) - refetches every
+  // time this screen regains focus, e.g. when the admin taps "חזרה לרשימה"
+  // after approving/rejecting a report on the detail screen. Expo Router's
+  // Stack keeps this screen mounted underneath the detail route rather than
+  // remounting it on back-navigation, so a mount-only effect would keep
+  // showing the stale pre-decision counts/queue until a manual page reload.
+  useFocusEffect(
+    useCallback(() => {
+      loadSummary();
+      loadQueue();
+    }, [loadSummary, loadQueue]),
+  );
 
   const summaryCards = [
     { key: 'needs_review', label: 'חשבוניות לבדיקה', value: summary?.needsReviewCount },
