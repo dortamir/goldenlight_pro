@@ -466,10 +466,197 @@ This is additive alongside the existing admin policy (`"Admins can view manual r
 
 `purchaseReportService.getReceiptManualItems(purchaseReportId)` selects only `id, description, sku, quantity, unit_price, line_total`, ordered by `line_index` - never `created_by`, never any other internal/admin field. It has no special privilege of its own: it returns exactly whatever rows the caller's own RLS policy admits, nothing more.
 
+## Points awarding foundation
+
+`013_points_awarding.sql` adds `public.points_transactions`, used by `AdminReportDetailScreen` to award points for an already-approved purchase report. This is a foundation only: no OCR integration, no product matching, and no membership/reward-redemption logic exists in this migration.
+
+**Superseded by `014_automatic_points_eligibility.sql`** (see below): the original `public.award_purchase_points(p_report_id, p_eligible_pre_vat_amount)` signature described in this section - where an admin typed the eligible amount - no longer exists. It has been dropped and replaced by `public.award_purchase_points(p_report_id)`, which calculates the eligible amount itself from `receipt_manual_items` rows. The `points_transactions` schema, the partial unique index, and the overall business rule below are unchanged by migration 014 - only how the eligible amount is produced changed.
+
+### Final business rule
+
+Only the admin-confirmed Golden Light product lines count toward points, before VAT - never an OCR total, a manual-items grand total, or the invoice total, since none of those distinguish Golden Light products from anything else on the receipt, and none of them exclude VAT. Reward value is 2% of the eligible pre-VAT total, and every ₪1 of reward value is 10 points, i.e. `points = floor(eligible_pre_vat_total * 0.02 * 10)` = `floor(eligible_pre_vat_total * 0.2)`. This is computed exclusively inside `award_purchase_points()` using Postgres `numeric` arithmetic (never floating point, never computed in JavaScript), always rounds down, and is never trusted from - or exposed as a formula to - the client. The customer only ever sees the resulting integer points value, via the pre-existing `purchase_reports.points_awarded` column and `profiles.points_balance`.
+
+### Why the eligible amount lives only in `points_transactions`, not on `purchase_reports`
+
+Storing it a second time on `purchase_reports` would create two sources of truth for the same fact with no way to guarantee they stay in sync. The `points_transactions` row already satisfies both the audit requirement (the exact amount an admin confirmed, permanently recorded) and the "database calculates points" requirement (the same row also stores the resulting `points`, so the calculation is always reproducible from data that was actually written, not re-derived later from a mutable column).
+
+### `points_transactions` schema
+
+Append-only ledger: `user_id`, `purchase_report_id`, `transaction_type` (free text, not hard-enum-constrained, so a future reversal/adjustment type can be added without an `ALTER TABLE`; this migration only ever inserts `'purchase_reward'`), `points`, `eligible_pre_vat_amount`, `created_by` (the acting admin), `created_at`. CHECK constraints scoped specifically to `transaction_type = 'purchase_reward'` require `points > 0`, a non-null `purchase_report_id`, and a non-null `eligible_pre_vat_amount`; a separate constraint requires `eligible_pre_vat_amount` to be non-negative whenever present.
+
+### One award per report, enforced at the database level
+
+A partial unique index, `on points_transactions (purchase_report_id) where transaction_type = 'purchase_reward'`, guarantees a report can never receive more than one purchase-reward ledger row - independent of, and in addition to, the RPC's own `exists()` check. This is the same "partial unique index for an at-most-one-per-case rule" technique already used for `receipt_manual_items (purchase_report_id, line_index)`.
+
+### `points_transactions` access model
+
+Row Level Security is enabled on `points_transactions`. Only a `for select using (public.is_admin())` policy exists - no customer-facing SELECT policy is added yet, since no transaction-history UI exists yet and the customer already sees the resulting `points_awarded`/`points_balance` values through existing, unmodified tables. There is no INSERT/UPDATE/DELETE grant or policy for `authenticated` at all; the only writer is `award_purchase_points()` via `security definer`.
+
+### Not yet confirmed applied to the live database
+
+Unlike migrations 008-012 (confirmed applied via live anon-key REST probing during earlier stages), `013_points_awarding.sql` and `014_automatic_points_eligibility.sql` have only been verified via mocked Playwright network responses against the real `AdminReportDetailScreen`/`adminReportService.js` code, not against the actual Supabase project. Both must be run, in order, in the Supabase SQL Editor before real end-to-end testing (or real point awards) is possible.
+
+## Automatic points eligibility from receipt line items
+
+`014_automatic_points_eligibility.sql` removes the admin-typed eligible amount entirely. Points are now calculated only from `receipt_manual_items` rows the admin has already entered, specifically the ones marked as a real Golden Light product. The admin never types a total anywhere in this flow - not the eligible amount, not the points.
+
+### Why a manual `is_golden_light` flag, not real product matching
+
+Real Golden Light catalog matching does not exist yet (see "Product matching foundation" above - it currently resolves every line to `unmatched` because no catalog data has been imported). Until it does, an admin must explicitly confirm which manually-entered lines are real Golden Light products, the same "nothing is trusted/derived automatically" posture already used for every other manual-entry field. This is explicitly a temporary substitute: a future migration can derive eligibility from real `receipt_line_matches` rows instead once product matching exists, without changing `award_purchase_points()`'s external contract (still just `p_report_id`) - only its internal eligible-total query would need to change.
+
+### Schema change to `receipt_manual_items`
+
+Adds `is_golden_light boolean not null default false`. A freshly-entered row is never eligible until an admin explicitly checks it.
+
+Unlike every other manual-item column, `is_golden_light` is hidden from *every* client role's plain `SELECT` (`revoke select (is_golden_light) on public.receipt_manual_items from authenticated`) - the same defense-in-depth carve-out already used for `created_by`/`reviewed_by`, necessary because column grants are role-level and customers/admins share the `authenticated` role. Unlike `created_by`/`reviewed_by` though, the admin genuinely needs to read this value (to render/preload the "מוצר Golden Light" checkbox), so a new function fills that gap:
+
+### `public.get_admin_manual_items(p_report_id)`
+
+The admin's only read path for `receipt_manual_items` as of this migration, replacing the previous plain `.from('receipt_manual_items').select(...)` call in `adminReportService.js`. `security definer`, `set search_path = ''`, requires `public.is_admin()` - a non-admin caller gets `not_admin` and no rows at all. Returns every column, including `is_golden_light`. The customer-facing read path (`purchaseReportService.getReceiptManualItems`) is untouched - it never selected `is_golden_light` and still doesn't.
+
+### `public.save_manual_receipt_items(p_report_id, p_items)` - extended
+
+Unchanged in every other respect from migration 011 (still `is_admin()`-gated, still validates every item before deleting anything, still replaces the full set atomically). Each item in `p_items` may now also carry `"is_golden_light": true/false`, validated as a real boolean and defaulting to `false` when omitted - `invalid_is_golden_light` is raised for anything else.
+
+### How the line amount is calculated
+
+For each `is_golden_light = true` row: prefer `line_total` if present; otherwise `quantity * unit_price` if BOTH are present; otherwise the row contributes nothing. Both existing CHECK constraints (`quantity > 0`, `unit_price >= 0`, `line_total >= 0`, and rejecting `NaN`) already guarantee no negative or `NaN` value can reach this calculation. VAT and the invoice grand total are never read anywhere in this function.
+
+### How the eligible total and points are calculated
+
+```sql
+select coalesce(sum(
+  coalesce(
+    item.line_total,
+    case
+      when item.quantity is not null and item.unit_price is not null
+        then item.quantity * item.unit_price
+      else null
+    end
+  )
+), 0)
+into v_eligible_total
+from public.receipt_manual_items item
+where item.purchase_report_id = p_report_id
+  and item.is_golden_light = true;
+```
+
+Postgres `sum()` already ignores `null`s, so a `is_golden_light = true` row that can produce neither a `line_total` nor a `quantity * unit_price` amount contributes exactly `0` to the total, matching the "row contributes 0" rule, without any special-case branch. `points := floor(v_eligible_total * 0.2)`, identical NUMERIC-arithmetic floor behavior as migration 013.
+
+### `public.award_purchase_points(p_report_id)` - signature change
+
+Migration 013's `award_purchase_points(uuid, numeric)` is dropped (`drop function if exists ... ;`) rather than left behind as a second, competing way to award points - there is exactly one award RPC in the schema at any time. The new `award_purchase_points(uuid)` accepts only the report id; there is no `p_eligible_pre_vat_amount`, `p_points`, or `p_points_awarded` parameter anywhere in its signature. Every number it uses is loaded from database rows:
+
+1. Requires `public.is_admin()`.
+2. Locks the target `purchase_reports` row with `for update` (same concurrency-safety technique as migration 013).
+3. Requires `status = 'approved'`.
+4. Refuses (`points_already_awarded`) if a `purchase_reward` row already exists for the report - still also independently enforced by the migration-013 partial unique index, untouched here.
+5. Computes the eligible total and points exactly as described above.
+6. Requires the eligible total to be `> 0` - `no_eligible_amount` otherwise, so the UI can show "לא קיים סכום מזכה עבור החשבונית" instead of attempting a meaningless award.
+7. Requires the resulting points to be `> 0` - `no_points_to_award` otherwise.
+8. Inserts exactly one `points_transactions` row (storing the DB-computed eligible total for audit, never a client-supplied value), updates `purchase_reports.points_awarded`, and increments `profiles.points_balance` - all three writes happen inside this one function call/transaction, same as migration 013.
+
+### Admin UI
+
+**Superseded by `015_finalize_purchase_report.sql`** (see below): the separate "צבירת נקודות" section and its standalone "הענקת נקודות" button described in this section are no longer part of the normal admin review flow. For a reviewable report (`submitted`/`needs_review`), approving and awarding points now happen together via a single "אישור וסיום טיפול" action. Each manual-item row still has the "מוצר Golden Light" checkbox and the live eligible-total/points preview described here - those did not change, only when/how the admin acts on them did. `award_purchase_points()` itself, and the RPC's own behavior, are unchanged by migration 015; only the admin UI's calling pattern changed. The standalone award button still exists as a fallback for a report that reached `approved` before this workflow existed - see "Unified one-click review workflow" below.
+
+## Unified one-click review workflow
+
+`015_finalize_purchase_report.sql` replaces the fragmented three-step admin flow (save manual items, then approve, then separately award points) with a single atomic action for the normal case: a report still `submitted` or `needs_review`.
+
+### Why one new function, not three separate calls from the client
+
+The client previously made three separate RPC calls in sequence (`save_manual_receipt_items`, `review_purchase_report`, `award_purchase_points`), which meant a real, reachable state existed where items were saved but the report wasn't approved, or the report was approved but points were never awarded (simply because the admin navigated away, or a network call failed, between steps). A single new function, `public.finalize_purchase_report(p_report_id, p_items)`, removes that gap entirely by performing all of the writes inside one Postgres transaction - the whole call either fully succeeds or fully rolls back, with no reachable partial state.
+
+### Reusing existing infrastructure
+
+Per an explicit "do not blindly duplicate architecture" instruction, `finalize_purchase_report()` does not reimplement item validation, replacement, or points calculation - it calls the existing, already-hardened functions directly:
+
+```sql
+perform public.save_manual_receipt_items(p_report_id, p_items);
+
+update public.purchase_reports
+set status = 'approved', reviewed_at = now(), reviewed_by = auth.uid(), rejection_reason = null
+where id = p_report_id;
+
+v_points := public.award_purchase_points(p_report_id);
+```
+
+`save_manual_receipt_items()` (011, extended 014) validates and atomically replaces the manual item set, including `is_golden_light`. `award_purchase_points()` (013, replaced 014), called only after the status update above, re-verifies `is_admin()` and `status = 'approved'` (both already true), sums the just-saved `is_golden_light` rows, computes `floor(eligible_total * 0.2)`, and raises `no_eligible_amount`/`no_points_to_award` rather than ever awarding zero points. Because this all happens inside one function call, an exception raised by either called function aborts and rolls back everything before it too - there is no way for items to end up saved without the report being approved, or approved without points being awarded.
+
+### `public.finalize_purchase_report(p_report_id, p_items)`
+
+`security definer`, `set search_path = ''`, same convention as every other definer function in this schema. The client sends **only** the report id and the final item list - never points, an eligible total, `reviewed_by`, or `reviewed_at`.
+
+1. Requires `public.is_admin()`.
+2. Locks the target `purchase_reports` row with `for update` immediately - the concurrency boundary for the whole operation: a second near-simultaneous finalize call for the same report blocks here until the first commits, then re-reads the now-`'approved'` status and correctly fails with `report_not_reviewable` rather than finalizing twice.
+3. Requires the report to exist and its status to be exactly `'submitted'` or `'needs_review'` - `report_not_reviewable` otherwise.
+4. Delegates to `save_manual_receipt_items()`, then sets `status = 'approved'`/`reviewed_at`/`reviewed_by`/`rejection_reason = null`, then delegates to `award_purchase_points()`, as shown above.
+
+`execute` is granted broadly to `authenticated` (no separate Postgres role for admins); authorization happens inside the function itself (step 1). A normal customer session can call this RPC, but always fails at step 1 - it never reaches any row.
+
+### Which existing RPCs remain, and why
+
+- `public.review_purchase_report()` (010) - **unchanged, still the only way to reject a report.** Its `'approved'` decision path also still exists at the database level (not dropped - nothing about it is unsafe), but the admin UI no longer calls it for approval; only its `'rejected'` path is exercised by the current app.
+- `public.save_manual_receipt_items()` (011/014) - unchanged, still directly used by `finalize_purchase_report()` internally AND by the admin UI's separate "עריכת טיפול" post-approval correction flow (see below).
+- `public.award_purchase_points()` (014) - unchanged, still directly used by `finalize_purchase_report()` internally AND kept reachable on its own as a fallback for a report that reached `'approved'` before this workflow existed and was never separately awarded.
+
+Nothing is dropped by this migration.
+
+### Rejection stays separate and simple
+
+"דחיית חשבונית" continues to call `review_purchase_report(p_report_id, 'rejected', p_rejection_reason)` directly - it never touches `receipt_manual_items` or points, and the admin UI does not require the manual-item rows to be valid before allowing a rejection (a report can be rejected even with an empty/incomplete draft, since rejecting never reads or saves them).
+
+### Admin UI: one review form, one final action
+
+For a reviewable report, `AdminReportDetailScreen`'s "פרטי החשבונית" section is now always directly editable (no separate "start editing"/"save" step) - the manual-item rows, "מוצר Golden Light" checkboxes, and the live eligible-total/points preview are the same UI described in the previous section, just always active rather than gated behind an edit toggle. Below them, "פעולות בדיקה" shows exactly two actions: "אישור וסיום טיפול" (primary, calls `finalizePurchaseReport()` -> `finalize_purchase_report`) and "דחיית חשבונית" (secondary, unchanged). There is no separate save button, approve button, or award-points button in this normal flow.
+
+"אישור וסיום טיפול" is disabled, with an inline explanation, unless the current draft would pass every rule the database itself enforces: at least one valid line, no invalid numeric values, no `is_golden_light` row missing enough price information to produce an amount, and a resulting eligible total/points both `> 0`. This client-side gate (`getFinalizeBlockingReason()`) is a UX convenience only - `finalize_purchase_report()` re-validates everything itself regardless.
+
+A confirmation modal ("אישור וסיום טיפול" / "סכום מזכה לפני מע״מ: ₪X" / "נקודות שיתווספו: Y" / "ביטול" / "אישור וסיום") precedes the actual call, using the same client-computed preview values (which, for a draft that already passed the gate above, match what the database will independently compute).
+
+After a successful finalize: the report reloads as `approved`, the editable form is replaced by a read-only display of the saved rows (with a "עריכת טיפול" link), a "פרטי הענקת הנקודות" box shows the awarded points and eligible amount for audit, and "פעולות בדיקה" shows the finalized decision box instead of any action buttons. The report also naturally leaves the active review queue (`getAdminReviewQueue()`/dashboard count are unchanged by this migration and were never touched by it) while remaining visible in "כל החשבוניות".
+
+### Post-approval correction ("עריכת טיפול") - deliberately does not touch points
+
+An approved report shows a "עריכת טיפול" link/button that reopens the exact same editable row UI, but saving from this mode calls `saveAdminManualItems()` -> `save_manual_receipt_items()` directly - never `finalize_purchase_report()` and never `award_purchase_points()`. This is a deliberate, structural safety property, not just a UI convention: `save_manual_receipt_items()` only ever writes to `receipt_manual_items` and has no code path that touches `points_transactions`, `purchase_reports.points_awarded`, or `profiles.points_balance`. A visible notice ("עריכה זו מעדכנת את פרטי החשבונית בלבד ואינה משפיעה על הנקודות שכבר הוענקו") makes this explicit to the admin. Already-awarded points are never recalculated or overwritten by editing here.
+
+This intentionally leaves a real limitation: if an admin corrects the Golden Light lines after points were already awarded based on the old data, the awarded points do **not** change to match. Correcting an already-awarded points total would require a proper adjustment/reversal ledger entry (a new `points_transactions` row of a different `transaction_type`, e.g. a future `'purchase_reward_adjustment'`), which does not exist yet and is explicitly out of scope for this migration - the original `purchase_reward` row is never updated or deleted in place, preserving `points_transactions` as an honest, append-only audit trail. This is a deliberate scope boundary, not an oversight.
+
+### Duplicate/concurrent finalization
+
+Prevented at two independent layers, both already established: the `for update` row lock inside `finalize_purchase_report()` (a second concurrent call blocks until the first commits, then observes `status = 'approved'` and fails with `report_not_reviewable`), and the migration-013 partial unique index on `points_transactions` (an extra, independent guarantee against a duplicate `purchase_reward` row even if the status check were ever bypassed).
+
+## Simplified admin manual-entry fields
+
+`016_simplify_eligible_amount_calc.sql` removes `sku` and `line_total` from the admin manual-review form entirely. Each row now shows only description, quantity, unit price, and the "מוצר Golden Light" checkbox - the admin never types a SKU or a line total anymore.
+
+### Schema is untouched
+
+`receipt_manual_items.sku` and `receipt_manual_items.line_total` are **not** dropped, and no existing row's data is modified by this migration. Both columns remain available for a future OCR/matching stage that might genuinely detect a SKU or a printed line total - this migration only changes what the current *admin manual-entry form* collects and what `award_purchase_points()` reads when computing eligibility, not the schema.
+
+### Calculation change: `quantity * unit_price` only, no `line_total` fallback
+
+Previously (migration 014), a row's eligible amount preferred `line_total` when present, falling back to `quantity * unit_price`. Since the admin form no longer collects `line_total` at all, every row it saves has `line_total = null`, and the old fallback formula would already have resolved to `quantity * unit_price` in practice - but `award_purchase_points()` was updated anyway to read `case when quantity is not null and unit_price is not null then quantity * unit_price else null end` directly, so the database-authoritative calculation is explicit and correct rather than depending on an incidental "line_total happens to always be null" side effect. A row missing quantity or unit price - regardless of any `line_total` it might still carry from before this change - contributes `0`.
+
+### Validation
+
+For a `submitted`/`needs_review` report, "אישור וסיום טיפול" stays disabled (with an inline explanation) unless every row marked `is_golden_light` has both a valid quantity (`> 0`) and a valid unit price (`>= 0`) - enforced client-side by `getFinalizeBlockingReason()` for immediate feedback, and independently by `award_purchase_points()`'s own `no_eligible_amount`/`no_points_to_award` checks, which still refuse to award zero points.
+
+### Admin UI
+
+`AdminReportDetailScreen`'s `MANUAL_COLUMNS` dropped the `sku`/`line_total` entries; the remaining description/quantity/unit-price columns were widened to fill the reclaimed space, in both the wide desktop table and the narrow stacked mobile layout, for the editable form and the read-only saved-items view alike. `buildManualItemsPayload()` now always sends `sku: null, line_total: null` for every row - the RPC payload shape is unchanged, only what the client populates changed.
+
+### Customer visibility
+
+No change needed: `PurchaseReportDetailsScreen`'s `ManualItemRow` already renders `quantity`/`unit_price`/`line_total`/`sku` independently, each only when non-null. Since the admin form now always saves `sku`/`line_total` as `null`, the customer simply stops seeing those two fields for any newly-finalized row, with no code change to the customer screen.
+
 ## Notes
 
 - Email is still managed by Supabase Auth and is not duplicated in profiles.
-- The schema now includes an OCR data foundation (receipt_ocr_results, receipt_ocr_lines) and a product matching foundation (receipt_line_matches) in addition to the catalog foundation, but still does not include points rules or admin management flows.
+- The schema now includes an OCR data foundation (receipt_ocr_results, receipt_ocr_lines), a product matching foundation (receipt_line_matches), and a points-awarding foundation (points_transactions, receipt_manual_items.is_golden_light, finalize_purchase_report) in addition to the catalog foundation, but still does not include membership-tier rules, reward redemption, point reversal/adjustment, or real automatic product-match-derived eligibility (is_golden_light remains a manual, temporary admin confirmation - see "Automatic points eligibility from receipt line items" above).
+- The normal admin review flow is now a single unified action ("אישור וסיום טיפול" - see "Unified one-click review workflow" above); the older separate save/approve/award-points steps described earlier in this document no longer reflect the app's actual UI, though every RPC they relied on still exists in the database exactly as documented (nothing was dropped).
+- The admin manual-entry form no longer collects `sku`/`line_total` (see "Simplified admin manual-entry fields" above); both columns remain in `receipt_manual_items` for any historical row and for possible future OCR use, but eligibility is now calculated purely from `quantity * unit_price`.
 - The process-receipt Edge Function (supabase/functions/process-receipt) exists as source-controlled code only. It has not been deployed and is not yet called from the app.
 - Migration 007_create_product_matching.sql has been run; `public.receipt_line_matches` exists. No real Golden Light product/alias data has been imported, so live matching currently resolves every line to `unmatched`.
 - Deterministic product matching (`productMatcher.ts`/`productMatchPersistence.ts`) is now called from `process-receipt/index.ts` after OCR persistence. This does not change today's observed behavior, since the function's success path is still unreachable without a configured OCR provider - see "Product matching foundation" above for the full integration and failure-isolation details.

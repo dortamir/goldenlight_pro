@@ -17,7 +17,8 @@ import AdminShell from '../components/admin/AdminShell';
 import AppInput from '../components/common/AppInput';
 import PrimaryButton from '../components/common/PrimaryButton';
 import {
-  approveAdminReport,
+  awardPurchasePoints,
+  finalizePurchaseReport,
   getAdminReceiptSignedUrl,
   getAdminReportDetail,
   rejectAdminReport,
@@ -31,18 +32,104 @@ import { colors, radius, shadows, spacing, typography } from '../theme';
 // input pair no longer fits five-across at phone/narrow-tablet widths.
 const MANUAL_TABLE_MIN_WIDTH = 720;
 
+// sku and line_total are intentionally NOT part of this form - see
+// 016_simplify_eligible_amount_calc.sql. The admin manual-review workflow
+// only ever collects description/quantity/unit_price/is_golden_light; the
+// database columns for sku/line_total still exist (for any historical row
+// entered before this change, and for possible future OCR use) but are
+// neither displayed nor sent as authoritative input by this screen anymore.
 const MANUAL_COLUMNS = [
-  { key: 'description', label: 'תיאור מוצר', flex: 3 },
-  { key: 'sku', label: 'מק״ט', flex: 1.3 },
-  { key: 'quantity', label: 'כמות', flex: 0.9 },
-  { key: 'unit_price', label: 'מחיר ליחידה', flex: 1.2 },
-  { key: 'line_total', label: 'סה״כ', flex: 1.2 },
+  { key: 'description', label: 'תיאור מוצר', flex: 3.4 },
+  { key: 'quantity', label: 'כמות', flex: 1.1 },
+  { key: 'unit_price', label: 'מחיר ליחידה', flex: 1.5 },
+  { key: 'is_golden_light', label: 'מוצר Golden Light', flex: 1.3 },
 ];
 
 let manualRowSeq = 0;
 function createEmptyManualRow() {
   manualRowSeq += 1;
-  return { key: `row-${manualRowSeq}`, description: '', sku: '', quantity: '', unit_price: '', line_total: '' };
+  return {
+    key: `row-${manualRowSeq}`,
+    description: '',
+    quantity: '',
+    unit_price: '',
+    is_golden_light: false,
+  };
+}
+
+// Preloads the editable form with the saved rows, or a single empty row
+// when none exist yet - "not zero, not multiple blank rows". Shared by the
+// always-editable reviewable-report table and the post-approval
+// "עריכת טיפול" correction flow. Any sku/line_total a saved row might still
+// carry from before this change is intentionally not surfaced here - see
+// the module comment above MANUAL_COLUMNS.
+function buildRowsFromManualItems(items) {
+  return items && items.length > 0
+    ? items.map((item) => ({
+        key: item.id,
+        description: item.description || '',
+        quantity: item.quantity != null ? String(item.quantity) : '',
+        unit_price: item.unit_price != null ? String(item.unit_price) : '',
+        is_golden_light: Boolean(item.is_golden_light),
+      }))
+    : [createEmptyManualRow()];
+}
+
+// A trimmed numeric-looking string -> a finite number, or null for
+// blank/invalid input. Used only by the lenient live preview below - never
+// by validation, which goes through buildManualItemsPayload()'s stricter
+// parseOptionalPositiveNumber/parseOptionalNonNegativeNumber instead.
+function toNumberOrNull(value) {
+  const trimmed = String(value ?? '').trim();
+  if (!trimmed) {
+    return null;
+  }
+  const num = Number(trimmed);
+  return Number.isFinite(num) ? num : null;
+}
+
+// Mirrors the exact rule public.award_purchase_points() (migration 016)
+// uses in Postgres: quantity * unit_price when BOTH are present and valid;
+// otherwise null ("contributes 0"). This is a preview only - the database
+// is the sole authoritative source for the real award. Never reads
+// line_total, sku, VAT, or an invoice grand total.
+function computeLineAmount(quantity, unitPrice) {
+  if (
+    quantity != null &&
+    unitPrice != null &&
+    Number.isFinite(quantity) &&
+    Number.isFinite(unitPrice) &&
+    quantity > 0 &&
+    unitPrice >= 0
+  ) {
+    return quantity * unitPrice;
+  }
+  return null;
+}
+
+// Sums computeLineAmount() over every is_golden_light row, and separately
+// reports which eligible rows are missing a valid quantity/unit_price, so
+// the UI can visibly flag them (per the "missing price information"
+// requirement) rather than silently treating them as an intentional ₪0
+// line.
+function summarizeEligibleRows(rows, getFields) {
+  let total = 0;
+  const missingPriceKeys = [];
+
+  rows.forEach((row, index) => {
+    const { key, isGoldenLight, quantity, unitPrice } = getFields(row, index);
+    if (!isGoldenLight) {
+      return;
+    }
+    const amount = computeLineAmount(quantity, unitPrice);
+    if (amount == null) {
+      missingPriceKeys.push(key);
+    } else {
+      total += amount;
+    }
+  });
+
+  return { total, missingPriceKeys };
 }
 
 function parseOptionalPositiveNumber(value, errorCode) {
@@ -67,26 +154,27 @@ function parseOptionalNonNegativeNumber(value, errorCode) {
   return num;
 }
 
-// Builds the payload sent to saveAdminManualItems() from the editable rows,
-// validating client-side first for immediate feedback - public.
-// save_manual_receipt_items() (migration 011) re-validates every rule
-// itself regardless, so this is a UX convenience, not the security
-// boundary. A row left completely untouched (every field blank) is dropped
-// silently - the common case after pressing "+ הוספת שורה" and not using
-// it; a row with SOME data but a missing description is rejected as an
-// error.
+// Builds the payload sent to finalizePurchaseReport()/saveAdminManualItems()
+// from the editable rows, validating client-side first for immediate
+// feedback - the server-side RPCs re-validate every rule themselves
+// regardless, so this is a UX convenience, not the security boundary. A row
+// left completely untouched (every field blank) is dropped silently - the
+// common case after pressing "+ הוספת שורה" and not using it; a row with
+// SOME data but a missing description is rejected as an error.
+//
+// sku/line_total are always sent as null - this form never collects them
+// (see 016_simplify_eligible_amount_calc.sql). The database columns still
+// accept them (for any future OCR-populated write path), this screen simply
+// never populates them anymore.
 function buildManualItemsPayload(rows) {
   const trimmedRows = rows.map((row) => ({
     description: row.description.trim(),
-    sku: row.sku.trim(),
     quantity: row.quantity.trim(),
     unit_price: row.unit_price.trim(),
-    line_total: row.line_total.trim(),
+    is_golden_light: Boolean(row.is_golden_light),
   }));
 
-  const nonEmptyRows = trimmedRows.filter(
-    (row) => row.description || row.sku || row.quantity || row.unit_price || row.line_total,
-  );
+  const nonEmptyRows = trimmedRows.filter((row) => row.description || row.quantity || row.unit_price);
 
   if (nonEmptyRows.length === 0) {
     throw new Error('items_required');
@@ -99,16 +187,14 @@ function buildManualItemsPayload(rows) {
     if (row.description.length > 500) {
       throw new Error('description_too_long');
     }
-    if (row.sku.length > 100) {
-      throw new Error('sku_too_long');
-    }
 
     return {
       description: row.description,
-      sku: row.sku || null,
+      sku: null,
       quantity: parseOptionalPositiveNumber(row.quantity, 'invalid_quantity'),
       unit_price: parseOptionalNonNegativeNumber(row.unit_price, 'invalid_unit_price'),
-      line_total: parseOptionalNonNegativeNumber(row.line_total, 'invalid_line_total'),
+      line_total: null,
+      is_golden_light: row.is_golden_light,
     };
   });
 }
@@ -178,9 +264,14 @@ function getMatchStatusMeta(status) {
   }
 }
 
-// Maps the short error identifiers raised by public.review_purchase_report()
-// (migration 010) and public.save_manual_receipt_items() (migration 011) to
-// safe Hebrew UI text - the raw Postgres error is never shown to the admin.
+// Maps the short error identifiers raised by public.finalize_purchase_report()
+// (migration 015 - the unified "אישור וסיום טיפול" action, which internally
+// reuses save_manual_receipt_items()/award_purchase_points()'s own error
+// codes), public.review_purchase_report() (migration 010, rejection only),
+// public.save_manual_receipt_items() (migration 011, extended by migration
+// 014), and public.award_purchase_points() (migration 014, fallback award
+// path) to safe Hebrew UI text - the raw Postgres error is never shown to
+// the admin.
 function getActionErrorMessage(err) {
   switch (err?.message) {
     case 'rejection_reason_required':
@@ -206,11 +297,56 @@ function getActionErrorMessage(err) {
       return 'מחיר ליחידה לא תקין.';
     case 'invalid_line_total':
       return 'סה״כ לא תקין.';
+    case 'invalid_is_golden_light':
+      return 'ערך לא תקין עבור סימון מוצר Golden Light.';
     case 'too_many_items':
       return 'יותר מדי שורות.';
+    case 'report_not_approved':
+      return 'ניתן להעניק נקודות רק לחשבונית מאושרת.';
+    case 'points_already_awarded':
+      return 'כבר הוענקו נקודות לחשבונית זו.';
+    case 'no_eligible_amount':
+      return 'לא קיים סכום מזכה עבור החשבונית.';
+    case 'no_points_to_award':
+      return 'הסכום הזכאי אינו מספיק להענקת נקודות.';
     default:
       return 'לא ניתן היה לעדכן את החשבונית. נסו שוב.';
   }
+}
+
+// Client-side-only gate for enabling "אישור וסיום טיפול" - re-validates the
+// exact same rules the database will (buildManualItemsPayload, then the
+// Golden-Light-eligibility/points rules public.finalize_purchase_report()
+// enforces via save_manual_receipt_items()/award_purchase_points()), purely
+// so the button can stay disabled with a specific, actionable explanation
+// instead of letting the admin submit and only then see a generic failure.
+// The database remains the real authority regardless - this can never be
+// used to bypass anything server-side.
+function getFinalizeBlockingReason(rows) {
+  let payload;
+  try {
+    payload = buildManualItemsPayload(rows);
+  } catch (err) {
+    return getActionErrorMessage(err);
+  }
+
+  const summary = summarizeEligibleRows(payload, (item, index) => ({
+    key: index,
+    isGoldenLight: item.is_golden_light,
+    quantity: item.quantity,
+    unitPrice: item.unit_price,
+  }));
+
+  if (summary.missingPriceKeys.length > 0) {
+    return 'יש להזין כמות ומחיר ליחידה תקינים עבור כל מוצרי ה-Golden Light המסומנים.';
+  }
+  if (summary.total <= 0) {
+    return 'יש לסמן לפחות מוצר Golden Light אחד עם סכום זכאי תקין לפני האישור.';
+  }
+  if (Math.floor(summary.total * 0.2) <= 0) {
+    return 'הסכום הזכאי אינו מספיק להענקת נקודות.';
+  }
+  return null;
 }
 
 export default function AdminReportDetailScreen() {
@@ -223,16 +359,42 @@ export default function AdminReportDetailScreen() {
   const [error, setError] = useState('');
   const [notFound, setNotFound] = useState(false);
   const [imageState, setImageState] = useState({ status: 'idle', url: null });
-  // null | 'approve' | 'reject' - which confirmation modal (if any) is open.
-  const [decisionModal, setDecisionModal] = useState(null);
-  const [rejectReason, setRejectReason] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [actionError, setActionError] = useState('');
-  // Manual line-item entry (fallback for missing/failed/unusable OCR).
-  const [manualEditing, setManualEditing] = useState(false);
+
+  // The unified review form - always editable while the report is
+  // reviewable (submitted/needs_review), and also reused (in a clearly
+  // separate, points-safe mode) for post-approval correction. See
+  // postApprovalEditing below.
   const [manualRows, setManualRows] = useState([]);
+
+  // "אישור וסיום טיפול" - the single final action for a reviewable report.
+  const [finalizeModalOpen, setFinalizeModalOpen] = useState(false);
+  const [finalizing, setFinalizing] = useState(false);
+  const [finalizeError, setFinalizeError] = useState('');
+
+  // "דחיית חשבונית" - stays a separate, simpler action (migration 010,
+  // unchanged). Never touches receipt_manual_items or points.
+  const [rejectModalOpen, setRejectModalOpen] = useState(false);
+  const [rejectReason, setRejectReason] = useState('');
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectError, setRejectError] = useState('');
+
+  // "עריכת טיפול" - post-approval correction of receipt_manual_items ONLY
+  // (via the existing saveAdminManualItems()/save_manual_receipt_items()
+  // RPC, never finalize_purchase_report() or award_purchase_points()). This
+  // can never touch points_transactions/points_awarded/points_balance - see
+  // the notice shown in this mode below.
+  const [postApprovalEditing, setPostApprovalEditing] = useState(false);
   const [manualSaving, setManualSaving] = useState(false);
   const [manualError, setManualError] = useState('');
+
+  // Fallback-only points-award path (see awardPurchasePoints() in
+  // adminReportService.js) - reachable only for a report that is already
+  // 'approved' but has no points_transactions row yet, which the unified
+  // finalize flow can no longer produce; kept for a report that reached
+  // 'approved' before this workflow existed.
+  const [awardModalOpen, setAwardModalOpen] = useState(false);
+  const [awarding, setAwarding] = useState(false);
+  const [pointsError, setPointsError] = useState('');
 
   const loadDetail = useCallback(() => {
     if (!id) {
@@ -243,8 +405,16 @@ export default function AdminReportDetailScreen() {
     setError('');
     setNotFound(false);
     setImageState({ status: 'idle', url: null });
-    setManualEditing(false);
+    setManualRows([]);
+    setFinalizeModalOpen(false);
+    setFinalizeError('');
+    setRejectModalOpen(false);
+    setRejectReason('');
+    setRejectError('');
+    setPostApprovalEditing(false);
     setManualError('');
+    setAwardModalOpen(false);
+    setPointsError('');
 
     getAdminReportDetail(id)
       .then((data) => {
@@ -254,6 +424,13 @@ export default function AdminReportDetailScreen() {
         }
 
         setReport(data);
+
+        // A reviewable report's line-item table is always editable - no
+        // separate "start editing" step - preloaded from whatever manual
+        // items already exist (or one empty row for a brand-new report).
+        if (REVIEWABLE_STATUSES.includes(data.status)) {
+          setManualRows(buildRowsFromManualItems(data.manualItems));
+        }
 
         if (!isPdfFile(data.original_filename) && data.receipt_path) {
           setImageState({ status: 'loading', url: null });
@@ -270,95 +447,6 @@ export default function AdminReportDetailScreen() {
     loadDetail();
   }, [loadDetail]);
 
-  const closeModal = () => {
-    if (submitting) {
-      return;
-    }
-    setDecisionModal(null);
-    setActionError('');
-    setRejectReason('');
-  };
-
-  const handleApprove = async () => {
-    if (!report || submitting) {
-      return;
-    }
-
-    setSubmitting(true);
-    setActionError('');
-
-    try {
-      await approveAdminReport(report.id);
-      setDecisionModal(null);
-      setRejectReason('');
-      loadDetail();
-    } catch (err) {
-      setActionError(getActionErrorMessage(err));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleReject = async () => {
-    if (!report || submitting) {
-      return;
-    }
-
-    const trimmedReason = rejectReason.trim();
-    if (!trimmedReason) {
-      setActionError('יש להזין סיבת דחייה.');
-      return;
-    }
-
-    setSubmitting(true);
-    setActionError('');
-
-    try {
-      await rejectAdminReport(report.id, trimmedReason);
-      setDecisionModal(null);
-      setRejectReason('');
-      loadDetail();
-    } catch (err) {
-      setActionError(getActionErrorMessage(err));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  // Preloads the form with the saved rows (edit) or a single empty row
-  // (first-time entry) - "not zero, not multiple blank rows".
-  const startManualEntry = () => {
-    if (!report) {
-      return;
-    }
-
-    const initialRows =
-      report.manualItems && report.manualItems.length > 0
-        ? report.manualItems.map((item) => ({
-            key: item.id,
-            description: item.description || '',
-            sku: item.sku || '',
-            quantity: item.quantity != null ? String(item.quantity) : '',
-            unit_price: item.unit_price != null ? String(item.unit_price) : '',
-            line_total: item.line_total != null ? String(item.line_total) : '',
-          }))
-        : [createEmptyManualRow()];
-
-    setManualRows(initialRows);
-    setManualError('');
-    setManualEditing(true);
-  };
-
-  // Discards the in-progress draft and returns to the read-only view of the
-  // last SAVED data - never persists anything.
-  const cancelManualEntry = () => {
-    if (manualSaving) {
-      return;
-    }
-    setManualEditing(false);
-    setManualError('');
-  };
-
   const addManualRow = () => {
     setManualRows((rows) => [...rows, createEmptyManualRow()]);
   };
@@ -369,9 +457,7 @@ export default function AdminReportDetailScreen() {
     setManualRows((rows) => {
       if (rows.length <= 1) {
         return rows.map((row) =>
-          row.key === key
-            ? { ...row, description: '', sku: '', quantity: '', unit_price: '', line_total: '' }
-            : row,
+          row.key === key ? { ...row, description: '', quantity: '', unit_price: '' } : row,
         );
       }
       return rows.filter((row) => row.key !== key);
@@ -382,7 +468,129 @@ export default function AdminReportDetailScreen() {
     setManualRows((rows) => rows.map((row) => (row.key === key ? { ...row, [field]: value } : row)));
   };
 
-  const saveManualEntry = async () => {
+  const toggleManualRowGoldenLight = (key) => {
+    setManualRows((rows) =>
+      rows.map((row) => (row.key === key ? { ...row, is_golden_light: !row.is_golden_light } : row)),
+    );
+  };
+
+  const openFinalizeModal = () => {
+    setFinalizeError('');
+    setFinalizeModalOpen(true);
+  };
+
+  const closeFinalizeModal = () => {
+    if (finalizing) {
+      return;
+    }
+    setFinalizeModalOpen(false);
+    setFinalizeError('');
+  };
+
+  // The single final action: saves the current rows, marks the report
+  // approved, and awards points - all in one atomic RPC call
+  // (finalize_purchase_report, migration 015). Never a separate save, then
+  // approve, then award.
+  const handleFinalize = async () => {
+    if (!report || finalizing) {
+      return;
+    }
+
+    let payload;
+    try {
+      payload = buildManualItemsPayload(manualRows);
+    } catch (err) {
+      setFinalizeError(getActionErrorMessage(err));
+      return;
+    }
+
+    setFinalizing(true);
+    setFinalizeError('');
+
+    try {
+      await finalizePurchaseReport(report.id, payload);
+      setFinalizeModalOpen(false);
+      loadDetail();
+    } catch (err) {
+      // Dev-only: the real Supabase/Postgres error - never shown to the
+      // admin, who only ever sees the safe Hebrew message below.
+      if (__DEV__) {
+        console.error('[Admin finalize report]', err);
+      }
+      setFinalizeError(getActionErrorMessage(err));
+    } finally {
+      setFinalizing(false);
+    }
+  };
+
+  const openRejectModal = () => {
+    setRejectError('');
+    setRejectReason('');
+    setRejectModalOpen(true);
+  };
+
+  const closeRejectModal = () => {
+    if (rejecting) {
+      return;
+    }
+    setRejectModalOpen(false);
+    setRejectError('');
+    setRejectReason('');
+  };
+
+  const handleReject = async () => {
+    if (!report || rejecting) {
+      return;
+    }
+
+    const trimmedReason = rejectReason.trim();
+    if (!trimmedReason) {
+      setRejectError('יש להזין סיבת דחייה.');
+      return;
+    }
+
+    setRejecting(true);
+    setRejectError('');
+
+    try {
+      await rejectAdminReport(report.id, trimmedReason);
+      setRejectModalOpen(false);
+      setRejectReason('');
+      loadDetail();
+    } catch (err) {
+      setRejectError(getActionErrorMessage(err));
+    } finally {
+      setRejecting(false);
+    }
+  };
+
+  const startPostApprovalEdit = () => {
+    if (!report) {
+      return;
+    }
+    setManualRows(buildRowsFromManualItems(report.manualItems));
+    setManualError('');
+    setPostApprovalEditing(true);
+  };
+
+  // Discards the in-progress draft and returns to the read-only view of the
+  // last SAVED data - never persists anything.
+  const cancelPostApprovalEdit = () => {
+    if (manualSaving) {
+      return;
+    }
+    setPostApprovalEditing(false);
+    setManualError('');
+  };
+
+  // Post-approval correction: replaces receipt_manual_items only, via the
+  // same save_manual_receipt_items() RPC the reviewable-report flow used to
+  // use directly. This can NEVER touch points_transactions,
+  // purchase_reports.points_awarded, or profiles.points_balance - the
+  // already-awarded points for this report are not recalculated here,
+  // exactly as required (a real correction would need a separate,
+  // explicit adjustment-ledger stage that does not exist yet).
+  const savePostApprovalEdit = async () => {
     if (!report || manualSaving) {
       return;
     }
@@ -401,22 +609,50 @@ export default function AdminReportDetailScreen() {
 
     try {
       await saveAdminManualItems(report.id, payload);
-      setManualEditing(false);
+      setPostApprovalEditing(false);
       loadDetail();
     } catch (err) {
-      // Dev-only: the real Supabase/Postgres error (e.g. "relation does not
-      // exist" if migration 011 hasn't been applied yet, a permission
-      // error, a constraint violation, ...) so this can actually be
-      // diagnosed - never shown to the admin, who only ever sees the safe
-      // Hebrew message below.
       if (__DEV__) {
         console.error('[Admin manual receipt save]', err);
       }
-      // Values stay in the form - nothing is cleared on failure, so the
-      // admin can fix the problem and retry without retyping everything.
       setManualError(getActionErrorMessage(err));
     } finally {
       setManualSaving(false);
+    }
+  };
+
+  const openAwardModal = () => {
+    setPointsError('');
+    setAwardModalOpen(true);
+  };
+
+  const closeAwardModal = () => {
+    if (awarding) {
+      return;
+    }
+    setAwardModalOpen(false);
+    setPointsError('');
+  };
+
+  const handleAwardPoints = async () => {
+    if (!report || awarding) {
+      return;
+    }
+
+    setAwarding(true);
+    setPointsError('');
+
+    try {
+      await awardPurchasePoints(report.id);
+      setAwardModalOpen(false);
+      loadDetail();
+    } catch (err) {
+      if (__DEV__) {
+        console.error('[Admin award points]', err);
+      }
+      setPointsError(getActionErrorMessage(err));
+    } finally {
+      setAwarding(false);
     }
   };
 
@@ -425,9 +661,41 @@ export default function AdminReportDetailScreen() {
   const ocrStatusMeta = report?.ocrResult ? getOcrStatusMeta(report.ocrResult.status) : null;
   const matchByLineId = new Map((report?.lineMatches || []).map((match) => [match.ocr_line_id, match]));
   const isReviewable = report ? REVIEWABLE_STATUSES.includes(report.status) : false;
-  const isFinalized = report ? report.status === 'approved' || report.status === 'rejected' : false;
+  const isApproved = report?.status === 'approved';
+  const isRejected = report?.status === 'rejected';
+  const isFinalized = isApproved || isRejected;
   const hasManualItems = Boolean(report?.manualItems && report.manualItems.length > 0);
-  const hasUsableOcr = Boolean(report?.ocrResult?.status === 'completed' && (report?.ocrLines?.length || 0) > 0);
+  const hasPointsAward = Boolean(report?.pointsAward);
+  const isEditingRows = isReviewable || postApprovalEditing;
+
+  // Live draft preview - recomputed on every render from the in-progress
+  // manualRows editing state (never persisted), so it updates immediately
+  // as the admin marks/unmarks "מוצר Golden Light" or edits
+  // quantity/unit_price. Admin-only, never sent anywhere. Used both for the
+  // reviewable-report finalize flow and the post-approval correction
+  // preview.
+  const draftEligibleSummary = summarizeEligibleRows(manualRows, (row) => ({
+    key: row.key,
+    isGoldenLight: row.is_golden_light,
+    quantity: toNumberOrNull(row.quantity),
+    unitPrice: toNumberOrNull(row.unit_price),
+  }));
+  const draftPointsPreview = Math.floor(draftEligibleSummary.total * 0.2);
+  const finalizeBlockingReason = isReviewable ? getFinalizeBlockingReason(manualRows) : null;
+
+  // The fallback award-section preview - recomputed from report.manualItems,
+  // the last SAVED data, since that is exactly what
+  // public.award_purchase_points() itself will sum when pressed. Still only
+  // a JS preview - the RPC independently recalculates the authoritative
+  // value in NUMERIC arithmetic.
+  const savedEligibleSummary = summarizeEligibleRows(report?.manualItems || [], (item) => ({
+    key: item.id,
+    isGoldenLight: item.is_golden_light,
+    quantity: item.quantity,
+    unitPrice: item.unit_price,
+  }));
+  const savedPointsPreview = Math.floor(savedEligibleSummary.total * 0.2);
+  const hasEligibleAmount = savedEligibleSummary.total > 0;
 
   return (
     <AdminShell activeKey="queue">
@@ -525,312 +793,390 @@ export default function AdminReportDetailScreen() {
             )}
           </View>
 
-          <View style={styles.sectionCard}>
-            {manualEditing ? (
-              <>
-                <Text style={styles.sectionTitle}>הזנת פרטי חשבונית</Text>
+          {/* Unified "פרטי החשבונית" section - always editable while the
+              report is reviewable (isEditingRows via isReviewable), or
+              editable in the clearly separate, points-safe "עריכת טיפול"
+              mode for an approved report. Otherwise (rejected, processing,
+              or an approved report not currently being corrected) it's a
+              plain read-only display of the last saved rows. */}
+          {isEditingRows || hasManualItems ? (
+            <View style={styles.sectionCard}>
+              {isEditingRows ? (
+                <>
+                  <Text style={styles.sectionTitle}>פרטי החשבונית</Text>
 
-                {isWideManualTable ? (
-                  <View style={styles.manualTableHeaderRow}>
-                    {MANUAL_COLUMNS.map((column) => (
-                      <Text key={column.key} style={[styles.manualTableHeaderText, { flex: column.flex }]}>
-                        {column.label}
-                      </Text>
-                    ))}
-                    <View style={styles.manualTableDeleteHeaderCell} />
-                  </View>
-                ) : null}
+                  {postApprovalEditing ? (
+                    <Text style={styles.postApprovalNoticeText}>
+                      עריכה זו מעדכנת את פרטי החשבונית בלבד ואינה משפיעה על הנקודות שכבר הוענקו.
+                    </Text>
+                  ) : null}
 
-                <View style={styles.manualFormRows}>
-                  {manualRows.map((row, index) =>
-                    isWideManualTable ? (
-                      <View key={row.key} style={styles.manualTableRow}>
-                        <View style={{ flex: MANUAL_COLUMNS[0].flex }}>
-                          <AppInput
-                            value={row.description}
-                            onChangeText={(value) => updateManualRow(row.key, 'description', value)}
-                            placeholder="תיאור מוצר"
-                            editable={!manualSaving}
-                            style={styles.manualTableCellInput}
-                          />
-                        </View>
-                        <View style={{ flex: MANUAL_COLUMNS[1].flex }}>
-                          <AppInput
-                            value={row.sku}
-                            onChangeText={(value) => updateManualRow(row.key, 'sku', value)}
-                            placeholder="מק״ט"
-                            editable={!manualSaving}
-                            textAlign="left"
-                            writingDirection="ltr"
-                            style={styles.manualTableCellInput}
-                          />
-                        </View>
-                        <View style={{ flex: MANUAL_COLUMNS[2].flex }}>
-                          <AppInput
-                            value={row.quantity}
-                            onChangeText={(value) => updateManualRow(row.key, 'quantity', value)}
-                            placeholder="כמות"
-                            keyboardType="decimal-pad"
-                            editable={!manualSaving}
-                            textAlign="left"
-                            writingDirection="ltr"
-                            style={styles.manualTableCellInput}
-                          />
-                        </View>
-                        <View style={{ flex: MANUAL_COLUMNS[3].flex }}>
-                          <AppInput
-                            value={row.unit_price}
-                            onChangeText={(value) => updateManualRow(row.key, 'unit_price', value)}
-                            placeholder="מחיר ליחידה"
-                            keyboardType="decimal-pad"
-                            editable={!manualSaving}
-                            textAlign="left"
-                            writingDirection="ltr"
-                            style={styles.manualTableCellInput}
-                          />
-                        </View>
-                        <View style={{ flex: MANUAL_COLUMNS[4].flex }}>
-                          <AppInput
-                            value={row.line_total}
-                            onChangeText={(value) => updateManualRow(row.key, 'line_total', value)}
-                            placeholder="סה״כ"
-                            keyboardType="decimal-pad"
-                            editable={!manualSaving}
-                            textAlign="left"
-                            writingDirection="ltr"
-                            style={styles.manualTableCellInput}
-                          />
-                        </View>
-                        <Pressable
-                          onPress={() => removeManualRow(row.key)}
-                          disabled={manualSaving}
-                          style={styles.manualTableDeleteCell}
-                          accessibilityRole="button"
-                          accessibilityLabel="מחיקת שורה"
-                          hitSlop={8}>
-                          <Ionicons name="trash-outline" size={16} color={colors.error} />
-                        </Pressable>
-                      </View>
-                    ) : (
-                      <View key={row.key} style={styles.manualStackedRow}>
-                        <View style={styles.manualStackedRowHeader}>
-                          <Text style={styles.manualStackedRowIndex}>{`שורה ${index + 1}`}</Text>
+                  {isWideManualTable ? (
+                    <View style={styles.manualTableHeaderRow}>
+                      {MANUAL_COLUMNS.map((column) => (
+                        <Text
+                          key={column.key}
+                          style={[
+                            styles.manualTableHeaderText,
+                            { flex: column.flex },
+                            column.key === 'is_golden_light' && styles.manualTableHeaderTextCentered,
+                          ]}>
+                          {column.label}
+                        </Text>
+                      ))}
+                      <View style={styles.manualTableDeleteHeaderCell} />
+                    </View>
+                  ) : null}
+
+                  <View style={styles.manualFormRows}>
+                    {manualRows.map((row, index) =>
+                      isWideManualTable ? (
+                        <View key={row.key} style={styles.manualTableRow}>
+                          <View style={{ flex: MANUAL_COLUMNS[0].flex }}>
+                            <AppInput
+                              value={row.description}
+                              onChangeText={(value) => updateManualRow(row.key, 'description', value)}
+                              placeholder="תיאור מוצר"
+                              editable={!manualSaving && !finalizing}
+                              style={styles.manualTableCellInput}
+                            />
+                          </View>
+                          <View style={{ flex: MANUAL_COLUMNS[1].flex }}>
+                            <AppInput
+                              value={row.quantity}
+                              onChangeText={(value) => updateManualRow(row.key, 'quantity', value)}
+                              placeholder="כמות"
+                              keyboardType="decimal-pad"
+                              editable={!manualSaving && !finalizing}
+                              textAlign="left"
+                              writingDirection="ltr"
+                              style={styles.manualTableCellInput}
+                            />
+                          </View>
+                          <View style={{ flex: MANUAL_COLUMNS[2].flex }}>
+                            <AppInput
+                              value={row.unit_price}
+                              onChangeText={(value) => updateManualRow(row.key, 'unit_price', value)}
+                              placeholder="מחיר ליחידה"
+                              keyboardType="decimal-pad"
+                              editable={!manualSaving && !finalizing}
+                              textAlign="left"
+                              writingDirection="ltr"
+                              style={styles.manualTableCellInput}
+                            />
+                          </View>
+                          <View style={[styles.manualGoldenLightCell, { flex: MANUAL_COLUMNS[3].flex }]}>
+                            <Pressable
+                              onPress={() => toggleManualRowGoldenLight(row.key)}
+                              disabled={manualSaving || finalizing}
+                              accessibilityRole="checkbox"
+                              accessibilityState={{ checked: row.is_golden_light }}
+                              accessibilityLabel="מוצר Golden Light"
+                              hitSlop={8}>
+                              <Ionicons
+                                name={row.is_golden_light ? 'checkbox' : 'square-outline'}
+                                size={20}
+                                color={row.is_golden_light ? colors.primary : colors.textMuted}
+                              />
+                            </Pressable>
+                            {row.is_golden_light &&
+                            computeLineAmount(toNumberOrNull(row.quantity), toNumberOrNull(row.unit_price)) ==
+                              null ? (
+                              <Ionicons
+                                name="alert-circle"
+                                size={16}
+                                color={colors.error}
+                                accessibilityLabel="חסר כמות/מחיר למוצר Golden Light"
+                              />
+                            ) : null}
+                          </View>
                           <Pressable
                             onPress={() => removeManualRow(row.key)}
-                            disabled={manualSaving}
+                            disabled={manualSaving || finalizing}
+                            style={styles.manualTableDeleteCell}
                             accessibilityRole="button"
                             accessibilityLabel="מחיקת שורה"
                             hitSlop={8}>
                             <Ionicons name="trash-outline" size={16} color={colors.error} />
                           </Pressable>
                         </View>
-                        <AppInput
-                          label="תיאור מוצר"
-                          value={row.description}
-                          onChangeText={(value) => updateManualRow(row.key, 'description', value)}
-                          editable={!manualSaving}
-                          style={styles.manualFormField}
-                        />
-                        <View style={styles.manualFormFieldsRow}>
+                      ) : (
+                        <View key={row.key} style={styles.manualStackedRow}>
+                          <View style={styles.manualStackedRowHeader}>
+                            <Text style={styles.manualStackedRowIndex}>{`שורה ${index + 1}`}</Text>
+                            <Pressable
+                              onPress={() => removeManualRow(row.key)}
+                              disabled={manualSaving || finalizing}
+                              accessibilityRole="button"
+                              accessibilityLabel="מחיקת שורה"
+                              hitSlop={8}>
+                              <Ionicons name="trash-outline" size={16} color={colors.error} />
+                            </Pressable>
+                          </View>
                           <AppInput
-                            label="מק״ט"
-                            value={row.sku}
-                            onChangeText={(value) => updateManualRow(row.key, 'sku', value)}
-                            editable={!manualSaving}
-                            textAlign="left"
-                            writingDirection="ltr"
-                            style={styles.manualFormFieldHalf}
+                            label="תיאור מוצר"
+                            value={row.description}
+                            onChangeText={(value) => updateManualRow(row.key, 'description', value)}
+                            editable={!manualSaving && !finalizing}
+                            style={styles.manualFormField}
                           />
-                          <AppInput
-                            label="כמות"
-                            value={row.quantity}
-                            onChangeText={(value) => updateManualRow(row.key, 'quantity', value)}
-                            editable={!manualSaving}
-                            keyboardType="decimal-pad"
-                            textAlign="left"
-                            writingDirection="ltr"
-                            style={styles.manualFormFieldHalf}
-                          />
+                          <View style={styles.manualFormFieldsRow}>
+                            <AppInput
+                              label="כמות"
+                              value={row.quantity}
+                              onChangeText={(value) => updateManualRow(row.key, 'quantity', value)}
+                              editable={!manualSaving && !finalizing}
+                              keyboardType="decimal-pad"
+                              textAlign="left"
+                              writingDirection="ltr"
+                              style={styles.manualFormFieldHalf}
+                            />
+                            <AppInput
+                              label="מחיר ליחידה"
+                              value={row.unit_price}
+                              onChangeText={(value) => updateManualRow(row.key, 'unit_price', value)}
+                              editable={!manualSaving && !finalizing}
+                              keyboardType="decimal-pad"
+                              textAlign="left"
+                              writingDirection="ltr"
+                              style={styles.manualFormFieldHalf}
+                            />
+                          </View>
+                          <Pressable
+                            onPress={() => toggleManualRowGoldenLight(row.key)}
+                            disabled={manualSaving || finalizing}
+                            style={styles.manualGoldenLightStackedRow}
+                            accessibilityRole="checkbox"
+                            accessibilityState={{ checked: row.is_golden_light }}>
+                            <Ionicons
+                              name={row.is_golden_light ? 'checkbox' : 'square-outline'}
+                              size={20}
+                              color={row.is_golden_light ? colors.primary : colors.textMuted}
+                            />
+                            <Text style={styles.manualGoldenLightStackedLabel}>מוצר Golden Light</Text>
+                          </Pressable>
+                          {row.is_golden_light &&
+                          computeLineAmount(toNumberOrNull(row.quantity), toNumberOrNull(row.unit_price)) ==
+                            null ? (
+                            <Text style={styles.manualRowWarningText}>חסר כמות/מחיר למוצר Golden Light</Text>
+                          ) : null}
                         </View>
-                        <View style={styles.manualFormFieldsRow}>
-                          <AppInput
-                            label="מחיר ליחידה"
-                            value={row.unit_price}
-                            onChangeText={(value) => updateManualRow(row.key, 'unit_price', value)}
-                            editable={!manualSaving}
-                            keyboardType="decimal-pad"
-                            textAlign="left"
-                            writingDirection="ltr"
-                            style={styles.manualFormFieldHalf}
-                          />
-                          <AppInput
-                            label="סה״כ"
-                            value={row.line_total}
-                            onChangeText={(value) => updateManualRow(row.key, 'line_total', value)}
-                            editable={!manualSaving}
-                            keyboardType="decimal-pad"
-                            textAlign="left"
-                            writingDirection="ltr"
-                            style={styles.manualFormFieldHalf}
-                          />
-                        </View>
-                      </View>
-                    ),
-                  )}
-                </View>
-
-                <Pressable
-                  onPress={addManualRow}
-                  disabled={manualSaving}
-                  style={styles.addRowButton}
-                  accessibilityRole="button">
-                  <Ionicons name="add" size={16} color={colors.primary} />
-                  <Text style={styles.addRowButtonText}>הוספת שורה</Text>
-                </Pressable>
-
-                {manualError ? <Text style={styles.errorText}>{manualError}</Text> : null}
-
-                <View style={styles.manualFormActionsRow}>
-                  <Pressable
-                    onPress={cancelManualEntry}
-                    disabled={manualSaving}
-                    style={styles.modalCancelButton}
-                    accessibilityRole="button">
-                    <Text style={styles.modalCancelText}>ביטול</Text>
-                  </Pressable>
-                  <PrimaryButton
-                    title={manualSaving ? 'שומר...' : 'שמירת פרטי החשבונית'}
-                    onPress={saveManualEntry}
-                    loading={manualSaving}
-                    disabled={manualSaving}
-                    style={styles.manualSaveButton}
-                  />
-                </View>
-              </>
-            ) : hasManualItems ? (
-              <>
-                <View style={styles.sectionHeaderRow}>
-                  <Text style={styles.sectionTitle}>פרטי החשבונית — הוזן ידנית</Text>
-                  <View style={[styles.statusBadge, styles.manualBadge]}>
-                    <Text style={[styles.statusBadgeText, styles.manualBadgeText]}>הוזן ידנית</Text>
+                      ),
+                    )}
                   </View>
-                </View>
 
-                {isWideManualTable ? (
-                  <>
-                    <View style={styles.manualTableHeaderRow}>
-                      {MANUAL_COLUMNS.map((column) => (
-                        <Text key={column.key} style={[styles.manualTableHeaderText, { flex: column.flex }]}>
-                          {column.label}
-                        </Text>
+                  <Pressable
+                    onPress={addManualRow}
+                    disabled={manualSaving || finalizing}
+                    style={styles.addRowButton}
+                    accessibilityRole="button">
+                    <Ionicons name="add" size={16} color={colors.primary} />
+                    <Text style={styles.addRowButtonText}>הוספת שורה</Text>
+                  </Pressable>
+
+                  {/* Live, admin-only preview - recomputed from the rows
+                      above on every keystroke/toggle. Never sent anywhere;
+                      the database is the sole authoritative source once
+                      finalized/saved. */}
+                  <View style={styles.eligibleSummaryBox}>
+                    <Text style={styles.eligibleSummaryLine}>
+                      {`סכום מוצרי Golden Light לפני מע״מ: ₪${draftEligibleSummary.total.toFixed(2)}`}
+                    </Text>
+                    <Text style={styles.eligibleSummaryLine}>
+                      {`נקודות ${postApprovalEditing ? 'שיינתנו' : 'שיתווספו'}: ${draftPointsPreview}`}
+                    </Text>
+                  </View>
+
+                  {postApprovalEditing ? (
+                    <>
+                      {manualError ? <Text style={styles.errorText}>{manualError}</Text> : null}
+                      <View style={styles.manualFormActionsRow}>
+                        <Pressable
+                          onPress={cancelPostApprovalEdit}
+                          disabled={manualSaving}
+                          style={styles.modalCancelButton}
+                          accessibilityRole="button">
+                          <Text style={styles.modalCancelText}>ביטול</Text>
+                        </Pressable>
+                        <PrimaryButton
+                          title={manualSaving ? 'שומר...' : 'שמירת עדכון'}
+                          onPress={savePostApprovalEdit}
+                          loading={manualSaving}
+                          disabled={manualSaving}
+                          style={styles.manualSaveButton}
+                        />
+                      </View>
+                    </>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <View style={styles.sectionHeaderRow}>
+                    <Text style={styles.sectionTitle}>פרטי החשבונית</Text>
+                    <View style={[styles.statusBadge, styles.manualBadge]}>
+                      <Text style={[styles.statusBadgeText, styles.manualBadgeText]}>הוזן ידנית</Text>
+                    </View>
+                  </View>
+
+                  {isWideManualTable ? (
+                    <>
+                      <View style={styles.manualTableHeaderRow}>
+                        {MANUAL_COLUMNS.map((column) => (
+                          <Text
+                            key={column.key}
+                            style={[
+                              styles.manualTableHeaderText,
+                              { flex: column.flex },
+                              column.key === 'is_golden_light' && styles.manualTableHeaderTextCentered,
+                            ]}>
+                            {column.label}
+                          </Text>
+                        ))}
+                      </View>
+                      {report.manualItems.map((item) => (
+                        <View key={item.id} style={styles.manualTableRow}>
+                          <Text style={[styles.manualTableCellText, { flex: MANUAL_COLUMNS[0].flex }]}>
+                            {item.description}
+                          </Text>
+                          <Text style={[styles.manualTableCellText, { flex: MANUAL_COLUMNS[1].flex }]}>
+                            {item.quantity ?? '—'}
+                          </Text>
+                          <Text style={[styles.manualTableCellText, { flex: MANUAL_COLUMNS[2].flex }]}>
+                            {item.unit_price ?? '—'}
+                          </Text>
+                          <View style={[styles.manualGoldenLightCell, { flex: MANUAL_COLUMNS[3].flex }]}>
+                            <Ionicons
+                              name={item.is_golden_light ? 'checkbox' : 'square-outline'}
+                              size={18}
+                              color={item.is_golden_light ? colors.primary : colors.textMuted}
+                            />
+                          </View>
+                        </View>
+                      ))}
+                    </>
+                  ) : (
+                    <View style={styles.manualItemsList}>
+                      {report.manualItems.map((item) => (
+                        <View key={item.id} style={styles.manualItemRow}>
+                          <Text style={styles.manualItemDescription}>{item.description}</Text>
+                          <View style={styles.manualItemMetaRow}>
+                            {item.quantity != null ? (
+                              <Text style={styles.manualItemMeta}>{`כמות: ${item.quantity}`}</Text>
+                            ) : null}
+                            {item.unit_price != null ? (
+                              <Text style={styles.manualItemMeta}>{`מחיר ליח׳: ${item.unit_price}`}</Text>
+                            ) : null}
+                          </View>
+                          <View style={styles.manualGoldenLightStackedRow}>
+                            <Ionicons
+                              name={item.is_golden_light ? 'checkbox' : 'square-outline'}
+                              size={18}
+                              color={item.is_golden_light ? colors.primary : colors.textMuted}
+                            />
+                            <Text style={styles.manualGoldenLightStackedLabel}>מוצר Golden Light</Text>
+                          </View>
+                        </View>
                       ))}
                     </View>
-                    {report.manualItems.map((item) => (
-                      <View key={item.id} style={styles.manualTableRow}>
-                        <Text style={[styles.manualTableCellText, { flex: MANUAL_COLUMNS[0].flex }]}>
-                          {item.description}
-                        </Text>
-                        <Text style={[styles.manualTableCellText, { flex: MANUAL_COLUMNS[1].flex }]}>
-                          {item.sku || '—'}
-                        </Text>
-                        <Text style={[styles.manualTableCellText, { flex: MANUAL_COLUMNS[2].flex }]}>
-                          {item.quantity ?? '—'}
-                        </Text>
-                        <Text style={[styles.manualTableCellText, { flex: MANUAL_COLUMNS[3].flex }]}>
-                          {item.unit_price ?? '—'}
-                        </Text>
-                        <Text style={[styles.manualTableCellText, { flex: MANUAL_COLUMNS[4].flex }]}>
-                          {item.line_total ?? '—'}
-                        </Text>
-                      </View>
-                    ))}
-                  </>
-                ) : (
-                  <View style={styles.manualItemsList}>
-                    {report.manualItems.map((item) => (
-                      <View key={item.id} style={styles.manualItemRow}>
-                        <Text style={styles.manualItemDescription}>{item.description}</Text>
-                        <View style={styles.manualItemMetaRow}>
-                          {item.sku ? <Text style={styles.manualItemMeta}>{`מק״ט: ${item.sku}`}</Text> : null}
-                          {item.quantity != null ? (
-                            <Text style={styles.manualItemMeta}>{`כמות: ${item.quantity}`}</Text>
-                          ) : null}
-                          {item.unit_price != null ? (
-                            <Text style={styles.manualItemMeta}>{`מחיר ליח׳: ${item.unit_price}`}</Text>
-                          ) : null}
-                          {item.line_total != null ? (
-                            <Text style={styles.manualItemMeta}>{`סה״כ: ${item.line_total}`}</Text>
-                          ) : null}
-                        </View>
-                      </View>
-                    ))}
-                  </View>
-                )}
+                  )}
 
-                <Pressable onPress={startManualEntry} style={styles.manualEditLink} accessibilityRole="button">
-                  <Text style={styles.manualEditLinkText}>עריכת נתונים</Text>
-                </Pressable>
-              </>
-            ) : (
-              <>
-                <Text style={styles.sectionTitle}>הזנה ידנית</Text>
-                <Text style={styles.emptyText}>
-                  {hasUsableOcr
-                    ? 'ניתן להוסיף נתונים שהוזנו ידנית לחשבונית זו בנוסף לזיהוי האוטומטי.'
-                    : 'לא זוהו נתונים אוטומטית מהחשבונית. ניתן להזין את פרטי החשבונית ידנית.'}
+                  {isApproved ? (
+                    <Pressable onPress={startPostApprovalEdit} style={styles.manualEditLink} accessibilityRole="button">
+                      <Text style={styles.manualEditLinkText}>עריכת טיפול</Text>
+                    </Pressable>
+                  ) : null}
+                </>
+              )}
+            </View>
+          ) : isApproved ? (
+            // An approved report with no manual items yet (e.g. approved
+            // before this workflow existed) - "עריכת טיפול" is still the
+            // entry point to add them.
+            <View style={styles.sectionCard}>
+              <Text style={styles.sectionTitle}>פרטי החשבונית</Text>
+              <Text style={styles.emptyText}>לא הוזנו פרטי חשבונית עבור חשבונית זו.</Text>
+              <PrimaryButton title="עריכת טיפול" onPress={startPostApprovalEdit} style={styles.manualStartButton} />
+            </View>
+          ) : null}
+
+          {hasPointsAward ? (
+            <View style={styles.sectionCard}>
+              <Text style={styles.sectionTitle}>פרטי הענקת הנקודות</Text>
+              <View style={styles.pointsAwardedInfoBox}>
+                <Text style={styles.pointsAwardedInfoValue}>{`נוספו ${report.pointsAward.points} נקודות`}</Text>
+                {report.pointsAward.eligible_pre_vat_amount != null ? (
+                  <Text style={styles.pointsAwardedInfoMeta}>
+                    {`סכום מוצרי Golden Light לפני מע״מ: ₪${report.pointsAward.eligible_pre_vat_amount}`}
+                  </Text>
+                ) : null}
+              </View>
+            </View>
+          ) : null}
+
+          {/* Fallback-only: a report that reached 'approved' before this
+              unified workflow existed, and was never separately awarded.
+              A freshly-finalized report always has hasPointsAward === true
+              immediately, so this never appears for the normal flow. */}
+          {isApproved && !hasPointsAward ? (
+            <View style={styles.sectionCard}>
+              <Text style={styles.sectionTitle}>צבירת נקודות</Text>
+              <Text style={styles.emptyText}>
+                חשבונית זו אושרה ללא הענקת נקודות. ניתן להעניק נקודות בהתאם לפרטי החשבונית שהוזנו.
+              </Text>
+              <View style={styles.eligibleSummaryBox}>
+                <Text style={styles.eligibleSummaryLine}>
+                  {`סכום מוצרי Golden Light לפני מע״מ: ₪${savedEligibleSummary.total.toFixed(2)}`}
                 </Text>
-                <PrimaryButton title="הזנה ידנית" onPress={startManualEntry} style={styles.manualStartButton} />
-              </>
-            )}
-          </View>
+                <Text style={styles.eligibleSummaryLine}>{`נקודות שיינתנו: ${savedPointsPreview}`}</Text>
+              </View>
+              {!hasEligibleAmount ? <Text style={styles.emptyText}>לא קיים סכום מזכה עבור החשבונית</Text> : null}
+              {pointsError && !awardModalOpen ? <Text style={styles.errorText}>{pointsError}</Text> : null}
+              <PrimaryButton
+                title="הענקת נקודות"
+                onPress={openAwardModal}
+                disabled={!hasEligibleAmount || savedPointsPreview <= 0}
+                style={styles.pointsAwardButton}
+              />
+            </View>
+          ) : null}
 
           <View style={styles.sectionCard}>
             <Text style={styles.sectionTitle}>פעולות בדיקה</Text>
 
             {isReviewable ? (
-              <View style={styles.actionsRow}>
-                <PrimaryButton
-                  title="אישור חשבונית"
-                  onPress={() => {
-                    setActionError('');
-                    setDecisionModal('approve');
-                  }}
-                  disabled={submitting}
-                  style={styles.approveButton}
-                />
-                <Pressable
-                  onPress={() => {
-                    setActionError('');
-                    setRejectReason('');
-                    setDecisionModal('reject');
-                  }}
-                  disabled={submitting}
-                  style={({ pressed }) => [
-                    styles.rejectButton,
-                    pressed && styles.rejectButtonPressed,
-                    submitting && styles.rejectButtonDisabled,
-                  ]}
-                  accessibilityRole="button">
-                  <Text style={styles.rejectButtonText}>דחיית חשבונית</Text>
-                </Pressable>
-              </View>
+              <>
+                {finalizeBlockingReason ? (
+                  <Text style={styles.finalizeHintText}>{finalizeBlockingReason}</Text>
+                ) : null}
+                <View style={styles.actionsRow}>
+                  <PrimaryButton
+                    title="אישור וסיום טיפול"
+                    onPress={openFinalizeModal}
+                    disabled={Boolean(finalizeBlockingReason) || finalizing}
+                    style={styles.finalizeButton}
+                  />
+                  <Pressable
+                    onPress={openRejectModal}
+                    disabled={finalizing}
+                    style={({ pressed }) => [
+                      styles.rejectButton,
+                      pressed && styles.rejectButtonPressed,
+                      finalizing && styles.rejectButtonDisabled,
+                    ]}
+                    accessibilityRole="button">
+                    <Text style={styles.rejectButtonText}>דחיית חשבונית</Text>
+                  </Pressable>
+                </View>
+              </>
             ) : isFinalized ? (
-              <View
-                style={[
-                  styles.decisionBox,
-                  report.status === 'approved' ? styles.decisionBoxApproved : styles.decisionBoxRejected,
-                ]}>
-                <Text
-                  style={[
-                    styles.decisionText,
-                    report.status === 'approved' ? styles.decisionTextApproved : styles.decisionTextRejected,
-                  ]}>
-                  {report.status === 'approved' ? 'החשבונית אושרה' : 'החשבונית נדחתה'}
+              <View style={[styles.decisionBox, isApproved ? styles.decisionBoxApproved : styles.decisionBoxRejected]}>
+                <Text style={[styles.decisionText, isApproved ? styles.decisionTextApproved : styles.decisionTextRejected]}>
+                  {isApproved ? 'החשבונית אושרה' : 'החשבונית נדחתה'}
                 </Text>
                 {report.reviewed_at ? (
                   <Text style={styles.decisionMeta}>{`טופלה ב-${formatReportDate(report.reviewed_at)}`}</Text>
                 ) : null}
-                {report.status === 'rejected' && report.rejection_reason ? (
+                {isRejected && report.rejection_reason ? (
                   <>
                     <Text style={styles.rejectionReasonLabel}>סיבת הדחייה</Text>
                     <Text style={styles.rejectionReasonText}>{report.rejection_reason}</Text>
@@ -844,21 +1190,28 @@ export default function AdminReportDetailScreen() {
         </>
       )}
 
-      <Modal visible={decisionModal === 'approve'} transparent animationType="fade" onRequestClose={closeModal}>
+      <Modal visible={finalizeModalOpen} transparent animationType="fade" onRequestClose={closeFinalizeModal}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>לאשר את החשבונית?</Text>
-            <Text style={styles.modalSubtitle}>לאחר האישור החשבונית תסומן כמאושרת.</Text>
-            {actionError ? <Text style={styles.modalErrorText}>{actionError}</Text> : null}
+            <Text style={styles.modalTitle}>אישור וסיום טיפול</Text>
+            <Text style={styles.modalSubtitle}>
+              {`סכום מזכה לפני מע״מ: ₪${draftEligibleSummary.total.toFixed(2)}`}
+            </Text>
+            <Text style={styles.modalSubtitle}>{`נקודות שיתווספו: ${draftPointsPreview}`}</Text>
+            {finalizeError ? <Text style={styles.modalErrorText}>{finalizeError}</Text> : null}
             <View style={styles.modalActionsRow}>
-              <Pressable onPress={closeModal} disabled={submitting} style={styles.modalCancelButton} accessibilityRole="button">
+              <Pressable
+                onPress={closeFinalizeModal}
+                disabled={finalizing}
+                style={styles.modalCancelButton}
+                accessibilityRole="button">
                 <Text style={styles.modalCancelText}>ביטול</Text>
               </Pressable>
               <PrimaryButton
-                title={submitting ? 'מאשר...' : 'אישור'}
-                onPress={handleApprove}
-                loading={submitting}
-                disabled={submitting}
+                title={finalizing ? 'מעדכן...' : 'אישור וסיום'}
+                onPress={handleFinalize}
+                loading={finalizing}
+                disabled={finalizing}
                 style={styles.modalConfirmButton}
               />
             </View>
@@ -866,7 +1219,7 @@ export default function AdminReportDetailScreen() {
         </View>
       </Modal>
 
-      <Modal visible={decisionModal === 'reject'} transparent animationType="fade" onRequestClose={closeModal}>
+      <Modal visible={rejectModalOpen} transparent animationType="fade" onRequestClose={closeRejectModal}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>דחיית חשבונית</Text>
@@ -879,30 +1232,59 @@ export default function AdminReportDetailScreen() {
               multiline
               numberOfLines={4}
               maxLength={1000}
-              editable={!submitting}
+              editable={!rejecting}
               textAlign="right"
               writingDirection="rtl"
               style={styles.modalTextarea}
             />
-            {actionError ? <Text style={styles.modalErrorText}>{actionError}</Text> : null}
+            {rejectError ? <Text style={styles.modalErrorText}>{rejectError}</Text> : null}
             <View style={styles.modalActionsRow}>
-              <Pressable onPress={closeModal} disabled={submitting} style={styles.modalCancelButton} accessibilityRole="button">
+              <Pressable
+                onPress={closeRejectModal}
+                disabled={rejecting}
+                style={styles.modalCancelButton}
+                accessibilityRole="button">
                 <Text style={styles.modalCancelText}>ביטול</Text>
               </Pressable>
               <Pressable
                 onPress={handleReject}
-                disabled={submitting || !rejectReason.trim()}
+                disabled={rejecting || !rejectReason.trim()}
                 style={[
                   styles.modalRejectConfirmButton,
-                  (submitting || !rejectReason.trim()) && styles.modalRejectConfirmButtonDisabled,
+                  (rejecting || !rejectReason.trim()) && styles.modalRejectConfirmButtonDisabled,
                 ]}
                 accessibilityRole="button">
-                {submitting ? (
+                {rejecting ? (
                   <ActivityIndicator color={colors.white} size="small" />
                 ) : (
                   <Text style={styles.modalRejectConfirmText}>דחיית החשבונית</Text>
                 )}
               </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={awardModalOpen} transparent animationType="fade" onRequestClose={closeAwardModal}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>האם להעניק את הנקודות?</Text>
+            <Text style={styles.modalSubtitle}>
+              {`סכום מוצרי Golden Light לפני מע״מ: ₪${savedEligibleSummary.total.toFixed(2)}`}
+            </Text>
+            <Text style={styles.modalSubtitle}>{`נקודות לזיכוי: ${savedPointsPreview}`}</Text>
+            {pointsError ? <Text style={styles.modalErrorText}>{pointsError}</Text> : null}
+            <View style={styles.modalActionsRow}>
+              <Pressable onPress={closeAwardModal} disabled={awarding} style={styles.modalCancelButton} accessibilityRole="button">
+                <Text style={styles.modalCancelText}>ביטול</Text>
+              </Pressable>
+              <PrimaryButton
+                title={awarding ? 'מעניק...' : 'אישור והענקת נקודות'}
+                onPress={handleAwardPoints}
+                loading={awarding}
+                disabled={awarding}
+                style={styles.modalConfirmButton}
+              />
             </View>
           </View>
         </View>
@@ -1056,15 +1438,21 @@ const styles = StyleSheet.create({
     textAlign: 'right',
     writingDirection: 'rtl',
   },
-  // Review actions.
+  // Final review actions.
   actionsRow: {
     flexDirection: 'row-reverse',
     flexWrap: 'wrap',
     gap: spacing.sm,
   },
-  approveButton: {
+  finalizeButton: {
     flexGrow: 1,
     flexBasis: 200,
+  },
+  finalizeHintText: {
+    ...typography.caption,
+    fontWeight: '600',
+    color: colors.textMuted,
+    textAlign: 'right',
   },
   rejectButton: {
     flexGrow: 1,
@@ -1215,7 +1603,7 @@ const styles = StyleSheet.create({
     fontWeight: typography.button.fontWeight,
     color: colors.white,
   },
-  // Manual entry.
+  // Manual items / unified review form.
   sectionHeaderRow: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
@@ -1240,6 +1628,12 @@ const styles = StyleSheet.create({
     ...typography.caption,
     fontWeight: '700',
     color: colors.primary,
+  },
+  postApprovalNoticeText: {
+    ...typography.caption,
+    fontWeight: '600',
+    color: colors.primaryPressed,
+    textAlign: 'right',
   },
   // Wide/desktop table layout - shared column proportions (MANUAL_COLUMNS)
   // between the header row, editable rows, and read-only rows so
@@ -1365,5 +1759,73 @@ const styles = StyleSheet.create({
   },
   manualSaveButton: {
     flex: 1,
+  },
+  // Automatic eligible-total/points preview - shared by the live editing
+  // draft (reviewable report or post-approval correction) and the fallback
+  // award section (all admin-only, never editable, never sent as-is - the
+  // database independently recalculates the authoritative value).
+  eligibleSummaryBox: {
+    width: '100%',
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.md,
+    padding: spacing.md,
+    alignItems: 'flex-end',
+    gap: 2,
+  },
+  eligibleSummaryLine: {
+    ...typography.caption,
+    fontWeight: '700',
+    color: colors.primaryPressed,
+    textAlign: 'right',
+  },
+  // "מוצר Golden Light" checkbox cell (wide table).
+  manualTableHeaderTextCentered: {
+    textAlign: 'center',
+  },
+  manualGoldenLightCell: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+  },
+  // "מוצר Golden Light" checkbox row (narrow/stacked layout).
+  manualGoldenLightStackedRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  manualGoldenLightStackedLabel: {
+    ...typography.caption,
+    fontWeight: '600',
+    color: colors.text,
+    textAlign: 'right',
+  },
+  manualRowWarningText: {
+    ...typography.caption,
+    fontWeight: '600',
+    color: colors.error,
+    textAlign: 'right',
+  },
+  pointsAwardButton: {
+    marginTop: spacing.xs,
+  },
+  pointsAwardedInfoBox: {
+    width: '100%',
+    backgroundColor: colors.successSoft,
+    borderRadius: radius.md,
+    padding: spacing.md,
+    alignItems: 'flex-end',
+    gap: 2,
+  },
+  pointsAwardedInfoValue: {
+    ...typography.body,
+    fontWeight: '700',
+    color: colors.success,
+    textAlign: 'right',
+  },
+  pointsAwardedInfoMeta: {
+    ...typography.caption,
+    color: colors.textMuted,
+    textAlign: 'right',
   },
 });

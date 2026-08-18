@@ -42,20 +42,39 @@ async function fetchProfileNamesByIds(userIds) {
   return new Map((data || []).map((profile) => [profile.id, profile.full_name]));
 }
 
-const MANUAL_ITEM_COLUMNS = 'id, line_index, description, sku, quantity, unit_price, line_total, created_at, updated_at';
-
+// The admin's ONLY read path for receipt_manual_items as of migration 014:
+// is_golden_light is deliberately unreadable via a plain
+// `.from('receipt_manual_items').select(...)` (its column-level SELECT
+// grant was revoked from `authenticated` entirely, the same treatment as
+// created_by), so the admin reads through this SECURITY DEFINER RPC
+// instead, which re-checks public.is_admin() itself and returns every
+// column including is_golden_light.
 async function fetchManualItems(reportId) {
-  const { data, error } = await supabase
-    .from('receipt_manual_items')
-    .select(MANUAL_ITEM_COLUMNS)
-    .eq('purchase_report_id', reportId)
-    .order('line_index', { ascending: true });
+  const { data, error } = await supabase.rpc('get_admin_manual_items', { p_report_id: reportId });
 
   if (error) {
     throw error;
   }
 
   return data || [];
+}
+
+// The existing 'purchase_reward' points_transactions row for a report, if
+// any has been awarded yet - never eligible_pre_vat_amount-derived
+// on-the-fly, just whatever the secure RPC actually recorded.
+async function fetchPurchaseRewardTransaction(reportId) {
+  const { data, error } = await supabase
+    .from('points_transactions')
+    .select('id, points, eligible_pre_vat_amount, created_at')
+    .eq('purchase_report_id', reportId)
+    .eq('transaction_type', 'purchase_reward')
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data || null;
 }
 
 // Real counts only - no revenue/points/user-growth metrics, since nothing in
@@ -107,6 +126,40 @@ export async function getAdminReviewQueue() {
     .select('id, user_id, receipt_path, original_filename, status, points_awarded, created_at')
     .in('status', REVIEW_QUEUE_STATUSES)
     .order('created_at', { ascending: true });
+
+  if (error) {
+    throw error;
+  }
+
+  if (!reports || reports.length === 0) {
+    return [];
+  }
+
+  const nameById = await fetchProfileNamesByIds([...new Set(reports.map((report) => report.user_id))]);
+
+  return reports.map((report) => ({
+    ...report,
+    customerName: nameById.get(report.user_id) || null,
+  }));
+}
+
+// Every purchase report regardless of status (submitted, processing,
+// needs_review, approved, rejected), for the admin history/all-receipts
+// view - deliberately NOT filtered by REVIEW_QUEUE_STATUSES, unlike
+// getAdminReviewQueue() above. Newest first, so a just-submitted or
+// just-decided receipt appears at the top. Status filtering for the "הכל /
+// ממתינות / בטיפול / אושרו / נדחו" UI filters happens client-side in
+// AdminReportsHistoryScreen against this same full list - there is no
+// separate query per filter.
+export async function getAdminReports() {
+  if (!supabase) {
+    return [];
+  }
+
+  const { data: reports, error } = await supabase
+    .from('purchase_reports')
+    .select('id, user_id, receipt_path, original_filename, status, points_awarded, created_at')
+    .order('created_at', { ascending: false });
 
   if (error) {
     throw error;
@@ -209,6 +262,19 @@ export async function getAdminReportDetail(reportId) {
     }
   }
 
+  // Same isolation reasoning as manualItems above - whether points have
+  // already been awarded is secondary to the rest of this screen; a
+  // failure here must not block the receipt image/OCR/approve-reject
+  // sections from rendering.
+  let pointsAward = null;
+  try {
+    pointsAward = await fetchPurchaseRewardTransaction(reportId);
+  } catch (err) {
+    if (__DEV__) {
+      console.warn('[Admin] Failed to load points award state', { code: err?.code, message: err?.message });
+    }
+  }
+
   return {
     ...report,
     customerName: nameById.get(report.user_id) || null,
@@ -216,6 +282,7 @@ export async function getAdminReportDetail(reportId) {
     ocrLines,
     lineMatches,
     manualItems,
+    pointsAward,
   };
 }
 
@@ -231,11 +298,13 @@ export async function getAdminManualItems(reportId) {
 }
 
 // Replaces the FULL manual-item set for one report via the single secure
-// RPC (public.save_manual_receipt_items, migration 011) - there is
-// deliberately no direct `.from('receipt_manual_items').insert/update(...)`
-// anywhere in this module. `items` is a plain array of
-// { description, sku, quantity, unit_price, line_total } objects (any of
-// sku/quantity/unit_price/line_total may be null); line_index is assigned
+// RPC (public.save_manual_receipt_items, migration 011, extended by
+// migration 014) - there is deliberately no direct
+// `.from('receipt_manual_items').insert/update(...)` anywhere in this
+// module. `items` is a plain array of
+// { description, sku, quantity, unit_price, line_total, is_golden_light }
+// objects (any of sku/quantity/unit_price/line_total may be null;
+// is_golden_light defaults to false when omitted); line_index is assigned
 // server-side from array order and is never sent from here. The RPC
 // re-validates every field itself and performs the delete+insert replace
 // atomically in one transaction, so a failed save can never leave a report
@@ -257,39 +326,58 @@ export async function saveAdminManualItems(reportId, items) {
 }
 
 // REVIEWABLE_STATUSES mirrors REVIEW_QUEUE_STATUSES (kept as a separate,
-// clearly-named export) - a report can only be finalized while it is still
-// 'submitted' or 'needs_review'. The actual authority for this rule lives
-// in public.review_purchase_report() (migration 010) - this constant is
-// only used by the UI to decide whether to show the approve/reject actions
-// at all, never to bypass what the database itself enforces.
+// clearly-named export) - a report can only be finalized or rejected while
+// it is still 'submitted' or 'needs_review'. The actual authority for this
+// rule lives in public.finalize_purchase_report() and
+// public.review_purchase_report() (both independently re-check it) - this
+// constant is only used by the UI to decide whether to show the unified
+// review form/actions at all, never to bypass what the database itself
+// enforces.
 export const REVIEWABLE_STATUSES = ['submitted', 'needs_review'];
 
-// Finalizes a report as approved or rejected. Both are thin wrappers around
-// the single secure RPC (public.review_purchase_report, migration 010) -
-// there is deliberately NO direct `.from('purchase_reports').update(...)`
-// anywhere in this module. The RPC itself re-verifies admin membership,
-// re-checks the report is still reviewable (raising 'report_not_reviewable'
-// otherwise - e.g. a second admin session that already acted, or a report
-// still 'processing'), and validates the rejection reason; this function
-// only forwards the caller's intent and lets whatever the RPC raises
-// propagate as a real Error for the screen to translate into safe Hebrew
-// text. Neither function awards points or touches public.profiles in any
-// way - that is enforced by the RPC, not by this client code.
-export async function approveAdminReport(reportId) {
+// The single unified review action ("אישור וסיום טיפול") via
+// public.finalize_purchase_report(p_report_id, p_items) (migration 015).
+// There is deliberately no direct `.from(...).update(...)` or separate
+// approve/save/award calls anywhere in this function. `items` has the exact
+// same shape saveAdminManualItems() takes
+// ({ description, sku, quantity, unit_price, line_total, is_golden_light }
+// per row) - the RPC itself validates and atomically replaces the report's
+// manual item set, then approves the report, then calculates and awards
+// points, all inside one Postgres transaction. The client sends ONLY the
+// report id and the item list - never points, points_awarded, an eligible
+// total, reviewed_by, or reviewed_at. If ANY step inside the RPC fails
+// (invalid item, no eligible Golden Light amount, zero points, a report
+// that's no longer reviewable, ...), the entire call rolls back - there is
+// no way for items to end up saved without the report being approved, or
+// approved without points being awarded. Returns the awarded points.
+export async function finalizePurchaseReport(reportId, items) {
   if (!supabase || !reportId) {
     throw new Error('report_not_found');
   }
 
-  const { error } = await supabase.rpc('review_purchase_report', {
+  const { data, error } = await supabase.rpc('finalize_purchase_report', {
     p_report_id: reportId,
-    p_decision: 'approved',
+    p_items: items,
   });
 
   if (error) {
     throw error;
   }
+
+  return data;
 }
 
+// Rejects a report via the single secure RPC (public.review_purchase_report,
+// migration 010) - there is deliberately NO direct
+// `.from('purchase_reports').update(...)` anywhere in this module.
+// review_purchase_report()'s 'approved' decision path still exists in the
+// database (migration 010) but is intentionally not wrapped here anymore -
+// the normal admin UI now approves exclusively through
+// finalizePurchaseReport() below (migration 015), which saves the manual
+// items AND awards points together with the approval, atomically. Rejection
+// stays deliberately separate and simple: it never touches
+// receipt_manual_items or points, exactly as before.
+//
 // `reason` is sent as-is; public.review_purchase_report() is the actual
 // source of truth for trimming/non-empty/max-length validation (it re-does
 // this itself rather than trusting the client), so a caller cannot bypass
@@ -308,6 +396,47 @@ export async function rejectAdminReport(reportId, reason) {
   if (error) {
     throw error;
   }
+}
+
+// Fallback-only path: awards purchase-reward points for an ALREADY-approved
+// report that has no points_transactions row yet, via the single secure RPC
+// (public.award_purchase_points, migration 014). Under the normal review
+// flow this can never be needed - finalizePurchaseReport() above awards
+// points atomically together with approval, so a freshly-finalized report
+// always has hasPointsAward === true immediately. This function/RPC stays
+// reachable only for a report that reached 'approved' status BEFORE the
+// unified flow existed (via the old review_purchase_report() 'approved'
+// path) and was never separately awarded - see
+// AdminReportDetailScreen's "צבירת נקודות" fallback section, shown only
+// when isApproved && !hasPointsAward. The client sends ONLY the report id -
+// there is deliberately no eligiblePreVatAmount/points/points_awarded
+// parameter anywhere in this call, and no direct
+// `.from('points_transactions').insert(...)` or `.from('profiles').update(...)`
+// anywhere in this module. The RPC independently loads the report's
+// receipt_manual_items rows marked is_golden_light, sums each row's
+// coalesce(line_total, quantity * unit_price), and recalculates
+// floor(eligible_total * 0.2) in NUMERIC arithmetic - that is the only
+// source of the authoritative value. The RPC itself re-verifies admin
+// membership, that the report is 'approved', that a real eligible amount
+// exists ('no_eligible_amount' otherwise), and that no purchase_reward
+// transaction already exists for it ('points_already_awarded' otherwise) -
+// this function only forwards the report id and lets whatever the RPC
+// raises propagate as a real Error for the screen to translate into safe
+// Hebrew text.
+export async function awardPurchasePoints(reportId) {
+  if (!supabase || !reportId) {
+    throw new Error('report_not_found');
+  }
+
+  const { data, error } = await supabase.rpc('award_purchase_points', {
+    p_report_id: reportId,
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
 }
 
 // Mirrors purchaseReportService.getReceiptSignedUrl's shape exactly, but

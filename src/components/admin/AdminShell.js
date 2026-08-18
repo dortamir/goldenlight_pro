@@ -7,15 +7,19 @@ import { colors, radius, spacing, typography } from '../../theme';
 const NAV_ITEMS = [
   { key: 'dashboard', label: 'ראשי', route: '/admin' },
   { key: 'queue', label: 'חשבוניות לבדיקה', route: '/admin' },
+  { key: 'history', label: 'כל החשבוניות', route: '/admin/reports' },
 ];
 
 // Shared web-first admin chrome: a dark header (brand + minimal nav + sign
-// out) over a light scrollable content area. Both nav items currently point
-// at the same dashboard route, since the review queue lives directly on
-// that screen (see AdminHomeScreen) - kept as two labeled entries per the
+// out) over a light scrollable content area. "ראשי"/"חשבוניות לבדיקה" both
+// point at the same dashboard route, since the review queue lives directly
+// on that screen (see AdminHomeScreen) - kept as two labeled entries per the
 // requested nav structure so real, separate destinations can be wired in
-// later without a nav redesign. Intentionally not a copy of the customer
-// app's tab bar - this is a desktop-oriented management surface.
+// later without a nav redesign. "כל החשבוניות" is a real, separate
+// destination (see AdminReportsHistoryScreen) covering every status,
+// including approved/rejected reports the active queue intentionally drops.
+// Intentionally not a copy of the customer app's tab bar - this is a
+// desktop-oriented management surface.
 export default function AdminShell({ activeKey = 'dashboard', children }) {
   const router = useRouter();
   const { signOut } = useAuth();
