@@ -4,22 +4,22 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useAuth } from '../../context/AuthContext';
 import { colors, radius, spacing, typography } from '../../theme';
 
+// Deliberately just two real destinations. A third item ("חשבוניות לבדיקה")
+// that pointed at this same dashboard route was removed as redundant: the
+// dashboard (AdminHomeScreen) already opens directly onto the active review
+// queue, so a second nav entry pointing at the identical route added a
+// choice with no actual difference. "כל החשבוניות" (AdminReportsHistoryScreen)
+// remains the one real second destination, covering every status including
+// approved/rejected reports the active queue intentionally drops.
 const NAV_ITEMS = [
   { key: 'dashboard', label: 'ראשי', route: '/admin' },
-  { key: 'queue', label: 'חשבוניות לבדיקה', route: '/admin' },
   { key: 'history', label: 'כל החשבוניות', route: '/admin/reports' },
 ];
 
 // Shared web-first admin chrome: a dark header (brand + minimal nav + sign
-// out) over a light scrollable content area. "ראשי"/"חשבוניות לבדיקה" both
-// point at the same dashboard route, since the review queue lives directly
-// on that screen (see AdminHomeScreen) - kept as two labeled entries per the
-// requested nav structure so real, separate destinations can be wired in
-// later without a nav redesign. "כל החשבוניות" is a real, separate
-// destination (see AdminReportsHistoryScreen) covering every status,
-// including approved/rejected reports the active queue intentionally drops.
-// Intentionally not a copy of the customer app's tab bar - this is a
-// desktop-oriented management surface.
+// out) over a light scrollable content area. Intentionally not a copy of
+// the customer app's tab bar - this is a compact, desktop-oriented
+// management surface, not a mobile screen stretched onto desktop.
 export default function AdminShell({ activeKey = 'dashboard', children }) {
   const router = useRouter();
   const { signOut } = useAuth();
@@ -42,18 +42,34 @@ export default function AdminShell({ activeKey = 'dashboard', children }) {
           <Text style={styles.brand}>GOLDEN+ · מערכת ניהול</Text>
 
           <View style={styles.nav}>
-            {NAV_ITEMS.map((item) => (
-              <Pressable
-                key={item.key}
-                onPress={() => router.push(item.route)}
-                style={[styles.navItem, activeKey === item.key && styles.navItemActive]}
-                accessibilityRole="link">
-                <Text style={[styles.navText, activeKey === item.key && styles.navTextActive]}>{item.label}</Text>
-              </Pressable>
-            ))}
+            {NAV_ITEMS.map((item) => {
+              const isActive = activeKey === item.key;
+              return (
+                <Pressable
+                  key={item.key}
+                  onPress={() => router.push(item.route)}
+                  style={({ pressed, hovered }) => [
+                    styles.navItem,
+                    isActive && styles.navItemActive,
+                    !isActive && hovered && styles.navItemHovered,
+                    pressed && styles.navItemPressed,
+                  ]}
+                  accessibilityRole="link"
+                  accessibilityState={{ selected: isActive }}>
+                  <Text style={[styles.navText, isActive && styles.navTextActive]}>{item.label}</Text>
+                </Pressable>
+              );
+            })}
           </View>
 
-          <Pressable onPress={handleSignOut} style={styles.signOutButton} accessibilityRole="button">
+          <Pressable
+            onPress={handleSignOut}
+            style={({ pressed, hovered }) => [
+              styles.signOutButton,
+              hovered && styles.signOutButtonHovered,
+              pressed && styles.navItemPressed,
+            ]}
+            accessibilityRole="button">
             <Text style={styles.signOutText}>יציאה</Text>
           </Pressable>
         </View>
@@ -100,15 +116,25 @@ const styles = StyleSheet.create({
   nav: {
     flexDirection: 'row-reverse',
     flexWrap: 'wrap',
-    gap: spacing.sm,
+    gap: spacing.xs,
   },
   navItem: {
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingVertical: 9,
     borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    cursor: 'pointer',
+  },
+  navItemHovered: {
+    backgroundColor: colors.glassFill,
+  },
+  navItemPressed: {
+    opacity: 0.85,
   },
   navItemActive: {
     backgroundColor: colors.glassFill,
+    borderColor: colors.primary,
   },
   navText: {
     ...typography.caption,
@@ -118,13 +144,18 @@ const styles = StyleSheet.create({
   },
   navTextActive: {
     color: colors.primary,
+    fontWeight: '700',
   },
   signOutButton: {
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingVertical: 9,
     borderRadius: radius.pill,
     borderWidth: 1,
     borderColor: colors.charcoalBorder,
+    cursor: 'pointer',
+  },
+  signOutButtonHovered: {
+    borderColor: colors.mutedOnDark,
   },
   signOutText: {
     ...typography.caption,

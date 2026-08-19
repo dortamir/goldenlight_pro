@@ -485,10 +485,13 @@ export default function PurchaseReportDetailsScreen() {
 
                 {isRejected ? (
                   <View style={styles.errorInfoCard}>
-                    <Text style={styles.errorInfoCardTitle}>החשבונית לא אושרה</Text>
+                    <Text style={styles.errorInfoCardTitle}>אופס... הפעם לא הצלחנו לאשר את החשבונית</Text>
+                    <Text style={styles.errorInfoCardSubtitle}>
+                      נראה שהפרטים בחשבונית לא התאימו לתנאי הצבירה.
+                    </Text>
                     {report.rejection_reason ? (
                       <>
-                        <Text style={styles.rejectionReasonLabel}>סיבת הדחייה</Text>
+                        <Text style={styles.rejectionReasonLabel}>פרטים נוספים</Text>
                         <Text style={styles.rejectionReasonText}>{report.rejection_reason}</Text>
                       </>
                     ) : null}
@@ -845,12 +848,20 @@ const styles = StyleSheet.create({
     borderRadius: radius.lg,
     padding: spacing.md,
     alignItems: 'flex-end',
+    gap: 4,
   },
   errorInfoCardTitle: {
     fontSize: typography.body.fontSize,
     fontWeight: '700',
     color: colors.error,
     textAlign: 'right',
+  },
+  errorInfoCardSubtitle: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '500',
+    color: colors.text,
+    textAlign: 'right',
+    lineHeight: 18,
   },
   rejectionReasonLabel: {
     fontSize: typography.caption.fontSize,

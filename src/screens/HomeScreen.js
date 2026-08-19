@@ -6,6 +6,7 @@ import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'rea
 
 import AppScreen from '../components/common/AppScreen';
 import PointsBalanceCard from '../components/common/PointsBalanceCard';
+import { getMembershipLevelInfo } from '../constants/membershipLevels';
 import { useAuth } from '../context/AuthContext';
 import { getProfile } from '../services/profileService';
 import { getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
@@ -193,10 +194,21 @@ export default function HomeScreen() {
   })();
 
   const membershipLevel = String(profile?.membership_level || 'BRONZE').toUpperCase();
-  const safeMembershipLevel = ['BRONZE', 'SILVER', 'GOLD'].includes(membershipLevel)
+  const safeMembershipLevel = ['BRONZE', 'SILVER', 'GOLD', 'TITANIUM'].includes(membershipLevel)
     ? membershipLevel
     : 'BRONZE';
   const pointsBalance = profile?.points_balance ?? 0;
+
+  // Real progress toward the next G Level, derived from the same
+  // database-authoritative approved_purchases_count used to compute
+  // membership_level itself (see supabase/migrations/017_g_level_progression.sql
+  // and src/constants/membershipLevels.js) - never a client-invented value,
+  // and never shown as progress toward a nonexistent level after Titanium.
+  const approvedPurchasesCount = profile?.approved_purchases_count ?? 0;
+  const levelInfo = getMembershipLevelInfo(approvedPurchasesCount);
+  const levelProgressLabel = levelInfo.nextLevel
+    ? `${levelInfo.progressInBracket} / ${levelInfo.bracketSize} ל-${levelInfo.nextLevel}`
+    : 'הגעתם לרמה הגבוהה ביותר';
 
   const formatNumber = (value) => {
     const numericValue = Number.isFinite(value) ? value : 0;
@@ -273,7 +285,8 @@ export default function HomeScreen() {
             <PointsBalanceCard
               pointsBalance={pointsBalance}
               membershipLevel={safeMembershipLevel}
-              progressPercent={0}
+              progressPercent={levelInfo.progressPercent ?? 100}
+              progressLabel={levelProgressLabel}
               meta="הטבות יופיעו בהמשך"
               loading={loading}
               error={error}

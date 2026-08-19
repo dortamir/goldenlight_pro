@@ -6,13 +6,13 @@ import { colors, radius, shadows, spacing, typography } from '../../theme';
 // Loyalty tier -> accent color. Only real, currently-reachable tiers
 // (membership_level is validated/defaulted by the caller - see HomeScreen's
 // safeMembershipLevel) map to a color; anything else simply hides the tier
-// row rather than guessing. tierPlatinum exists in the theme for
-// completeness but membership_level never actually produces it today.
+// row rather than guessing. TITANIUM is the current maximum G Level - see
+// src/constants/membershipLevels.js.
 const TIER_COLORS = {
   BRONZE: colors.tierBronze,
   SILVER: colors.tierSilver,
   GOLD: colors.tierGold,
-  PLATINUM: colors.tierPlatinum,
+  TITANIUM: colors.tierTitanium,
 };
 
 function formatPoints(value) {
@@ -33,15 +33,21 @@ function formatPoints(value) {
 //   meta              - optional secondary line under the number (each
 //                       screen supplies its own - "benefits coming soon"
 //                       on Home vs. "available to redeem" on Rewards).
-//   membershipLevel   - optional real profile.membership_level. When
-//                       omitted (or unrecognized), the tier row/progress
-//                       bar are not rendered at all - no default is
-//                       invented here.
+//   membershipLevel   - optional real profile.membership_level (G Level).
+//                       When omitted (or unrecognized), the tier row/
+//                       progress bar are not rendered at all - no default
+//                       is invented here.
 //   progressPercent   - optional 0-100 fill for the tier-progress bar.
-//                       No tier-progress formula exists yet anywhere in
-//                       this app; callers pass whatever they already had
-//                       (today, always 0). Clamped defensively, never
-//                       computed.
+//                       The caller computes this from the real
+//                       approved_purchases_count (see
+//                       src/constants/membershipLevels.js's
+//                       getMembershipLevelInfo) - clamped defensively here,
+//                       never computed in this component.
+//   progressLabel     - optional text under the tier badge describing real
+//                       progress toward the next G Level (e.g.
+//                       "3 / 12 ל-GOLD"), or a maxed-out message when
+//                       already at the top level. Falls back to a generic
+//                       label when not provided.
 //   loading / error   - real loading/error state from the caller's own
 //                       profile fetch.
 //   onRetry           - retry handler; the retry row is omitted entirely
@@ -53,6 +59,7 @@ export default function PointsBalanceCard({
   meta,
   membershipLevel,
   progressPercent = 0,
+  progressLabel = 'רמת החברות מעודכנת מהמערכת',
   loading = false,
   error = '',
   onRetry,
@@ -109,8 +116,8 @@ export default function PointsBalanceCard({
           {tierKey ? (
             <>
               <View style={styles.tierRow}>
-                <Text style={[styles.tierBadge, { color: tierColor }]}>{tierKey}</Text>
-                <Text style={styles.tierMeta}>רמת החברות מעודכנת מהמערכת</Text>
+                <Text style={[styles.tierBadge, { color: tierColor }]}>{`G Level · ${tierKey}`}</Text>
+                <Text style={styles.tierMeta}>{progressLabel}</Text>
               </View>
               <View style={styles.progressTrack}>
                 <View

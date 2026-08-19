@@ -7,8 +7,8 @@ import AdminShell from '../components/admin/AdminShell';
 import { getAdminDashboardSummary, getAdminReceiptSignedUrl, getAdminReviewQueue } from '../services/adminReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 
-const THUMB_WIDTH = 56;
-const THUMB_HEIGHT = 76;
+const THUMB_WIDTH = 52;
+const THUMB_HEIGHT = 68;
 
 function isPdfFile(name) {
   return /\.pdf$/i.test(String(name || ''));
@@ -34,7 +34,10 @@ function formatReportDate(value) {
 // both currently belong in the same admin attention queue (see
 // adminReportService.js). Colors reuse the same status-pill tokens as the
 // customer app's own getStatusMeta; only the needs_review/processing label
-// text differs, to read unambiguously in an admin context.
+// text differs, to read unambiguously in an admin context. 'processing'
+// keeps its own real chip here (an individual receipt can genuinely be in
+// that state) - only the dashboard SUMMARY/filter presentation drops it as
+// its own category, per the current admin-facing status groups.
 function getStatusMeta(status) {
   switch (status) {
     case 'processing':
@@ -67,7 +70,14 @@ export default function AdminHomeScreen() {
 
     getAdminDashboardSummary()
       .then(setSummary)
-      .catch(() => setSummaryError('לא הצלחנו לטעון את נתוני הסיכום'))
+      .catch((err) => {
+        // Dev-only: the real Supabase/Postgres error - never shown to the
+        // admin, who only ever sees the safe Hebrew message below.
+        if (__DEV__) {
+          console.error('[Admin dashboard] Failed to load summary', err);
+        }
+        setSummaryError('לא הצלחנו לטעון את נתוני הסיכום');
+      })
       .finally(() => setSummaryLoading(false));
   }, []);
 
@@ -94,7 +104,14 @@ export default function AdminHomeScreen() {
               });
           });
       })
-      .catch(() => setQueueError('לא הצלחנו לטעון את חשבוניות הבדיקה'))
+      .catch((err) => {
+        // Dev-only: the real Supabase/Postgres error - never shown to the
+        // admin, who only ever sees the safe Hebrew message below.
+        if (__DEV__) {
+          console.error('[Admin dashboard] Failed to load review queue', err);
+        }
+        setQueueError('לא הצלחנו לטעון את חשבוניות הבדיקה');
+      })
       .finally(() => setQueueLoading(false));
   }, []);
 
@@ -111,14 +128,29 @@ export default function AdminHomeScreen() {
     }, [loadSummary, loadQueue]),
   );
 
+  // Each card is clickable and deep-links straight into "כל החשבוניות" with
+  // the matching filter already selected (see AdminReportsHistoryScreen's
+  // STATUS_FILTERS, which use these exact same keys) - no duplicate
+  // receipt-list screen, no separate query per card. Icon is a subtle
+  // brand-turquoise accent on every card regardless of what the card
+  // represents - status-specific colors (green/red) stay confined to the
+  // individual status chips on receipt rows, never the summary cards
+  // themselves.
   const summaryCards = [
-    { key: 'needs_review', label: 'חשבוניות לבדיקה', value: summary?.needsReviewCount },
-    { key: 'processing', label: 'בטיפול', value: summary?.processingCount },
-    { key: 'approved', label: 'אושרו', value: summary?.approvedCount },
+    { key: 'pending', label: 'ממתינות לבדיקה', value: summary?.pendingCount, icon: 'time-outline' },
+    { key: 'approved', label: 'אושרו', value: summary?.approvedCount, icon: 'checkmark-circle-outline' },
+    { key: 'rejected', label: 'נדחו', value: summary?.rejectedCount, icon: 'close-circle-outline' },
   ];
+
+  const queueCountSuffix = !queueLoading && !queueError && queue.length > 0 ? ` (${queue.length})` : '';
 
   return (
     <AdminShell activeKey="dashboard">
+      <View style={styles.pageHeader}>
+        <Text style={styles.pageTitle}>ראשי</Text>
+        <Text style={styles.pageSubtitle}>סקירה כללית ובדיקת חשבוניות ממתינות</Text>
+      </View>
+
       <View style={styles.summaryRow}>
         {summaryLoading ? (
           <View style={styles.summaryLoadingCard}>
@@ -133,17 +165,29 @@ export default function AdminHomeScreen() {
           </View>
         ) : (
           summaryCards.map((card) => (
-            <View key={card.key} style={styles.summaryCard}>
+            <Pressable
+              key={card.key}
+              onPress={() => router.push(`/admin/reports?filter=${card.key}`)}
+              style={({ pressed, hovered }) => [
+                styles.summaryCard,
+                hovered && styles.summaryCardHovered,
+                pressed && styles.summaryCardPressed,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel={`מעבר לכל החשבוניות, מסונן לפי ${card.label}`}>
+              <View style={styles.summaryIconBadge}>
+                <Ionicons name={card.icon} size={15} color={colors.primary} />
+              </View>
               <Text style={styles.summaryValue}>{card.value ?? 0}</Text>
               <Text style={styles.summaryLabel}>{card.label}</Text>
-            </View>
+            </Pressable>
           ))
         )}
       </View>
 
       <View style={styles.section}>
         <View style={styles.sectionHeaderRow}>
-          <Text style={styles.sectionTitle}>חשבוניות שממתינות לטיפול</Text>
+          <Text style={styles.sectionTitle}>{`חשבוניות שממתינות לבדיקה${queueCountSuffix}`}</Text>
           <View style={styles.sectionAccentDot} />
         </View>
 
@@ -160,7 +204,7 @@ export default function AdminHomeScreen() {
           </View>
         ) : queue.length === 0 ? (
           <View style={styles.queueStateCard}>
-            <Text style={styles.emptyText}>אין חשבוניות שממתינות לטיפול</Text>
+            <Text style={styles.emptyText}>אין חשבוניות שממתינות לבדיקה</Text>
           </View>
         ) : (
           <View style={styles.queueList}>
@@ -172,7 +216,11 @@ export default function AdminHomeScreen() {
               return (
                 <Pressable
                   key={report.id}
-                  style={({ pressed }) => [styles.queueRow, pressed && styles.queueRowPressed]}
+                  style={({ pressed, hovered }) => [
+                    styles.queueRow,
+                    hovered && styles.queueRowHovered,
+                    pressed && styles.queueRowPressed,
+                  ]}
                   onPress={() => router.push(`/admin/reports/${report.id}`)}
                   accessibilityRole="button"
                   accessibilityLabel="פתיחת פרטי חשבונית">
@@ -220,6 +268,26 @@ export default function AdminHomeScreen() {
 }
 
 const styles = StyleSheet.create({
+  pageHeader: {
+    gap: 2,
+  },
+  pageTitle: {
+    fontSize: 22,
+    // '700' matches the same maximum heading weight used everywhere else in
+    // the app (see typography.heading) - '800' is reserved exclusively for
+    // the hero/display tokens' giant numerals (e.g. PointsBalanceCard's 52px
+    // points figure) and was never meant for a regular page title. No
+    // customer screen uses '800' outside those two tokens.
+    fontWeight: '700',
+    lineHeight: 28,
+    color: colors.text,
+    textAlign: 'right',
+  },
+  pageSubtitle: {
+    ...typography.caption,
+    color: colors.textMuted,
+    textAlign: 'right',
+  },
   summaryRow: {
     flexDirection: 'row-reverse',
     flexWrap: 'wrap',
@@ -227,15 +295,33 @@ const styles = StyleSheet.create({
   },
   summaryCard: {
     flexGrow: 1,
-    flexBasis: 180,
+    flexBasis: 172,
     backgroundColor: colors.white,
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.lg,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
     alignItems: 'flex-end',
+    gap: 2,
+    cursor: 'pointer',
     ...shadows.softCard,
+  },
+  summaryCardHovered: {
+    borderColor: colors.primary,
+    ...shadows.premiumCard,
+  },
+  summaryCardPressed: {
+    opacity: 0.9,
+  },
+  summaryIconBadge: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.xs,
   },
   summaryLoadingCard: {
     flexGrow: 1,
@@ -251,8 +337,10 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
   },
   summaryValue: {
-    fontSize: 32,
-    fontWeight: '800',
+    fontSize: 28,
+    // See pageTitle above - '700' is the app's real maximum heading weight;
+    // '800' is reserved for the hero/display tokens only.
+    fontWeight: '700',
     color: colors.text,
     textAlign: 'right',
   },
@@ -261,7 +349,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: colors.textMuted,
     textAlign: 'right',
-    marginTop: spacing.xs,
   },
   section: {
     gap: spacing.md,
@@ -272,9 +359,9 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
   },
   sectionTitle: {
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '700',
-    lineHeight: 24,
+    lineHeight: 22,
     color: colors.text,
     textAlign: 'right',
   },
@@ -319,13 +406,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row-reverse',
     alignItems: 'center',
     gap: spacing.md,
+    minHeight: 76,
     backgroundColor: colors.white,
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
+    cursor: 'pointer',
     ...shadows.softCard,
+  },
+  queueRowHovered: {
+    borderColor: colors.primary,
   },
   queueRowPressed: {
     opacity: 0.85,

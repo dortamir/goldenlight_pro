@@ -697,9 +697,24 @@ export default function AdminReportDetailScreen() {
   const savedPointsPreview = Math.floor(savedEligibleSummary.total * 0.2);
   const hasEligibleAmount = savedEligibleSummary.total > 0;
 
+  // router.back() unconditionally throws the React Navigation "GO_BACK was
+  // not handled" warning whenever this screen has no history to go back to
+  // - reached via a direct URL, a browser refresh, or any entry point that
+  // didn't itself push this route from within the app. canGoBack() is the
+  // correct Expo Router guard for this: only pop when there's real history,
+  // otherwise land on "כל החשבוניות" (/admin/reports, the existing
+  // reports-list route) rather than assuming history exists.
+  const handleBackPress = () => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/admin/reports');
+    }
+  };
+
   return (
-    <AdminShell activeKey="queue">
-      <Pressable onPress={() => router.back()} style={styles.backRow} accessibilityRole="button">
+    <AdminShell activeKey="dashboard">
+      <Pressable onPress={handleBackPress} style={styles.backRow} accessibilityRole="button">
         <Ionicons name="chevron-forward" size={18} color={colors.primary} />
         <Text style={styles.backText}>חזרה לרשימה</Text>
       </Pressable>

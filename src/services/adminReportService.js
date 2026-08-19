@@ -78,37 +78,42 @@ async function fetchPurchaseRewardTransaction(reportId) {
 }
 
 // Real counts only - no revenue/points/user-growth metrics, since nothing in
-// the current schema supports those meaningfully yet.
+// the current schema supports those meaningfully yet. `processing` is a
+// real, unchanged backend status (see purchase_reports.status and the
+// process-receipt Edge Function foundation), but it isn't part of the
+// current admin-facing presentation - the dashboard only surfaces the three
+// operational categories an admin actually acts on: pending (submitted +
+// needs_review), approved, and rejected.
 export async function getAdminDashboardSummary() {
   if (!supabase) {
     throw new Error('Admin data is not available.');
   }
 
-  const [needsAttention, processing, approved] = await Promise.all([
+  const [pending, approved, rejected] = await Promise.all([
     supabase
       .from('purchase_reports')
       .select('id', { count: 'exact', head: true })
       .in('status', REVIEW_QUEUE_STATUSES),
-    supabase.from('purchase_reports').select('id', { count: 'exact', head: true }).eq('status', 'processing'),
     supabase.from('purchase_reports').select('id', { count: 'exact', head: true }).eq('status', 'approved'),
+    supabase.from('purchase_reports').select('id', { count: 'exact', head: true }).eq('status', 'rejected'),
   ]);
 
-  if (needsAttention.error) {
-    throw needsAttention.error;
-  }
-  if (processing.error) {
-    throw processing.error;
+  if (pending.error) {
+    throw pending.error;
   }
   if (approved.error) {
     throw approved.error;
   }
+  if (rejected.error) {
+    throw rejected.error;
+  }
 
   return {
-    // "חשבוניות לבדיקה" - everything currently waiting for admin attention
+    // "ממתינות לבדיקה" - everything currently waiting for admin attention
     // (submitted + needs_review), see REVIEW_QUEUE_STATUSES above.
-    needsReviewCount: needsAttention.count ?? 0,
-    processingCount: processing.count ?? 0,
+    pendingCount: pending.count ?? 0,
     approvedCount: approved.count ?? 0,
+    rejectedCount: rejected.count ?? 0,
   };
 }
 
@@ -148,9 +153,12 @@ export async function getAdminReviewQueue() {
 // view - deliberately NOT filtered by REVIEW_QUEUE_STATUSES, unlike
 // getAdminReviewQueue() above. Newest first, so a just-submitted or
 // just-decided receipt appears at the top. Status filtering for the "הכל /
-// ממתינות / בטיפול / אושרו / נדחו" UI filters happens client-side in
+// ממתינות לבדיקה / אושרו / נדחו" UI filters happens client-side in
 // AdminReportsHistoryScreen against this same full list - there is no
-// separate query per filter.
+// separate query per filter. A 'processing' report is still included in
+// this full list (and reachable via "הכל") even though no current filter
+// pill isolates it on its own - that status simply isn't part of today's
+// admin-facing filter set.
 export async function getAdminReports() {
   if (!supabase) {
     return [];

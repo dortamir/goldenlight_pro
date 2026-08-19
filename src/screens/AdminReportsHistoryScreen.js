@@ -1,28 +1,32 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useMemo, useState } from 'react';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AdminShell from '../components/admin/AdminShell';
 import { getAdminReceiptSignedUrl, getAdminReports } from '../services/adminReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 
-const THUMB_WIDTH = 56;
-const THUMB_HEIGHT = 76;
+const THUMB_WIDTH = 52;
+const THUMB_HEIGHT = 68;
 
 // Client-side filters over the single full getAdminReports() list - no
 // separate query per filter. Mapped strictly to existing purchase_reports
 // statuses, never an invented one. 'pending' intentionally groups submitted
 // + needs_review, mirroring REVIEW_QUEUE_STATUSES in adminReportService.js,
 // since there is still no automated pipeline distinguishing them from an
-// admin's point of view.
+// admin's point of view. 'processing' is deliberately NOT one of these -
+// it isn't part of the current admin-facing workflow (a 'processing' report
+// still appears under "הכל", just isn't isolated by its own pill). These
+// same keys are what AdminHomeScreen's dashboard cards link to via
+// `/admin/reports?filter=<key>` - see the `filter` param handling below.
 const STATUS_FILTERS = [
   { key: 'all', label: 'הכל', statuses: null },
-  { key: 'pending', label: 'ממתינות', statuses: ['submitted', 'needs_review'] },
-  { key: 'processing', label: 'בטיפול', statuses: ['processing'] },
+  { key: 'pending', label: 'ממתינות לבדיקה', statuses: ['submitted', 'needs_review'] },
   { key: 'approved', label: 'אושרו', statuses: ['approved'] },
   { key: 'rejected', label: 'נדחו', statuses: ['rejected'] },
 ];
+const STATUS_FILTER_KEYS = STATUS_FILTERS.map((filter) => filter.key);
 
 function isPdfFile(name) {
   return /\.pdf$/i.test(String(name || ''));
@@ -60,13 +64,35 @@ function getStatusMeta(status) {
   }
 }
 
+// Normalizes useLocalSearchParams()'s `filter` value (a plain string for a
+// single `?filter=x`, but expo-router types it as string | string[] since a
+// repeated query key is technically possible) down to one of
+// STATUS_FILTER_KEYS, or 'all' for anything missing/unrecognized - per the
+// explicit "if no valid filter parameter is provided, default to הכל" rule.
+// Never trusts an arbitrary/invented status from the URL.
+function resolveFilterParam(rawFilter) {
+  const value = Array.isArray(rawFilter) ? rawFilter[0] : rawFilter;
+  return STATUS_FILTER_KEYS.includes(value) ? value : 'all';
+}
+
 export default function AdminReportsHistoryScreen() {
   const router = useRouter();
+  const { filter: filterParam } = useLocalSearchParams();
   const [reports, setReports] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [thumbnails, setThumbnails] = useState({});
-  const [activeFilter, setActiveFilter] = useState('all');
+  const [activeFilter, setActiveFilter] = useState(() => resolveFilterParam(filterParam));
+
+  // Reacts to navigating here again with a different `?filter=` (e.g. a
+  // second dashboard-card click while this screen is already mounted) -
+  // the lazy useState initializer above only covers the very first mount.
+  // Manual filter-pill clicks never touch the URL, so this never fights a
+  // manual selection: it only re-syncs when filterParam itself changes.
+  useEffect(() => {
+    const resolved = resolveFilterParam(filterParam);
+    setActiveFilter((current) => (resolved !== current ? resolved : current));
+  }, [filterParam]);
 
   const loadReports = useCallback(() => {
     setLoading(true);
@@ -97,7 +123,11 @@ export default function AdminReportsHistoryScreen() {
 
   // useFocusEffect (not a plain mount-only useEffect) - refetches whenever
   // this screen regains focus, e.g. returning from a decision made on the
-  // detail screen, matching AdminHomeScreen's own refresh behavior.
+  // detail screen, matching AdminHomeScreen's own refresh behavior. This
+  // never resets activeFilter - only loadReports() runs here - so returning
+  // from a receipt's detail screen via real back-navigation lands back on
+  // this same still-mounted instance with whichever filter was active
+  // before, refreshed with current data.
   useFocusEffect(
     useCallback(() => {
       loadReports();
@@ -117,23 +147,27 @@ export default function AdminReportsHistoryScreen() {
   return (
     <AdminShell activeKey="history">
       <View style={styles.section}>
-        <View style={styles.sectionHeaderRow}>
-          <Text style={styles.sectionTitle}>כל החשבוניות</Text>
-          <View style={styles.sectionAccentDot} />
-        </View>
+        <Text style={styles.pageTitle}>כל החשבוניות</Text>
 
         <View style={styles.filterRow}>
-          {STATUS_FILTERS.map((filter) => (
-            <Pressable
-              key={filter.key}
-              onPress={() => setActiveFilter(filter.key)}
-              style={[styles.filterChip, activeFilter === filter.key && styles.filterChipActive]}
-              accessibilityRole="button">
-              <Text style={[styles.filterChipText, activeFilter === filter.key && styles.filterChipTextActive]}>
-                {filter.label}
-              </Text>
-            </Pressable>
-          ))}
+          {STATUS_FILTERS.map((filter) => {
+            const isActive = activeFilter === filter.key;
+            return (
+              <Pressable
+                key={filter.key}
+                onPress={() => setActiveFilter(filter.key)}
+                style={({ pressed, hovered }) => [
+                  styles.filterChip,
+                  isActive && styles.filterChipActive,
+                  !isActive && hovered && styles.filterChipHovered,
+                  pressed && styles.filterChipPressed,
+                ]}
+                accessibilityRole="button"
+                accessibilityState={{ selected: isActive }}>
+                <Text style={[styles.filterChipText, isActive && styles.filterChipTextActive]}>{filter.label}</Text>
+              </Pressable>
+            );
+          })}
         </View>
 
         {loading ? (
@@ -161,7 +195,11 @@ export default function AdminReportsHistoryScreen() {
               return (
                 <Pressable
                   key={report.id}
-                  style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
+                  style={({ pressed, hovered }) => [
+                    styles.row,
+                    hovered && styles.rowHovered,
+                    pressed && styles.rowPressed,
+                  ]}
                   onPress={() => router.push(`/admin/reports/${report.id}`)}
                   accessibilityRole="button"
                   accessibilityLabel="פתיחת פרטי חשבונית">
@@ -215,23 +253,17 @@ const styles = StyleSheet.create({
   section: {
     gap: spacing.md,
   },
-  sectionHeaderRow: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    gap: spacing.xs,
-  },
-  sectionTitle: {
-    fontSize: 18,
+  pageTitle: {
+    fontSize: 22,
+    // '700' matches the same maximum heading weight used everywhere else in
+    // the app (see typography.heading) - '800' is reserved exclusively for
+    // the hero/display tokens' giant numerals and was never meant for a
+    // regular page title. No customer screen uses '800' outside those two
+    // tokens.
     fontWeight: '700',
-    lineHeight: 24,
+    lineHeight: 28,
     color: colors.text,
     textAlign: 'right',
-  },
-  sectionAccentDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: colors.primary,
   },
   filterRow: {
     flexDirection: 'row-reverse',
@@ -240,15 +272,22 @@ const styles = StyleSheet.create({
   },
   filterChip: {
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingVertical: 9,
     borderRadius: radius.pill,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.white,
+    cursor: 'pointer',
+  },
+  filterChipHovered: {
+    borderColor: colors.primary,
   },
   filterChipActive: {
     backgroundColor: colors.primary,
     borderColor: colors.primary,
+  },
+  filterChipPressed: {
+    opacity: 0.85,
   },
   filterChipText: {
     ...typography.caption,
@@ -294,13 +333,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row-reverse',
     alignItems: 'center',
     gap: spacing.md,
+    minHeight: 76,
     backgroundColor: colors.white,
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
+    cursor: 'pointer',
     ...shadows.softCard,
+  },
+  rowHovered: {
+    borderColor: colors.primary,
   },
   rowPressed: {
     opacity: 0.85,

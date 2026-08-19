@@ -11,15 +11,16 @@ import { colors, radius, shadows, spacing, typography } from '../theme';
 
 const AVATAR_SIZE = 88;
 
-// Same real, currently-reachable tiers as PointsBalanceCard's own
+// Same real, currently-reachable G Levels as PointsBalanceCard's own
 // TIER_COLORS map (see src/components/common/PointsBalanceCard.js) -
 // duplicated here rather than imported since that map isn't exported, and
-// this is just a plain color lookup, not shared logic.
+// this is just a plain color lookup, not shared logic. TITANIUM is the
+// current maximum level - see src/constants/membershipLevels.js.
 const TIER_COLORS = {
   BRONZE: colors.tierBronze,
   SILVER: colors.tierSilver,
   GOLD: colors.tierGold,
-  PLATINUM: colors.tierPlatinum,
+  TITANIUM: colors.tierTitanium,
 };
 
 const accountActions = [
@@ -202,7 +203,7 @@ export default function ProfileScreen() {
   // safeMembershipLevel - a real profile.membership_level, defaulted to
   // BRONZE only when missing/unrecognized, never invented beyond that.
   const membershipLevel = String(profile?.membership_level || 'BRONZE').toUpperCase();
-  const tierKey = ['BRONZE', 'SILVER', 'GOLD', 'PLATINUM'].includes(membershipLevel)
+  const tierKey = ['BRONZE', 'SILVER', 'GOLD', 'TITANIUM'].includes(membershipLevel)
     ? membershipLevel
     : 'BRONZE';
   const tierColor = TIER_COLORS[tierKey];
@@ -315,7 +316,7 @@ export default function ProfileScreen() {
                     <Text style={[styles.summaryValue, { color: tierColor }]} numberOfLines={1}>
                       {tierKey}
                     </Text>
-                    <Text style={styles.summaryLabel}>דרגה</Text>
+                    <Text style={styles.summaryLabel}>G Level</Text>
                   </View>
                   <View style={styles.summaryDivider} />
                   <View style={styles.summaryItem}>

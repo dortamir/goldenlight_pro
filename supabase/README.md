@@ -651,10 +651,46 @@ For a `submitted`/`needs_review` report, "אישור וסיום טיפול" stay
 
 No change needed: `PurchaseReportDetailsScreen`'s `ManualItemRow` already renders `quantity`/`unit_price`/`line_total`/`sku` independently, each only when non-null. Since the admin form now always saves `sku`/`line_total` as `null`, the customer simply stops seeing those two fields for any newly-finalized row, with no code change to the customer screen.
 
+## G Level (automatic membership progression)
+
+`017_g_level_progression.sql` makes `public.profiles.approved_purchases_count`/`.membership_level` (both existing since `001_create_profiles.sql`, but never updated by anything until now) automatically correct, and renames the fourth/top tier from the unreachable `PLATINUM` placeholder to the official `TITANIUM`.
+
+### Source of truth: a recount, never an increment
+
+`public.recalculate_membership_level(p_user_id)` is the only thing that ever writes these two columns. It does not increment a counter - every call recomputes `approved_purchases_count` from scratch via `select count(*) from purchase_reports where user_id = p_user_id and status = 'approved'`, then derives `membership_level` from that fresh count. This makes it idempotent and self-healing: calling it any number of times for the same user always converges on the same correct values, so there is no stored "already counted" flag that could drift, double-count the same report, or go stale after a report is edited post-approval.
+
+### Thresholds
+
+```
+Bronze:   0-11 approved reports
+Silver:   12-23
+Gold:     24-35
+Titanium: 36+   (current maximum - no level above this)
+```
+
+Only `status = 'approved'` counts - `submitted`/`processing`/`needs_review`/`rejected` never contribute, matching `REVIEW_QUEUE_STATUSES`/the review workflow exactly.
+
+### Where it's called
+
+`recalculate_membership_level()` is an internal-only helper - `revoke execute ... from anon/authenticated/public`, no direct grant at all. It is only reachable as a nested call from inside another `security definer` function already gated by `public.is_admin()`:
+
+- `public.finalize_purchase_report()` (015/016) - the normal one-click review action. The call happens immediately after the `update ... set status = 'approved'`, inside the same transaction as the manual-items save and the points award, so a failure anywhere in that call (invalid item, no eligible amount, ...) rolls back the level recalculation along with everything else - there is no path where a report ends up approved but the level wasn't recalculated, or vice versa.
+- `public.review_purchase_report()` (010) - its `'approved'` decision path isn't used by the current admin UI (`finalize_purchase_report()` is), but still exists at the database level, so it gets the same call for consistency. Its `'rejected'` path is completely unchanged.
+
+Neither the admin nor the customer ever selects a level directly - both `finalize_purchase_report()` and `review_purchase_report()` already require nothing but a report id (and, for finalize, the item list); the client never sends `approved_purchases_count` or `membership_level`.
+
+### Backfill
+
+The migration ends with `select public.recalculate_membership_level(id) from public.profiles;`, synchronizing every existing profile's level against real historical approved reports immediately - no manual per-user fix-up needed after running this migration.
+
+### Security
+
+No grant changes were needed or made. `public.profiles`' update grant (`001_create_profiles.sql`) has always been `grant update (full_name, phone, profession) on table public.profiles to authenticated` - already excluding `approved_purchases_count`/`membership_level`/`points_balance` entirely. A direct `.from('profiles').update({ membership_level: ... })` call from any client is rejected by Postgres before it could reach a row, regardless of who's calling. A new `check (membership_level in ('BRONZE', 'SILVER', 'GOLD', 'TITANIUM'))` constraint (added after the backfill, so it can never fail against stale data) is the first validation ever placed on this column's actual value set.
+
 ## Notes
 
 - Email is still managed by Supabase Auth and is not duplicated in profiles.
-- The schema now includes an OCR data foundation (receipt_ocr_results, receipt_ocr_lines), a product matching foundation (receipt_line_matches), and a points-awarding foundation (points_transactions, receipt_manual_items.is_golden_light, finalize_purchase_report) in addition to the catalog foundation, but still does not include membership-tier rules, reward redemption, point reversal/adjustment, or real automatic product-match-derived eligibility (is_golden_light remains a manual, temporary admin confirmation - see "Automatic points eligibility from receipt line items" above).
+- The schema now includes an OCR data foundation (receipt_ocr_results, receipt_ocr_lines), a product matching foundation (receipt_line_matches), a points-awarding foundation (points_transactions, receipt_manual_items.is_golden_light, finalize_purchase_report), and automatic G Level progression (recalculate_membership_level) in addition to the catalog foundation, but still does not include reward redemption, point reversal/adjustment, or real automatic product-match-derived eligibility (is_golden_light remains a manual, temporary admin confirmation - see "Automatic points eligibility from receipt line items" above).
 - The normal admin review flow is now a single unified action ("אישור וסיום טיפול" - see "Unified one-click review workflow" above); the older separate save/approve/award-points steps described earlier in this document no longer reflect the app's actual UI, though every RPC they relied on still exists in the database exactly as documented (nothing was dropped).
 - The admin manual-entry form no longer collects `sku`/`line_total` (see "Simplified admin manual-entry fields" above); both columns remain in `receipt_manual_items` for any historical row and for possible future OCR use, but eligibility is now calculated purely from `quantity * unit_price`.
 - The process-receipt Edge Function (supabase/functions/process-receipt) exists as source-controlled code only. It has not been deployed and is not yet called from the app.
