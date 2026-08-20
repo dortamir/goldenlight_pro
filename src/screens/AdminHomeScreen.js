@@ -6,6 +6,7 @@ import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'rea
 import AdminShell from '../components/admin/AdminShell';
 import { getAdminDashboardSummary, getAdminReceiptSignedUrl, getAdminReviewQueue } from '../services/adminReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
 
 const THUMB_WIDTH = 52;
 const THUMB_HEIGHT = 68;
@@ -142,7 +143,8 @@ export default function AdminHomeScreen() {
     { key: 'rejected', label: 'נדחו', value: summary?.rejectedCount, icon: 'close-circle-outline' },
   ];
 
-  const queueCountSuffix = !queueLoading && !queueError && queue.length > 0 ? ` (${queue.length})` : '';
+  const queueCountSuffix =
+    !queueLoading && !queueError && queue.length > 0 ? ` ${isolateLTR(`(${queue.length})`)}` : '';
 
   return (
     <AdminShell activeKey="dashboard">
@@ -227,7 +229,7 @@ export default function AdminHomeScreen() {
                   <View style={styles.thumbWrap}>
                     {isPdf ? (
                       <View style={styles.thumbPlaceholder}>
-                        <Text style={styles.thumbPlaceholderText}>PDF</Text>
+                        <Text style={styles.thumbPlaceholderText}>{isolateLTR('PDF')}</Text>
                       </View>
                     ) : thumb?.status === 'ready' && thumb.url ? (
                       <Image source={{ uri: thumb.url }} style={styles.thumbImage} resizeMode="contain" />
@@ -247,9 +249,9 @@ export default function AdminHomeScreen() {
                       {report.customerName || 'משתמש ללא שם'}
                     </Text>
                     <Text style={styles.queueFilename} numberOfLines={1}>
-                      {report.original_filename || 'חשבונית'}
+                      {report.original_filename ? isolateLTR(report.original_filename) : 'חשבונית'}
                     </Text>
-                    <Text style={styles.queueDate}>{formatReportDate(report.created_at)}</Text>
+                    <Text style={styles.queueDate}>{isolateLTR(formatReportDate(report.created_at))}</Text>
                   </View>
 
                   <View style={[styles.statusBadge, { backgroundColor: statusMeta.backgroundColor }]}>

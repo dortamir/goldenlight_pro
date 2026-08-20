@@ -687,12 +687,126 @@ The migration ends with `select public.recalculate_membership_level(id) from pub
 
 No grant changes were needed or made. `public.profiles`' update grant (`001_create_profiles.sql`) has always been `grant update (full_name, phone, profession) on table public.profiles to authenticated` - already excluding `approved_purchases_count`/`membership_level`/`points_balance` entirely. A direct `.from('profiles').update({ membership_level: ... })` call from any client is rejected by Postgres before it could reach a row, regardless of who's calling. A new `check (membership_level in ('BRONZE', 'SILVER', 'GOLD', 'TITANIUM'))` constraint (added after the backfill, so it can never fail against stale data) is the first validation ever placed on this column's actual value set.
 
+## Product catalog foundation (Stage 1)
+
+`018_product_catalog_foundation.sql` extends the existing (previously empty) `public.products`/`public.product_aliases` tables from `004_create_product_catalog.sql` with the columns needed to import the real Golden Light catalog. `supabase/scripts/import-product-catalog.mjs` is the separate, repeatable tool that actually loads product rows - schema and data are deliberately kept apart (see "Migration vs. import" below).
+
+### Why the existing columns keep their names
+
+`sku` already is the official item-code business identifier (`not null unique`) and `name` already is the required product description - both are read directly by the deterministic matching pipeline (`productMatcher.ts`'s `CatalogProduct` type, `productMatchPersistence.ts`'s select list). Renaming either to literally match this stage's `item_code`/`description` wording would ripple a purely cosmetic change through matching code with zero functional benefit, so neither is renamed. Two genuinely new columns were added instead:
+
+- `barcode text` - nullable (real source rows have none - GSWITCH 40071/40072/40073), indexed but **not** uniquely constrained (a real duplicate barcode, `753287487971`, is shared by two distinct GSWITCH products - `412525` and `412575` - and must not block import).
+- `product_family text not null` - free text, not an enum. Today's real values are `GBOX`/`GSWITCH`/`GTECH`, but nothing in the schema limits it to only those three - a future family is just another value, no migration needed.
+
+No `normalized_item_code`/`normalized_description` columns were added: the matcher already normalizes `sku`/`name` in memory at match time via `normalizeCatalogText()` (mirroring `public.normalize_catalog_text()` exactly) and never reads a stored normalized column - adding one now would be unused, unmaintained dead weight.
+
+`product_aliases` gained two new nullable columns, `alias_sku` and `source_name`, for future alias types (e.g. a wholesaler-specific SKU, or which source contributed an alias) - purely additive, nothing reads them yet, and no alias rows are inserted by this stage. `alias`/`normalized_alias` are unchanged (`alias` stays `not null` - see the migration's own comment for why making it nullable safely requires also revisiting the `normalized_alias` unique constraint, deferred to a real matching-behavior stage).
+
+### Access model - unchanged
+
+No grant or policy was added, dropped, or modified. `authenticated` still has SELECT only (active products / aliases of an active product, from `004_create_product_catalog.sql`); there is still no INSERT/UPDATE/DELETE grant for `authenticated` on either table. Catalog writes are reachable only through a trusted service-role connection - see the import script below - never through the app's own Supabase client, and the service-role key is never bundled into the app.
+
+### `receipt_line_matches` compatibility
+
+`receipt_line_matches.product_id references public.products(id)` is untouched - this migration only adds columns to `products`, `id` and every other pre-existing column are unmodified, so the existing foreign key and every existing row/policy referencing it keep working exactly as before.
+
+### Import tool: `supabase/scripts/import-product-catalog.mjs`
+
+A standalone Node script (its own `package.json`, its own `node_modules`, gitignored) - never part of the Expo app's dependency tree or bundle. Usage:
+
+```sh
+cd supabase/scripts
+npm install
+SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... node import-product-catalog.mjs GBOX=path/to/GBOX.xlsx GSWITCH=path/to/GSWITCH.xlsx GTECH=path/to/GTECH.xlsx
+```
+
+Each `FAMILY=path` argument is explicit - the family is never guessed from a filename, so a differently-named file for an existing (or brand new) family works without any code change. Columns are read by **position** (item_code, description, barcode), not by header text - GTECH's real third column is barcode-shaped (13-digit numbers matching GBOX/GSWITCH's real barcodes) even though its header literally says "מחיר יציאה" ("exit price"); this script deliberately imports it as `barcode`, documented here rather than assumed silently. No pricing data or architecture is read, stored, or introduced anywhere by this script or this stage - points continue to come only from the real receipt amount an admin confirms, per the existing points-awarding flow.
+
+Every row is upserted on `sku` (`onConflict: 'sku'`): an existing item_code has its description/barcode/product_family/is_active refreshed to the new file's values; a new item_code is inserted. `is_active` is always set `true` by this script - marking a discontinued product inactive is a deliberate admin decision the importer never makes on its own (no admin catalog-management UI exists yet - explicitly a later stage).
+
+**Nothing is ever silently dropped.** A row missing `item_code` or `description` is excluded from the import but always printed in the report; a duplicate `item_code` within the same import batch keeps only its last occurrence (a real `sku unique` constraint requires exactly one row) but every occurrence is still reported as a conflict; a duplicate `barcode` never blocks anything (barcode isn't uniquely constrained) but is still reported. Missing SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY (or an explicit `--dry-run` flag) runs the exact same parsing/validation/report with no database connection at all - the safe way to preview a new or updated source file before actually importing it.
+
+### Real source-data findings (verified by actually running the script)
+
+211 total rows (GBOX 28 + GSWITCH 138 + GTECH 45), 0 malformed rows, 0 cross-family or within-family duplicate item_codes. 3 missing barcodes (GSWITCH `40071`/`40072`/`40073`). 1 duplicate barcode (`753287487971`, GSWITCH `412525` and `412575` - kept as-is on both rows, reported, not guessed at or resolved).
+
+### Migration vs. import
+
+Schema (columns, indexes, constraints, grants) lives in a migration, exactly like every other change in this file. The 211 actual product rows do **not** live in a migration - they are imported via the repeatable script above, run manually with real credentials whenever the source files are added or updated. This keeps a future catalog update (a new Excel file, corrected data, a brand new family) a matter of re-running the script, never a new migration.
+
+## Product matching foundation (Stage 2: manual receipt items)
+
+`019_product_matching_manual_items.sql` links `receipt_manual_items` rows to real `public.products` rows, so the admin review flow can rely on an authoritative product match instead of only the manual `is_golden_light` flag added in `014_automatic_points_eligibility.sql`.
+
+### One matcher, two runtimes, not two matchers
+
+The actual matching cascade already existed for OCR lines in `supabase/functions/process-receipt/productMatcher.ts` (barcode/SKU exact -> normalized SKU -> alias exact -> name exact), but that file is a Deno Edge Function module (`https://esm.sh/...` imports) that cannot be imported into the Expo/Metro bundle. `src/services/productMatching.js` is a plain-JS port of the **exact same priority order and normalization rules**, extended with the two strategies `productMatcher.ts` explicitly reserved but never implemented: barcode-exact (its `CatalogProduct` type predates the `barcode` column added in Stage 1) and a real description-similarity/fuzzy strategy (its documented-but-unimplemented `SimilarityMatchStrategy`). Both files must stay in normalization-sync with `public.normalize_catalog_text()`, exactly like before. If a genuine shared-package extraction is ever justified it should replace both copies at once - not attempted here, to avoid touching the still-undeployed OCR pipeline.
+
+### Why matching runs client-side, not via a new RPC
+
+`public.products`/`public.product_aliases` already grant plain SELECT to `authenticated` for active rows (`004_create_product_catalog.sql`). `loadCatalogForMatching()` (`adminReportService.js`) reads the ~211-row active catalog **once per review session** using the admin's own session - no service-role key, no new grant, no new RPC. Every row's auto-suggestion and manual search then run in memory (`matchManualItem`/`getProductSuggestions` in `productMatching.js` - see "Product matching UX" below) - zero N+1 queries regardless of how many lines a receipt has. The only genuinely privileged operation is **writing** a match or a learned alias, and that still goes through the one existing, already `is_admin()`-gated write path: `public.save_manual_receipt_items()`.
+
+### Matching strategies and confidence (starting heuristics, not fixed business rules)
+
+1. `barcode_exact` (1.00) - the admin's optional "קוד/ברקוד" input for a row equals a product's barcode.
+2. `sku_exact` (0.99) - same input equals a product's `sku`.
+3. `sku_normalized` (0.97) - `normalizeCatalogText()`-equal (catches `411-001`/`411 001`/`411/001` variants; deliberately does **not** match a superstring like `GL411001` - that's what aliases are for).
+4. `alias_exact` (0.98) - the line's description normalizes (via `normalizeCatalogText()`, the same normalization the database trigger uses for `product_aliases.normalized_alias`) to a known alias.
+5. `description_exact` (0.95) - a gentler `normalizeDescriptionText()` (collapses whitespace/punctuation but preserves Hebrew/English words and numeric tokens - unlike `normalizeCatalogText`, it does not strip all whitespace) applied to both sides.
+6. `description_fuzzy` - a character-bigram Sorensen-Dice similarity score (deterministic, explainable, no AI/ML dependency), always returned as `needs_review` candidates and **never auto-applied**, capped below every exact tier's confidence (`FUZZY_MAX_CONFIDENCE`).
+
+At every exact tier, more than one distinct product qualifying resolves to `needs_review` with every tied candidate listed - the matcher never guesses. All thresholds/confidence values live as named constants at the top of `productMatching.js` for easy future tuning.
+
+### Three match states, not two
+
+`receipt_manual_items` gained `product_id`, `match_type`, `match_confidence`, and `match_status` (`'unresolved' | 'matched' | 'not_golden_light'`, default `'unresolved'`), with the same "`matched` requires `product_id` / non-`matched` forbids `product_id`" CHECK-constraint pair already proven on `receipt_line_matches`. `'unresolved'` (nothing decided yet) is never conflated with `'not_golden_light'` (an explicit admin decision) - the admin's product-match modal (`AdminReportDetailScreen.js`) has a dedicated "לא מוצר Golden Light" action, separate from simply leaving a row untouched.
+
+### `is_golden_light` is now a pure mirror, not a second source of truth
+
+`save_manual_receipt_items()` no longer reads `is_golden_light` from the client payload at all - it is always computed server-side as `(match_status = 'matched')`. `public.award_purchase_points()` was updated to filter on `match_status = 'matched'` instead of `is_golden_light = true` - since the two can never disagree, this changes no observable behavior for normal saves, it only removes the redundant second source of truth. The `floor(eligible_total * 0.2)` formula itself is unchanged.
+
+### Alias learning: explicit confirmation only
+
+When a row is saved with `match_type = 'manual'` (the admin picked among several candidates or via free-text search - never an automatically-resolved unambiguous exact-tier match, and never a fuzzy suggestion picked without deliberate action) and the description isn't already the product's own canonical name/SKU, `save_manual_receipt_items()` inserts a new `product_aliases` row (`on conflict (normalized_alias) do nothing`, relying on the existing global unique constraint to stay idempotent across re-saves and to never steal an alias another product already owns). A confirmed high-confidence auto-suggestion (e.g. `sku_exact`) keeps its own real `match_type` and does **not** create an alias - it would be redundant, since the SKU already finds the product on its own.
+
+### Admin UI: one status cell, one shared modal
+
+The wide-table/narrow-stacked "מוצר Golden Light" checkbox column was replaced with a compact, tappable status cell (unresolved / matched + product sku-name / not Golden Light) that opens one shared "בחירת מוצר Golden Light" modal per row. The modal shows: an optional code/barcode input, the live auto-suggestion (or ambiguous/fuzzy candidates) computed from the once-loaded catalog, a free-text catalog search (never dumps all ~211 products into one list), and an explicit "לא מוצר Golden Light" action. Selecting a product only updates the in-progress row draft - it is persisted the same way every other row edit already was, through `buildManualItemsPayload()` and the existing finalize/save RPC call.
+
+### What stayed untouched
+
+`finalize_purchase_report()` (015) calls `save_manual_receipt_items()`/`award_purchase_points()` by name/signature and needed no change. `review_purchase_report()` (010, rejection), G Level (017), `receipt_line_matches`/`receipt_ocr_*` (005/007), and `productMatcher.ts`/`productMatchPersistence.ts` (the still-undeployed OCR pipeline) are all unmodified. No OCR provider integration, wholesaler/source detection, AI/LLM matching, or points-formula/G-Level/rewards change was made.
+
+## Product matching UX: catalog lookup lives entirely inside the "מוצר Golden Light" control (Stage 3)
+
+020_manual_item_alias_source_text.sql (function-only, no schema change) plus a client-side rework of AdminReportDetailScreen.js/productMatching.js: the admin manual-item row keeps its original FOUR visible columns - תיאור מוצר / כמות / מחיר ליחידה / מוצר Golden Light - with no separate SKU or barcode field anywhere in the row. Every catalog lookup, by SKU, barcode, or description/name, happens inside the product-match modal opened from the "מוצר Golden Light" cell, through ONE search box.
+
+### One search box, one ranking function
+
+`getProductSuggestions(query, catalog, limit)` (productMatching.js) is the single ranked-suggestion function behind the modal's one search input. Priority order: exact barcode -> exact SKU -> normalized SKU -> known alias -> exact normalized name -> partial SKU/barcode prefix -> partial SKU/barcode/name substring -> fuzzy name similarity (last-resort fallback, mirroring matchManualItem()'s own strategy order). It only ever returns a ranked list - nothing is auto-selected by this function itself at any tier, including an exact barcode match; ambiguity (e.g. the real duplicate barcode `753287487971`) surfaces multiple ranked candidates instead of guessing. Opening the modal (`openMatchModal()`) seeds the search box with the row's current description, so a row that already has text shows relevant suggestions immediately without retyping - the admin can freely replace that seeded text with a SKU or barcode instead, since the same box searches all three.
+
+### Selection is authoritative and always synchronizes description + SKU
+
+`applyProductToRow()` is the ONE place a selected search result is ever applied. It always overwrites both `description` and `sku` to the selected product's own canonical values (never a "description = product A, sku = product B" mismatch) and sets `product_id`/`match_status: 'matched'`/`match_type: 'manual'` (every selection from the modal's search results is an explicit admin pick).
+
+### Stale matches are cleared, not silently kept
+
+`updateManualRow()` checks, on every description keystroke, whether an already-'matched' row's description still equals its `matched_product_name` - if the admin edits it away from the matched product, the match is cleared back to 'unresolved' (product_id/match_type/match_confidence/matched_product_* all reset) in the same update, so a row can never keep a stale `product_id` that no longer corresponds to its visible description. `sku` is never independently edited by the admin anymore (there is no SKU input in the row), so it can never drift on its own - it is only ever set by applyProductToRow(), always in lockstep with description/product_id.
+
+### Alias learning still works even though description is now overwritten
+
+Because `applyProductToRow()` always overwrites `description` to the canonical name, the admin's original receipt wording (e.g. "מפסק 1M לבן" for official product "מפסק יחיד 1 מודול לבן", typed into the modal's search box before selecting) would otherwise be lost before `save_manual_receipt_items()`'s alias-learning check ever sees it. `applyProductToRow()` captures the row's PRE-selection description into `alias_candidate_text` whenever it genuinely differs from the product's own name/sku, `buildManualItemsPayload()` sends it as `alias_source_text`, and 020_manual_item_alias_source_text.sql's `save_manual_receipt_items()` uses it - instead of the now-canonical `description` - to learn the alias, falling back to `description` when absent (fully backward compatible). No schema change; only that one function body was replaced.
+
+### What stayed untouched (this stage)
+
+The product catalog schema, the `floor(eligible_total * 0.2)` points formula, G Level, `finalize_purchase_report()`/`review_purchase_report()`, the OCR pipeline, the customer-facing UI, and every RLS policy/grant are all unmodified. The matching confidence VALUES (barcode 1.00 / sku 0.99 / normalized sku 0.97 / alias 0.98 / description-exact 0.95 / fuzzy capped below all of those) are unchanged - only the UI-layer suggestion/ranking logic (a display concern) was added.
+
 ## Notes
 
 - Email is still managed by Supabase Auth and is not duplicated in profiles.
-- The schema now includes an OCR data foundation (receipt_ocr_results, receipt_ocr_lines), a product matching foundation (receipt_line_matches), a points-awarding foundation (points_transactions, receipt_manual_items.is_golden_light, finalize_purchase_report), and automatic G Level progression (recalculate_membership_level) in addition to the catalog foundation, but still does not include reward redemption, point reversal/adjustment, or real automatic product-match-derived eligibility (is_golden_light remains a manual, temporary admin confirmation - see "Automatic points eligibility from receipt line items" above).
+- The schema now includes an OCR data foundation (receipt_ocr_results, receipt_ocr_lines), a product matching foundation (receipt_line_matches), a real product catalog foundation (products.barcode/product_family, product_aliases.alias_sku/source_name, supabase/scripts/import-product-catalog.mjs), deterministic manual-item product matching with a unified inline suggestion UX (receipt_manual_items.product_id/match_type/match_confidence/match_status, src/services/productMatching.js's getProductSuggestions()/matchManualItem() - see "Product matching foundation (Stage 2)" and "Product matching UX (Stage 3)" above), a points-awarding foundation (points_transactions, finalize_purchase_report - eligibility reads match_status, not is_golden_light directly, though the two can never disagree), and automatic G Level progression (recalculate_membership_level), but still does not include reward redemption, point reversal/adjustment, OCR provider integration, or wholesaler/source detection.
 - The normal admin review flow is now a single unified action ("אישור וסיום טיפול" - see "Unified one-click review workflow" above); the older separate save/approve/award-points steps described earlier in this document no longer reflect the app's actual UI, though every RPC they relied on still exists in the database exactly as documented (nothing was dropped).
 - The admin manual-entry form no longer collects `sku`/`line_total` (see "Simplified admin manual-entry fields" above); both columns remain in `receipt_manual_items` for any historical row and for possible future OCR use, but eligibility is now calculated purely from `quantity * unit_price`.
 - The process-receipt Edge Function (supabase/functions/process-receipt) exists as source-controlled code only. It has not been deployed and is not yet called from the app.
-- Migration 007_create_product_matching.sql has been run; `public.receipt_line_matches` exists. No real Golden Light product/alias data has been imported, so live matching currently resolves every line to `unmatched`.
+- Migration 007_create_product_matching.sql has been run; `public.receipt_line_matches` exists. The real Golden Light catalog has not been imported into the live database yet (see "Product catalog foundation (Stage 1)" above - the migration and import script exist, but neither has been run against the live project), so live matching still currently resolves every line to `unmatched`.
 - Deterministic product matching (`productMatcher.ts`/`productMatchPersistence.ts`) is now called from `process-receipt/index.ts` after OCR persistence. This does not change today's observed behavior, since the function's success path is still unreachable without a configured OCR provider - see "Product matching foundation" above for the full integration and failure-isolation details.

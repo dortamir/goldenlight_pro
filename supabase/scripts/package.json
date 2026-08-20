@@ -1,0 +1,13 @@
+{
+  "name": "goldenlight-catalog-import",
+  "private": true,
+  "type": "module",
+  "description": "Standalone, service-role-only tool for importing/updating the Golden Light product catalog (public.products / public.product_aliases). Deliberately NOT part of the Expo app's own package.json - this never runs on a customer device and must never ship in the app bundle.",
+  "scripts": {
+    "import-catalog": "node import-product-catalog.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "xlsx": "^0.18.5"
+  }
+}

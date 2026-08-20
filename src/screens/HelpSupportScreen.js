@@ -6,6 +6,7 @@ import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import AppBackButton from '../components/common/AppBackButton';
 import AppScreen from '../components/common/AppScreen';
 import { colors, radius, shadows, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
 
 const PHONE_NUMBER = '08-8695112';
 const FAX_NUMBER = '08-8695110';
@@ -129,7 +130,7 @@ export default function HelpSupportScreen() {
                 </View>
                 <View style={styles.contactTextWrap}>
                   <Text style={styles.contactLabel}>טלפון</Text>
-                  <Text style={styles.contactValue}>{PHONE_NUMBER}</Text>
+                  <Text style={styles.contactValue}>{isolateLTR(PHONE_NUMBER)}</Text>
                 </View>
                 <Ionicons name="chevron-back" size={16} color={colors.textMuted} />
               </Pressable>
@@ -143,7 +144,7 @@ export default function HelpSupportScreen() {
                 </View>
                 <View style={styles.contactTextWrap}>
                   <Text style={styles.contactLabel}>אימייל</Text>
-                  <Text style={styles.contactValue}>{EMAIL_ADDRESS}</Text>
+                  <Text style={styles.contactValue}>{isolateLTR(EMAIL_ADDRESS)}</Text>
                 </View>
                 <Ionicons name="chevron-back" size={16} color={colors.textMuted} />
               </Pressable>
@@ -154,13 +155,13 @@ export default function HelpSupportScreen() {
                 </View>
                 <View style={styles.contactTextWrap}>
                   <Text style={styles.contactLabel}>פקס</Text>
-                  <Text style={styles.contactValue}>{FAX_NUMBER}</Text>
+                  <Text style={styles.contactValue}>{isolateLTR(FAX_NUMBER)}</Text>
                 </View>
               </View>
             </View>
 
             <View style={styles.card}>
-              <Text style={styles.cardTitle}>קצת על Golden Light</Text>
+              <Text style={styles.cardTitle}>{`קצת על ${isolateLTR('Golden Light')}`}</Text>
               <Text style={styles.aboutText}>
                 גולדן לייט מתמחה בייבוא, ייצור ושיווק גופי תאורה ופתרונות תאורה בישראל. החברה מספקת
                 פתרונות ללקוחות פרטיים ועסקיים, מוסדות, אדריכלים ומעצבים.

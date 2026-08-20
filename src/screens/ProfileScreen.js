@@ -8,6 +8,7 @@ import AppScreen from '../components/common/AppScreen';
 import { useAuth } from '../context/AuthContext';
 import { getCachedAvatarUrl, getProfile, getProfileAvatarSignedUrl } from '../services/profileService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
 
 const AVATAR_SIZE = 88;
 
@@ -211,7 +212,7 @@ export default function ProfileScreen() {
   // Real phone/email only, joined into one compact identity line; omitted
   // entirely (not shown as "—") when neither is set, rather than reserving
   // hero space for two empty placeholder rows.
-  const contactLine = [profile?.phone, user?.email].filter(Boolean).join('   ·   ');
+  const contactLine = isolateLTR([profile?.phone, user?.email].filter(Boolean).join('   ·   '));
 
   return (
     <View style={styles.root} onLayout={onRootLayout}>

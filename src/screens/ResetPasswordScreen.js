@@ -11,6 +11,7 @@ import { MIN_PASSWORD_LENGTH, PASSWORD_TOO_SHORT_MESSAGE } from '../constants/va
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../services/supabase';
 import { colors, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
 
 // How long this screen waits for the recovery link to finish being
 // processed (see AuthContext's deep-link effect) before concluding no valid
@@ -153,7 +154,7 @@ export default function ResetPasswordScreen() {
       <View style={styles.passwordFieldWrapper}>
         <AppInput
           label="סיסמה חדשה"
-          placeholder="לפחות 8 תווים"
+          placeholder={`לפחות ${isolateLTR(MIN_PASSWORD_LENGTH)} תווים`}
           secureTextEntry={!showNewPassword}
           value={newPassword}
           onChangeText={setNewPassword}

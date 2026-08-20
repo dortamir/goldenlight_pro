@@ -19,6 +19,7 @@ import {
   uploadProfileAvatar,
 } from '../services/profileService';
 import { colors, radius, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
 
 const AVATAR_SIZE = 112;
 
@@ -164,7 +165,7 @@ export default function EditProfileScreen() {
       }
 
       if (!isSupportedAvatarAsset(asset)) {
-        setAvatarError('פורמט תמונה לא נתמך. בחרו JPG, PNG או WEBP.');
+        setAvatarError(`פורמט תמונה לא נתמך. בחרו ${isolateLTR('JPG, PNG')} או ${isolateLTR('WEBP')}.`);
         return;
       }
 
@@ -362,6 +363,8 @@ export default function EditProfileScreen() {
                     label="טלפון"
                     placeholder="050-1234567"
                     keyboardType="phone-pad"
+                    textAlign="left"
+                    writingDirection="ltr"
                     value={phone}
                     onChangeText={setPhone}
                     error={fieldErrors.phone}
@@ -379,7 +382,7 @@ export default function EditProfileScreen() {
                   {user?.email ? (
                     <View style={styles.emailWrapper}>
                       <Text style={styles.emailLabel}>אימייל</Text>
-                      <Text style={styles.emailValue}>{user.email}</Text>
+                      <Text style={styles.emailValue}>{isolateLTR(user.email)}</Text>
                     </View>
                   ) : null}
 

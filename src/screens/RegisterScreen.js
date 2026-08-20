@@ -10,6 +10,7 @@ import PrimaryButton from '../components/common/PrimaryButton';
 import { MIN_PASSWORD_LENGTH, PASSWORD_TOO_SHORT_MESSAGE } from '../constants/validation';
 import { useAuth } from '../context/AuthContext';
 import { colors, radius, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
 
 export default function RegisterScreen() {
   const router = useRouter();
@@ -81,7 +82,7 @@ export default function RegisterScreen() {
   return (
     <AuthScreenShell
       title="פתיחת חשבון"
-      subtitle="הצטרפו ל +GOLDEN והתחילו לצבור נקודות"
+      subtitle={`הצטרפו ל ${isolateLTR('GOLDEN+')} והתחילו לצבור נקודות`}
       activeTab="register"
       onRegisterPress={() => undefined}
       onLoginPress={() => router.push('/(auth)/login')}>
@@ -97,6 +98,8 @@ export default function RegisterScreen() {
         label="טלפון *"
         placeholder="050-1234567"
         keyboardType="phone-pad"
+        textAlign="left"
+        writingDirection="ltr"
         style={styles.input}
         value={phone}
         onChangeText={setPhone}
@@ -131,7 +134,7 @@ export default function RegisterScreen() {
       <View style={styles.passwordFieldWrapper}>
         <AppInput
           label="סיסמה *"
-          placeholder="לפחות 8 תווים"
+          placeholder={`לפחות ${isolateLTR(MIN_PASSWORD_LENGTH)} תווים`}
           secureTextEntry={!showPassword}
           style={styles.input}
           inputStyle={styles.passwordInput}

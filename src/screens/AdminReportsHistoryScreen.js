@@ -6,6 +6,7 @@ import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'rea
 import AdminShell from '../components/admin/AdminShell';
 import { getAdminReceiptSignedUrl, getAdminReports } from '../services/adminReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
 
 const THUMB_WIDTH = 52;
 const THUMB_HEIGHT = 68;
@@ -206,7 +207,7 @@ export default function AdminReportsHistoryScreen() {
                   <View style={styles.thumbWrap}>
                     {isPdf ? (
                       <View style={styles.thumbPlaceholder}>
-                        <Text style={styles.thumbPlaceholderText}>PDF</Text>
+                        <Text style={styles.thumbPlaceholderText}>{isolateLTR('PDF')}</Text>
                       </View>
                     ) : thumb?.status === 'ready' && thumb.url ? (
                       <Image source={{ uri: thumb.url }} style={styles.thumbImage} resizeMode="contain" />
@@ -226,11 +227,11 @@ export default function AdminReportsHistoryScreen() {
                       {report.customerName || 'משתמש ללא שם'}
                     </Text>
                     <Text style={styles.filename} numberOfLines={1}>
-                      {report.original_filename || 'חשבונית'}
+                      {report.original_filename ? isolateLTR(report.original_filename) : 'חשבונית'}
                     </Text>
-                    <Text style={styles.date}>{formatReportDate(report.created_at)}</Text>
+                    <Text style={styles.date}>{isolateLTR(formatReportDate(report.created_at))}</Text>
                     {report.status === 'approved' && report.points_awarded > 0 ? (
-                      <Text style={styles.points}>{`נצברו ${report.points_awarded} נק׳`}</Text>
+                      <Text style={styles.points}>{`נצברו ${isolateLTR(report.points_awarded)} נק׳`}</Text>
                     ) : null}
                   </View>
 

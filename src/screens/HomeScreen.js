@@ -11,6 +11,7 @@ import { useAuth } from '../context/AuthContext';
 import { getProfile } from '../services/profileService';
 import { getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
 
 function isPdfFile(name) {
   return /\.pdf$/i.test(String(name || ''));
@@ -207,7 +208,7 @@ export default function HomeScreen() {
   const approvedPurchasesCount = profile?.approved_purchases_count ?? 0;
   const levelInfo = getMembershipLevelInfo(approvedPurchasesCount);
   const levelProgressLabel = levelInfo.nextLevel
-    ? `${levelInfo.progressInBracket} / ${levelInfo.bracketSize} ל-${levelInfo.nextLevel}`
+    ? `${isolateLTR(`${levelInfo.progressInBracket} / ${levelInfo.bracketSize}`)} ל-${isolateLTR(levelInfo.nextLevel)}`
     : 'הגעתם לרמה הגבוהה ביותר';
 
   const formatNumber = (value) => {
@@ -279,7 +280,7 @@ export default function HomeScreen() {
         <View style={styles.heroSection} onLayout={onHeroLayout}>
           <View style={styles.heroInner}>
             <Text style={styles.greeting}>{loading ? 'טוען...' : `שלום, ${firstName}`}</Text>
-            <Text style={styles.title}>ברוכים הבאים ל +GOLDEN</Text>
+            <Text style={styles.title}>{`ברוכים הבאים ל ${isolateLTR('GOLDEN+')}`}</Text>
             <Text style={styles.tagline}>מועדון המקצוענים של גולדן לייט</Text>
 
             <PointsBalanceCard
@@ -403,7 +404,7 @@ export default function HomeScreen() {
                         <View style={styles.activityRowThumbnailWrap}>
                           {isPdf ? (
                             <View style={styles.activityRowPlaceholder}>
-                              <Text style={styles.activityRowPlaceholderText}>PDF</Text>
+                              <Text style={styles.activityRowPlaceholderText}>{isolateLTR('PDF')}</Text>
                             </View>
                           ) : preview?.status === 'ready' && preview.url ? (
                             <Image source={{ uri: preview.url }} style={styles.activityRowThumbnailImage} resizeMode="contain" />
@@ -420,7 +421,9 @@ export default function HomeScreen() {
 
                         <View style={styles.activityRowInfo}>
                           <Text style={styles.activityRowTitle} numberOfLines={1}>חשבונית</Text>
-                          <Text style={styles.activityRowDate} numberOfLines={1}>{formatReportDate(report.created_at)}</Text>
+                          <Text style={styles.activityRowDate} numberOfLines={1}>
+                            {isolateLTR(formatReportDate(report.created_at))}
+                          </Text>
 
                           <View style={[styles.statusBadge, { backgroundColor: statusMeta.backgroundColor }]}>
                             <Text style={[styles.statusBadgeText, { color: statusMeta.textColor }]} numberOfLines={1}>
@@ -429,7 +432,9 @@ export default function HomeScreen() {
                           </View>
 
                           {showPoints ? (
-                            <Text style={styles.activityPoints} numberOfLines={1}>{`+${formatNumber(report.points_awarded)} נק׳`}</Text>
+                            <Text style={styles.activityPoints} numberOfLines={1}>
+                              {`+${isolateLTR(formatNumber(report.points_awarded))} נק׳`}
+                            </Text>
                           ) : null}
                         </View>
                       </Pressable>

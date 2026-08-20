@@ -9,6 +9,7 @@ import AuthScreenShell from '../components/common/AuthScreenShell';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
 import { colors, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -58,7 +59,7 @@ export default function LoginScreen() {
   return (
     <AuthScreenShell
       title="ברוכים הבאים"
-      subtitle="התחברו ל +GOLDEN והמשיכו לצבור נקודות"
+      subtitle={`התחברו ל ${isolateLTR('GOLDEN+')} והמשיכו לצבור נקודות`}
       activeTab="login"
       onRegisterPress={() => router.push('/(auth)/register')}
       onLoginPress={() => undefined}>

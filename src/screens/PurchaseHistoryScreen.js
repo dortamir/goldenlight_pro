@@ -9,6 +9,7 @@ import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
 import { getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
 
 // Fixed-size receipt preview container - same portrait dimensions as
 // HomeScreen's own recent-activity thumbnails (see that file), so a
@@ -295,7 +296,7 @@ export default function PurchaseHistoryScreen() {
                       <View style={styles.thumbnailWrap}>
                         {isPdf ? (
                           <View style={styles.thumbnailPlaceholder}>
-                            <Text style={styles.thumbnailPlaceholderText}>PDF</Text>
+                            <Text style={styles.thumbnailPlaceholderText}>{isolateLTR('PDF')}</Text>
                           </View>
                         ) : preview?.status === 'ready' && preview.url ? (
                           <Image source={{ uri: preview.url }} style={styles.thumbnailImage} resizeMode="contain" />
@@ -313,9 +314,9 @@ export default function PurchaseHistoryScreen() {
                       <View style={styles.reportInfo}>
                         <Text style={styles.reportTitle}>חשבונית</Text>
                         <Text style={styles.reportFilename} numberOfLines={1} ellipsizeMode="tail">
-                          {report.original_filename || 'חשבונית'}
+                          {report.original_filename ? isolateLTR(report.original_filename) : 'חשבונית'}
                         </Text>
-                        <Text style={styles.reportDate}>{formatReportDate(report.created_at)}</Text>
+                        <Text style={styles.reportDate}>{isolateLTR(formatReportDate(report.created_at))}</Text>
                       </View>
 
                       <View style={styles.statusColumn}>
@@ -323,7 +324,9 @@ export default function PurchaseHistoryScreen() {
                           <Text style={[styles.statusBadgeText, { color: statusMeta.textColor }]}>{statusMeta.label}</Text>
                         </View>
                         {showPoints ? (
-                          <Text style={styles.reportPoints}>{`+${formatNumber(report.points_awarded)} נק׳`}</Text>
+                          <Text style={styles.reportPoints}>
+                            {`+${isolateLTR(formatNumber(report.points_awarded))} נק׳`}
+                          </Text>
                         ) : null}
                       </View>
                     </Pressable>

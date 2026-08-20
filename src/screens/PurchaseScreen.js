@@ -9,6 +9,9 @@ import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
 import { submitPurchaseReceipt } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
+
+const UNSUPPORTED_IMAGE_FORMAT_MESSAGE = `פורמט תמונה לא נתמך. בחרו ${isolateLTR('JPG, PNG')} או ${isolateLTR('WEBP')}.`;
 
 const uploadOptions = [
   {
@@ -92,7 +95,7 @@ export default function PurchaseScreen() {
         }
 
         if (!isSupportedReceiptAsset(asset)) {
-          setError('פורמט תמונה לא נתמך. בחרו JPG, PNG או WEBP.');
+          setError(UNSUPPORTED_IMAGE_FORMAT_MESSAGE);
           return;
         }
 
@@ -127,7 +130,7 @@ export default function PurchaseScreen() {
       }
 
       if (!isSupportedReceiptAsset(asset)) {
-        setError('פורמט תמונה לא נתמך. בחרו JPG, PNG או WEBP.');
+        setError(UNSUPPORTED_IMAGE_FORMAT_MESSAGE);
         return;
       }
 
@@ -187,7 +190,7 @@ export default function PurchaseScreen() {
           </View>
           <View style={styles.receiptFileInfo}>
             <Text style={styles.receiptName} numberOfLines={1}>
-              {selectedReceipt.name}
+              {isolateLTR(selectedReceipt.name)}
             </Text>
             <Text style={styles.receiptMeta}>מוכן לשליחה</Text>
           </View>
@@ -287,9 +290,11 @@ export default function PurchaseScreen() {
                 <Text style={styles.infoTitle}>מה קורה אחרי ההעלאה?</Text>
               </View>
               <View style={styles.stepsList}>
-                <Text style={styles.stepItem}>1. אנחנו סורקים את החשבונית</Text>
-                <Text style={styles.stepItem}>2. מזהים את מוצרי Golden Light</Text>
-                <Text style={styles.stepItem}>3. מחשבים ומעדכנים את הנקודות</Text>
+                <Text style={styles.stepItem}>{`${isolateLTR('1.')} אנחנו סורקים את החשבונית`}</Text>
+                <Text style={styles.stepItem}>
+                  {`${isolateLTR('2.')} מזהים את מוצרי ${isolateLTR('Golden Light')}`}
+                </Text>
+                <Text style={styles.stepItem}>{`${isolateLTR('3.')} מחשבים ומעדכנים את הנקודות`}</Text>
               </View>
             </View>
           </View>

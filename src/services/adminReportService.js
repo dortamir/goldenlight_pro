@@ -305,6 +305,68 @@ export async function getAdminManualItems(reportId) {
   return fetchManualItems(reportId);
 }
 
+// Loads the active Golden Light catalog (products + their aliases) for
+// CLIENT-SIDE product matching - see src/services/productMatching.js. This
+// is a plain `.from(...).select(...)` read, not a new RPC: public.products/
+// public.product_aliases already grant plain SELECT to `authenticated` for
+// active rows (004_create_product_catalog.sql), the exact same read path
+// the admin's own Supabase session already has for any other screen. There
+// is no service-role key involved and no elevated privilege here - only
+// WRITING a match (via saveAdminManualItems/finalizePurchaseReport, both
+// already is_admin()-gated) is privileged.
+//
+// Intended to be called ONCE per report-review session (see
+// AdminReportDetailScreen's load effect) and reused for every row's
+// matching/search, rather than re-queried per row - this is what keeps
+// matching a single one-time read plus in-memory JS work, with no N+1
+// query pattern, even as the catalog grows well past its current ~211 rows.
+export async function loadCatalogForMatching() {
+  if (!supabase) {
+    return { products: [], aliases: [] };
+  }
+
+  const { data: productRows, error: productsError } = await supabase
+    .from('products')
+    .select('id, sku, name, barcode, product_family, is_active')
+    .eq('is_active', true);
+
+  if (productsError) {
+    throw productsError;
+  }
+
+  const products = (productRows || []).map((row) => ({
+    id: row.id,
+    sku: row.sku,
+    name: row.name,
+    barcode: row.barcode,
+    productFamily: row.product_family,
+    isActive: Boolean(row.is_active),
+  }));
+
+  if (products.length === 0) {
+    return { products: [], aliases: [] };
+  }
+
+  const productIds = products.map((product) => product.id);
+
+  const { data: aliasRows, error: aliasesError } = await supabase
+    .from('product_aliases')
+    .select('product_id, alias, normalized_alias')
+    .in('product_id', productIds);
+
+  if (aliasesError) {
+    throw aliasesError;
+  }
+
+  const aliases = (aliasRows || []).map((row) => ({
+    productId: row.product_id,
+    alias: row.alias,
+    normalizedAlias: row.normalized_alias,
+  }));
+
+  return { products, aliases };
+}
+
 // Replaces the FULL manual-item set for one report via the single secure
 // RPC (public.save_manual_receipt_items, migration 011, extended by
 // migration 014) - there is deliberately no direct

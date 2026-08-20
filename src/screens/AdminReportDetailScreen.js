@@ -1,11 +1,13 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
   Modal,
+  Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -21,28 +23,36 @@ import {
   finalizePurchaseReport,
   getAdminReceiptSignedUrl,
   getAdminReportDetail,
+  loadCatalogForMatching,
   rejectAdminReport,
   REVIEWABLE_STATUSES,
   saveAdminManualItems,
 } from '../services/adminReportService';
+import { getProductSuggestions } from '../services/productMatching';
 import { colors, radius, shadows, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
 
 // Below this content width, the manual-entry table collapses to stacked
 // fields per row instead of a horizontal table row - a real Hebrew label +
 // input pair no longer fits five-across at phone/narrow-tablet widths.
 const MANUAL_TABLE_MIN_WIDTH = 720;
 
-// sku and line_total are intentionally NOT part of this form - see
-// 016_simplify_eligible_amount_calc.sql. The admin manual-review workflow
-// only ever collects description/quantity/unit_price/is_golden_light; the
-// database columns for sku/line_total still exist (for any historical row
-// entered before this change, and for possible future OCR use) but are
-// neither displayed nor sent as authoritative input by this screen anymore.
+// line_total is intentionally NOT part of this form - see
+// 016_simplify_eligible_amount_calc.sql (still true: the eligible amount is
+// always quantity * unit_price, never line_total). The row has exactly
+// these four visible columns - there is no separate SKU/barcode column or
+// field anywhere in the row. `row.sku` still exists internally (still sent
+// to save_manual_receipt_items(), unchanged from 019) but is never directly
+// typed by the admin anymore - it is only ever set by applyProductToRow()
+// below, synchronized to whichever product the admin selected in the
+// product-match modal, which is the ONE place any catalog lookup (by SKU,
+// barcode, or description/name) happens - see getProductSuggestions in
+// src/services/productMatching.js.
 const MANUAL_COLUMNS = [
   { key: 'description', label: 'תיאור מוצר', flex: 3.4 },
   { key: 'quantity', label: 'כמות', flex: 1.1 },
   { key: 'unit_price', label: 'מחיר ליחידה', flex: 1.5 },
-  { key: 'is_golden_light', label: 'מוצר Golden Light', flex: 1.3 },
+  { key: 'match_status', label: `מוצר ${isolateLTR('Golden Light')}`, flex: 1.3 },
 ];
 
 let manualRowSeq = 0;
@@ -51,26 +61,52 @@ function createEmptyManualRow() {
   return {
     key: `row-${manualRowSeq}`,
     description: '',
+    sku: '',
     quantity: '',
     unit_price: '',
-    is_golden_light: false,
+    product_id: null,
+    match_type: null,
+    match_confidence: null,
+    match_status: 'unresolved',
+    matched_product_sku: null,
+    matched_product_name: null,
+    // The admin's own receipt wording, captured right before a selected
+    // suggestion overwrote `description` with the catalog's canonical name
+    // (see applyProductToRow) - null whenever the typed text already was
+    // the canonical name/sku, or nothing has been matched yet. Sent to
+    // save_manual_receipt_items() as `alias_source_text` so alias learning
+    // keeps working even though `description` itself is now always
+    // synchronized to the matched product - see
+    // 020_manual_item_alias_source_text.sql.
+    alias_candidate_text: null,
   };
 }
 
 // Preloads the editable form with the saved rows, or a single empty row
 // when none exist yet - "not zero, not multiple blank rows". Shared by the
 // always-editable reviewable-report table and the post-approval
-// "עריכת טיפול" correction flow. Any sku/line_total a saved row might still
-// carry from before this change is intentionally not surfaced here - see
-// the module comment above MANUAL_COLUMNS.
+// "עריכת טיפול" correction flow. matched_product_sku/matched_product_name
+// come from get_admin_manual_items()'s join to public.products
+// (019_product_matching_manual_items.sql) - display-only convenience
+// fields, never sent back to the server (buildManualItemsPayload below
+// never reads them). alias_candidate_text always starts null for a saved
+// row - it only exists transiently while editing, between selecting a
+// suggestion and saving.
 function buildRowsFromManualItems(items) {
   return items && items.length > 0
     ? items.map((item) => ({
         key: item.id,
         description: item.description || '',
+        sku: item.sku || '',
         quantity: item.quantity != null ? String(item.quantity) : '',
         unit_price: item.unit_price != null ? String(item.unit_price) : '',
-        is_golden_light: Boolean(item.is_golden_light),
+        product_id: item.product_id || null,
+        match_type: item.match_type || null,
+        match_confidence: item.match_confidence ?? null,
+        alias_candidate_text: null,
+        match_status: item.match_status || 'unresolved',
+        matched_product_sku: item.matched_product_sku || null,
+        matched_product_name: item.matched_product_name || null,
       }))
     : [createEmptyManualRow()];
 }
@@ -158,23 +194,35 @@ function parseOptionalNonNegativeNumber(value, errorCode) {
 // from the editable rows, validating client-side first for immediate
 // feedback - the server-side RPCs re-validate every rule themselves
 // regardless, so this is a UX convenience, not the security boundary. A row
-// left completely untouched (every field blank) is dropped silently - the
-// common case after pressing "+ הוספת שורה" and not using it; a row with
-// SOME data but a missing description is rejected as an error.
+// left completely untouched (every field blank, no product matched) is
+// dropped silently - the common case after pressing "+ הוספת שורה" and not
+// using it; a row with SOME data but a missing description is rejected as
+// an error.
 //
-// sku/line_total are always sent as null - this form never collects them
-// (see 016_simplify_eligible_amount_calc.sql). The database columns still
-// accept them (for any future OCR-populated write path), this screen simply
-// never populates them anymore.
+// line_total is always sent as null - this form never collects it (see
+// 016_simplify_eligible_amount_calc.sql). product_id/match_type/
+// match_confidence are only sent when match_status is 'matched' - a row
+// that is 'unresolved' or 'not_golden_light' always sends null for all
+// three, regardless of what a stale row object might otherwise carry (the
+// database independently enforces this same rule - see
+// 019_product_matching_manual_items.sql - this is just matching UX
+// consistency, not the real security boundary).
 function buildManualItemsPayload(rows) {
   const trimmedRows = rows.map((row) => ({
     description: row.description.trim(),
+    sku: (row.sku || '').trim(),
     quantity: row.quantity.trim(),
     unit_price: row.unit_price.trim(),
-    is_golden_light: Boolean(row.is_golden_light),
+    product_id: row.product_id || null,
+    match_type: row.match_type || null,
+    match_confidence: row.match_confidence ?? null,
+    match_status: row.match_status || 'unresolved',
+    alias_candidate_text: row.alias_candidate_text || null,
   }));
 
-  const nonEmptyRows = trimmedRows.filter((row) => row.description || row.quantity || row.unit_price);
+  const nonEmptyRows = trimmedRows.filter(
+    (row) => row.description || row.quantity || row.unit_price || row.product_id,
+  );
 
   if (nonEmptyRows.length === 0) {
     throw new Error('items_required');
@@ -188,19 +236,59 @@ function buildManualItemsPayload(rows) {
       throw new Error('description_too_long');
     }
 
+    const isMatched = row.match_status === 'matched';
+
     return {
       description: row.description,
-      sku: null,
+      sku: row.sku || null,
       quantity: parseOptionalPositiveNumber(row.quantity, 'invalid_quantity'),
       unit_price: parseOptionalNonNegativeNumber(row.unit_price, 'invalid_unit_price'),
       line_total: null,
-      is_golden_light: row.is_golden_light,
+      product_id: isMatched ? row.product_id : null,
+      match_type: isMatched ? row.match_type : null,
+      match_confidence: isMatched ? row.match_confidence : null,
+      match_status: row.match_status || 'unresolved',
+      // The admin's original receipt wording, if a selected suggestion
+      // overwrote `description` with the catalog's canonical name and that
+      // wording differed - see applyProductToRow. Only ever meaningful for
+      // a 'matched' row; null otherwise. Consumed by
+      // save_manual_receipt_items()'s alias-learning step (see
+      // 020_manual_item_alias_source_text.sql), which falls back to
+      // `description` itself when this is absent.
+      alias_source_text: isMatched ? row.alias_candidate_text || null : null,
     };
   });
 }
 
 function isPdfFile(name) {
   return /\.pdf$/i.test(String(name || ''));
+}
+
+// Fits the receipt's real natural width/height inside a (maxWidth,
+// maxHeight) box, preserving the true aspect ratio exactly - equivalent to
+// the math behind CSS `object-fit: contain`, computed here so the CONTAINER
+// itself is already the correct shape (no leftover letterbox space inside
+// the card, no distortion). Most receipts are portrait phone photos, so a
+// tall/narrow natural size naturally produces a tall/narrow box here,
+// clamped by maxHeight before it ever gets unreasonably tall; a wide/
+// landscape photo naturally produces a wide box, clamped by maxWidth.
+// (Plain CSS `aspectRatio` + `maxWidth`/`maxHeight` together can't express
+// this: Yoga clamps height to maxHeight without re-deriving width from the
+// new height, which leaves a portrait image sitting in a much-too-wide box.)
+// Falls back to the box's own max dimensions (a neutral, non-distorting
+// placeholder box) until the real natural size has loaded.
+function fitReceiptDisplaySize(naturalWidth, naturalHeight, maxWidth, maxHeight) {
+  if (!naturalWidth || !naturalHeight || !maxWidth || !maxHeight) {
+    return { width: maxWidth || 0, height: maxHeight || 0 };
+  }
+  const aspectRatio = naturalWidth / naturalHeight;
+  let width = maxWidth;
+  let height = width / aspectRatio;
+  if (height > maxHeight) {
+    height = maxHeight;
+    width = height * aspectRatio;
+  }
+  return { width, height };
 }
 
 function formatReportDate(value) {
@@ -264,6 +352,24 @@ function getMatchStatusMeta(status) {
   }
 }
 
+// Three-state status for a receipt_manual_items row (019_product_matching_
+// manual_items.sql) - deliberately distinct from getMatchStatusMeta above,
+// which describes an OCR line's receipt_line_matches row. 'unresolved' (the
+// default - nothing decided yet) must never be visually confused with
+// 'not_golden_light' (an explicit admin decision that this line is NOT a
+// Golden Light product) - see the task's "three distinct states" rule.
+function getManualMatchStatusMeta(status) {
+  switch (status) {
+    case 'matched':
+      return { label: 'זוהה מוצר', icon: 'checkmark-circle', color: colors.success };
+    case 'not_golden_light':
+      return { label: `לא מוצר ${isolateLTR('GL')}`, icon: 'close-circle', color: colors.textMuted };
+    case 'unresolved':
+    default:
+      return { label: 'טרם הוגדר', icon: 'help-circle-outline', color: colors.textMuted };
+  }
+}
+
 // Maps the short error identifiers raised by public.finalize_purchase_report()
 // (migration 015 - the unified "אישור וסיום טיפול" action, which internally
 // reuses save_manual_receipt_items()/award_purchase_points()'s own error
@@ -298,7 +404,13 @@ function getActionErrorMessage(err) {
     case 'invalid_line_total':
       return 'סה״כ לא תקין.';
     case 'invalid_is_golden_light':
-      return 'ערך לא תקין עבור סימון מוצר Golden Light.';
+      return `ערך לא תקין עבור סימון מוצר ${isolateLTR('Golden Light')}.`;
+    case 'invalid_match_status':
+      return 'סטטוס התאמת מוצר לא תקין.';
+    case 'invalid_product':
+      return 'המוצר שנבחר אינו קיים או אינו פעיל. נסו לבחור מוצר מחדש.';
+    case 'match_type_required':
+      return 'יש לבחור מוצר מהקטלוג לפני השמירה.';
     case 'too_many_items':
       return 'יותר מדי שורות.';
     case 'report_not_approved':
@@ -332,16 +444,16 @@ function getFinalizeBlockingReason(rows) {
 
   const summary = summarizeEligibleRows(payload, (item, index) => ({
     key: index,
-    isGoldenLight: item.is_golden_light,
+    isGoldenLight: item.match_status === 'matched',
     quantity: item.quantity,
     unitPrice: item.unit_price,
   }));
 
   if (summary.missingPriceKeys.length > 0) {
-    return 'יש להזין כמות ומחיר ליחידה תקינים עבור כל מוצרי ה-Golden Light המסומנים.';
+    return `יש להזין כמות ומחיר ליחידה תקינים עבור כל מוצרי ה-${isolateLTR('Golden Light')} המסומנים.`;
   }
   if (summary.total <= 0) {
-    return 'יש לסמן לפחות מוצר Golden Light אחד עם סכום זכאי תקין לפני האישור.';
+    return `יש לסמן לפחות מוצר ${isolateLTR('Golden Light')} אחד עם סכום זכאי תקין לפני האישור.`;
   }
   if (Math.floor(summary.total * 0.2) <= 0) {
     return 'הסכום הזכאי אינו מספיק להענקת נקודות.';
@@ -349,16 +461,71 @@ function getFinalizeBlockingReason(rows) {
   return null;
 }
 
+// Below this many characters, no autocomplete dropdown is shown at all - a
+// single character would match too much of the catalog to be a useful
+// "meaningful search" and would just be noisy while the admin is still
+// typing.
+const DESCRIPTION_SUGGESTION_MIN_LENGTH = 2;
+const DESCRIPTION_SUGGESTION_LIMIT = 6;
+
+// Inline "as you type" autocomplete for the "תיאור מוצר" input - a small
+// floating panel anchored directly under the field it belongs to (absolute
+// position, not in-flow), so it never pushes the rest of the receipt-items
+// table down while open. Built on getProductSuggestions() (productMatching.js)
+// - the SAME ranked search the product-match modal's search box uses, so
+// there is exactly one search/ranking implementation behind both surfaces.
+// Purely presentational: onSelect (wired to applyProductToRow) is the only
+// way a suggestion ever becomes an authoritative match - this component
+// never selects anything on its own.
+function DescriptionSuggestionDropdown({ suggestions, onSelect }) {
+  if (!suggestions || suggestions.length === 0) {
+    return null;
+  }
+  return (
+    <View style={styles.descriptionSuggestionDropdown}>
+      <View style={styles.descriptionSuggestionScroll}>
+        {suggestions.map((product, index) => (
+          <Pressable
+            key={product.id}
+            onPress={() => onSelect(product)}
+            style={({ pressed, hovered }) => [
+              styles.descriptionSuggestionRow,
+              index > 0 && styles.descriptionSuggestionRowSeparator,
+              (pressed || hovered) && styles.descriptionSuggestionRowActive,
+            ]}
+            accessibilityRole="button">
+            <Text style={styles.descriptionSuggestionName} numberOfLines={2}>
+              {product.name}
+            </Text>
+            <Text style={styles.descriptionSuggestionSku} numberOfLines={1}>
+              {`מק״ט ${isolateLTR(product.sku)}`}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+    </View>
+  );
+}
+
 export default function AdminReportDetailScreen() {
   const { id } = useLocalSearchParams();
   const router = useRouter();
-  const { width: windowWidth } = useWindowDimensions();
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const isWideManualTable = windowWidth >= MANUAL_TABLE_MIN_WIDTH;
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notFound, setNotFound] = useState(false);
   const [imageState, setImageState] = useState({ status: 'idle', url: null });
+  // The receipt's real natural pixel size, fetched once the signed image
+  // URL is available - drives the preview's aspectRatio style so the box is
+  // exactly the receipt's true shape (never stretched/cropped), instead of
+  // guessing a fixed aspect ratio. null until it resolves.
+  const [imageNaturalSize, setImageNaturalSize] = useState(null);
+  // Click-to-enlarge lightbox - same pattern already proven on the
+  // customer-facing PurchaseReportDetailsScreen (dark overlay Modal,
+  // resizeMode="contain", explicit close button).
+  const [previewOpen, setPreviewOpen] = useState(false);
 
   // The unified review form - always editable while the report is
   // reviewable (submitted/needs_review), and also reused (in a clearly
@@ -396,6 +563,54 @@ export default function AdminReportDetailScreen() {
   const [awarding, setAwarding] = useState(false);
   const [pointsError, setPointsError] = useState('');
 
+  // The active Golden Light catalog (products + aliases), loaded ONCE per
+  // review session (not per report, not per row) via loadCatalogForMatching
+  // (adminReportService.js) - a plain read using the admin's own
+  // authenticated session, same as any other screen (see that function's
+  // comment for why no service-role key or new RPC is involved). Reused for
+  // every row's auto-suggestion and manual search below - no N+1 query
+  // pattern regardless of how many rows a receipt has.
+  const [catalog, setCatalog] = useState({ products: [], aliases: [] });
+  const [catalogError, setCatalogError] = useState('');
+
+  // The per-row "בחירת מוצר Golden Light" modal - one shared modal reused
+  // for whichever row's status cell was pressed (identified by rowKey),
+  // rather than one modal instance per row.
+  const [matchModal, setMatchModal] = useState({ open: false, rowKey: null, searchQuery: '' });
+
+  // Which row's "תיאור מוצר" input currently has focus - drives the inline
+  // autocomplete dropdown below it (see DescriptionSuggestionDropdown and
+  // the row render below). Only one row's input can be focused at a time,
+  // so a single shared value is enough - no need for per-row local state.
+  const [focusedDescriptionRowKey, setFocusedDescriptionRowKey] = useState(null);
+  // A short delay before actually clearing focus on blur - long enough for
+  // a suggestion Pressable's onPress (which fires on release, shortly
+  // after the input blurs) to register first, short enough that closing
+  // still feels immediate once the admin genuinely moves on. This is the
+  // standard fix for the well-known "blur hides the list before the click
+  // is registered" race condition in web autocomplete UIs.
+  const descriptionBlurTimeoutRef = useRef(null);
+
+  useEffect(
+    () => () => {
+      if (descriptionBlurTimeoutRef.current) {
+        clearTimeout(descriptionBlurTimeoutRef.current);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    loadCatalogForMatching()
+      .then(setCatalog)
+      .catch((err) => {
+        if (__DEV__) {
+          console.error('[Admin] Failed to load product catalog for matching', err);
+        }
+        setCatalogError('לא ניתן היה לטעון את קטלוג המוצרים להתאמה אוטומטית. ניתן עדיין לסמן שורות ידנית.');
+      });
+  }, []);
+
   const loadDetail = useCallback(() => {
     if (!id) {
       return;
@@ -405,6 +620,8 @@ export default function AdminReportDetailScreen() {
     setError('');
     setNotFound(false);
     setImageState({ status: 'idle', url: null });
+    setImageNaturalSize(null);
+    setPreviewOpen(false);
     setManualRows([]);
     setFinalizeModalOpen(false);
     setFinalizeError('');
@@ -415,6 +632,8 @@ export default function AdminReportDetailScreen() {
     setManualError('');
     setAwardModalOpen(false);
     setPointsError('');
+    setMatchModal({ open: false, rowKey: null, searchQuery: '' });
+    setFocusedDescriptionRowKey(null);
 
     getAdminReportDetail(id)
       .then((data) => {
@@ -447,6 +666,35 @@ export default function AdminReportDetailScreen() {
     loadDetail();
   }, [loadDetail]);
 
+  // Fetches the receipt's real natural pixel size once its signed URL is
+  // ready, so the preview box can be sized to the image's true aspect
+  // ratio via the aspectRatio style instead of a guessed/fixed ratio. A
+  // failure here just leaves imageNaturalSize null - the preview box still
+  // renders (as a neutral box) and resizeMode="contain" still displays the
+  // image correctly, this only affects how tightly the box fits it.
+  useEffect(() => {
+    if (imageState.status !== 'ready' || !imageState.url) {
+      return;
+    }
+    let isActive = true;
+    Image.getSize(
+      imageState.url,
+      (width, height) => {
+        if (isActive) {
+          setImageNaturalSize({ width, height });
+        }
+      },
+      () => {
+        if (isActive) {
+          setImageNaturalSize(null);
+        }
+      },
+    );
+    return () => {
+      isActive = false;
+    };
+  }, [imageState.status, imageState.url]);
+
   const addManualRow = () => {
     setManualRows((rows) => [...rows, createEmptyManualRow()]);
   };
@@ -457,21 +705,196 @@ export default function AdminReportDetailScreen() {
     setManualRows((rows) => {
       if (rows.length <= 1) {
         return rows.map((row) =>
-          row.key === key ? { ...row, description: '', quantity: '', unit_price: '' } : row,
+          row.key === key
+            ? {
+                ...row,
+                description: '',
+                sku: '',
+                quantity: '',
+                unit_price: '',
+                product_id: null,
+                match_type: null,
+                match_confidence: null,
+                match_status: 'unresolved',
+                matched_product_sku: null,
+                matched_product_name: null,
+                alias_candidate_text: null,
+              }
+            : row,
         );
       }
       return rows.filter((row) => row.key !== key);
     });
   };
 
+  // Plain field edits (description, quantity, unit_price). `sku` is never
+  // edited this way anymore - it is only ever set by applyProductToRow()
+  // below, synchronized to whichever product the admin selected in the
+  // product-match modal. When the edited field is description AND the row
+  // already has an authoritative product match, checks whether the new
+  // text still equals that product's own canonical name - if not, the
+  // match is stale and is cleared back to 'unresolved' in the SAME update
+  // (never a separate effect/render pass, so the UI never shows a
+  // "matched" row whose visible description no longer corresponds to
+  // matched_product_name - a stale product_id must never persist). Falls
+  // back to 'unresolved', not 'not_golden_light' - nothing was explicitly
+  // decided, the row just needs to be matched again via the modal.
   const updateManualRow = (key, field, value) => {
-    setManualRows((rows) => rows.map((row) => (row.key === key ? { ...row, [field]: value } : row)));
+    setManualRows((rows) =>
+      rows.map((row) => {
+        if (row.key !== key) {
+          return row;
+        }
+        const nextRow = { ...row, [field]: value };
+        if (row.match_status === 'matched' && field === 'description') {
+          const stillMatchesDescription = nextRow.description.trim() === (row.matched_product_name || '');
+          if (!stillMatchesDescription) {
+            nextRow.product_id = null;
+            nextRow.match_type = null;
+            nextRow.match_confidence = null;
+            nextRow.match_status = 'unresolved';
+            nextRow.matched_product_sku = null;
+            nextRow.matched_product_name = null;
+            nextRow.alias_candidate_text = null;
+          }
+        }
+        return nextRow;
+      }),
+    );
   };
 
-  const toggleManualRowGoldenLight = (key) => {
+  const applyRowMatch = (key, patch) => {
+    setManualRows((rows) => rows.map((row) => (row.key === key ? { ...row, ...patch } : row)));
+  };
+
+  // Seeds the modal's single search box with whatever the admin already
+  // typed into "תיאור מוצר" for this row - so opening the modal for a row
+  // that already has a description immediately shows relevant suggestions
+  // without retyping it. The admin can still freely replace the text with a
+  // SKU or barcode instead - the same box (getProductSuggestions) searches
+  // all three regardless of what's typed there.
+  const openMatchModal = (key) => {
+    const row = manualRows.find((candidate) => candidate.key === key);
+    setMatchModal({ open: true, rowKey: key, searchQuery: row?.description?.trim() || '' });
+  };
+
+  const closeMatchModal = () => {
+    setMatchModal({ open: false, rowKey: null, searchQuery: '' });
+  };
+
+  const setMatchModalSearchQuery = (value) => {
+    setMatchModal((state) => ({ ...state, searchQuery: value }));
+  };
+
+  // Inline "תיאור מוצר" autocomplete focus tracking - see
+  // focusedDescriptionRowKey above. Any pending blur-close from a
+  // previously focused row is cancelled first, so switching focus directly
+  // between two description inputs never leaves a stale timer running.
+  const handleDescriptionFocus = (key) => {
+    if (descriptionBlurTimeoutRef.current) {
+      clearTimeout(descriptionBlurTimeoutRef.current);
+      descriptionBlurTimeoutRef.current = null;
+    }
+    setFocusedDescriptionRowKey(key);
+  };
+
+  const handleDescriptionBlur = (key) => {
+    descriptionBlurTimeoutRef.current = setTimeout(() => {
+      setFocusedDescriptionRowKey((current) => (current === key ? null : current));
+      descriptionBlurTimeoutRef.current = null;
+    }, 200);
+  };
+
+  // THE ONE place description/sku/product_id/match_status are ever
+  // synchronized together - called whenever the admin picks a product from
+  // the product-match modal's single search box (the ONLY catalog-lookup
+  // surface in this whole screen - see the modal's render below). Always
+  // overwrites description and sku to the selected product's own canonical
+  // values, so a row can never end up in a "description = product A, sku =
+  // product B" mismatch.
+  //
+  // `method`/`confidence` are 'manual'/null for every selection made this
+  // way (the admin is always explicitly picking a search result) - which is
+  // also what makes the selection eligible for alias learning below (see
+  // 019_product_matching_manual_items.sql's alias-learning rule, keyed on
+  // exactly this 'manual' tag).
+  //
+  // Alias-candidate capture: if this is a 'manual' selection and the
+  // admin's PRE-selection description text differs from the product's own
+  // canonical name/sku (i.e. genuine custom receipt wording, like "מפסק 1M
+  // לבן" for official product "מפסק יחיד 1 מודול לבן"), that original text
+  // is captured into alias_candidate_text BEFORE description is overwritten
+  // - buildManualItemsPayload sends it as `alias_source_text`, and
+  // 020_manual_item_alias_source_text.sql's save_manual_receipt_items()
+  // uses it (instead of the now-canonical `description`) to learn the
+  // alias, exactly preserving the existing alias-learning mechanism even
+  // though the visible description field is now always synchronized.
+  const applyProductToRow = (key, product, method, confidence) => {
     setManualRows((rows) =>
-      rows.map((row) => (row.key === key ? { ...row, is_golden_light: !row.is_golden_light } : row)),
+      rows.map((row) => {
+        if (row.key !== key) {
+          return row;
+        }
+        const priorDescription = row.description.trim();
+        const isAlreadyCanonical =
+          !priorDescription ||
+          priorDescription.toLowerCase() === (product.name || '').trim().toLowerCase() ||
+          priorDescription.toLowerCase() === (product.sku || '').trim().toLowerCase();
+        return {
+          ...row,
+          description: product.name || '',
+          sku: product.sku || '',
+          product_id: product.id,
+          match_type: method,
+          match_confidence: confidence,
+          match_status: 'matched',
+          matched_product_sku: product.sku,
+          matched_product_name: product.name,
+          alias_candidate_text: method === 'manual' && !isAlreadyCanonical ? priorDescription : null,
+        };
+      }),
     );
+  };
+
+  // Applies to whichever row the modal is currently open for, then closes
+  // it - the modal's search-result rows below are the only caller.
+  const selectRowProduct = (product, method, confidence) => {
+    if (!matchModal.rowKey) {
+      return;
+    }
+    applyProductToRow(matchModal.rowKey, product, method, confidence);
+    closeMatchModal();
+  };
+
+  const markRowNotGoldenLight = () => {
+    if (!matchModal.rowKey) {
+      return;
+    }
+    applyRowMatch(matchModal.rowKey, {
+      product_id: null,
+      match_type: null,
+      match_confidence: null,
+      match_status: 'not_golden_light',
+      matched_product_sku: null,
+      matched_product_name: null,
+      alias_candidate_text: null,
+    });
+    closeMatchModal();
+  };
+
+  const resetRowMatch = () => {
+    if (!matchModal.rowKey) {
+      return;
+    }
+    applyRowMatch(matchModal.rowKey, {
+      product_id: null,
+      match_type: null,
+      match_confidence: null,
+      match_status: 'unresolved',
+      matched_product_sku: null,
+      matched_product_name: null,
+      alias_candidate_text: null,
+    });
   };
 
   const openFinalizeModal = () => {
@@ -657,6 +1080,38 @@ export default function AdminReportDetailScreen() {
   };
 
   const isPdf = report ? isPdfFile(report.original_filename) : false;
+  const canOpenPreview = !isPdf && imageState.status === 'ready' && Boolean(imageState.url);
+  // The preview box's available width is derived analytically from
+  // useWindowDimensions() (synchronous, always available on first render)
+  // and AdminShell's own content-column layout constants, rather than
+  // measured via the image card's onLayout - onLayout's firing isn't
+  // guaranteed before first paint (confirmed empirically: it can go
+  // multiple seconds without firing at some viewport widths), which would
+  // otherwise leave the image sized wrong until some unrelated re-render
+  // happens to trigger it. ADMIN_CONTENT_MAX_WIDTH/paddings mirror
+  // AdminShell's bodyContent (maxWidth 1100, horizontal padding
+  // spacing.xl) and this card's own padding (spacing.lg) - if either
+  // changes, update the numbers here too.
+  const ADMIN_CONTENT_MAX_WIDTH = 1100;
+  const availableContentWidth = Math.min(windowWidth, ADMIN_CONTENT_MAX_WIDTH) - spacing.xl * 2 - spacing.lg * 2;
+  // Height is capped generously so even a very tall portrait photo stays
+  // inspectable without scrolling the whole page; width is additionally
+  // capped lower on wide desktop so a landscape receipt doesn't sprawl
+  // edge-to-edge on a ~1100px-wide admin page.
+  const receiptBoxMaxWidth = isWideManualTable ? Math.min(availableContentWidth, 560) : availableContentWidth;
+  const receiptBoxMaxHeight = isWideManualTable ? 640 : 460;
+  const receiptDisplaySize = fitReceiptDisplaySize(
+    imageNaturalSize?.width,
+    imageNaturalSize?.height,
+    receiptBoxMaxWidth,
+    receiptBoxMaxHeight,
+  );
+  // Fullscreen lightbox bounding box - nearly the full viewport, leaving a
+  // comfortable margin on every side. resizeMode="contain" then letterboxes
+  // the real image within this box, so it's always fully visible (never
+  // cropped, never stretched) regardless of aspect ratio or screen size.
+  const fullscreenPreviewWidth = Math.max(windowWidth - spacing.xl * 2, 0);
+  const fullscreenPreviewHeight = Math.max(windowHeight - spacing.xxl * 2, 0);
   const statusMeta = report ? getStatusMeta(report.status) : null;
   const ocrStatusMeta = report?.ocrResult ? getOcrStatusMeta(report.ocrResult.status) : null;
   const matchByLineId = new Map((report?.lineMatches || []).map((match) => [match.ocr_line_id, match]));
@@ -676,7 +1131,7 @@ export default function AdminReportDetailScreen() {
   // preview.
   const draftEligibleSummary = summarizeEligibleRows(manualRows, (row) => ({
     key: row.key,
-    isGoldenLight: row.is_golden_light,
+    isGoldenLight: row.match_status === 'matched',
     quantity: toNumberOrNull(row.quantity),
     unitPrice: toNumberOrNull(row.unit_price),
   }));
@@ -690,12 +1145,43 @@ export default function AdminReportDetailScreen() {
   // value in NUMERIC arithmetic.
   const savedEligibleSummary = summarizeEligibleRows(report?.manualItems || [], (item) => ({
     key: item.id,
-    isGoldenLight: item.is_golden_light,
+    isGoldenLight: item.match_status === 'matched',
     quantity: item.quantity,
     unitPrice: item.unit_price,
   }));
   const savedPointsPreview = Math.floor(savedEligibleSummary.total * 0.2);
   const hasEligibleAmount = savedEligibleSummary.total > 0;
+
+  // Derived state for the product-match modal - recomputed on every render
+  // from whichever row is currently open (matchModal.rowKey) and the
+  // once-loaded catalog. Cheap: getProductSuggestions is a pure, in-memory,
+  // O(catalog size) operation over ~211 products, not a query. This is the
+  // ONE search mechanism the modal offers - the single search box below
+  // understands SKU, barcode, and description/name together (see
+  // getProductSuggestions in productMatching.js), so there is no separate
+  // "automatic" vs "manual" search path to reconcile.
+  const activeMatchRow = matchModal.open ? manualRows.find((row) => row.key === matchModal.rowKey) : null;
+  const matchSearchResults = matchModal.open ? getProductSuggestions(matchModal.searchQuery, catalog, 20) : [];
+
+  // Inline "תיאור מוצר" autocomplete - computed ONCE here (not per-row
+  // inside the row map below), since only one row's description input can
+  // ever be focused at a time. hasOpenDescriptionSuggestions is what
+  // elevates the WHOLE manual-items section card above its sibling cards
+  // (the eligible-total summary, "פעולות בדיקה", ...) while the dropdown is
+  // open - see manualSectionElevated below. Elevating only the row itself
+  // is not enough: the row's zIndex only wins against ITS OWN siblings
+  // inside the same section card, since none of the ancestor cards
+  // establish their own stacking context on their own - the section card
+  // as a whole still needs a higher zIndex than its sibling section cards
+  // for the dropdown (however deep inside it) to actually paint above them.
+  const focusedDescriptionRow = manualRows.find((row) => row.key === focusedDescriptionRowKey) || null;
+  const focusedDescriptionSuggestions =
+    focusedDescriptionRow &&
+    focusedDescriptionRow.match_status !== 'matched' &&
+    focusedDescriptionRow.description.trim().length >= DESCRIPTION_SUGGESTION_MIN_LENGTH
+      ? getProductSuggestions(focusedDescriptionRow.description, catalog, DESCRIPTION_SUGGESTION_LIMIT)
+      : [];
+  const hasOpenDescriptionSuggestions = focusedDescriptionSuggestions.length > 0;
 
   // router.back() unconditionally throws the React Navigation "GO_BACK was
   // not handled" warning whenever this screen has no history to go back to
@@ -743,21 +1229,53 @@ export default function AdminReportDetailScreen() {
                 <Text style={[styles.statusBadgeText, { color: statusMeta.textColor }]}>{statusMeta.label}</Text>
               </View>
             </View>
-            <Text style={styles.metaLine}>{`הועלתה ב-${formatReportDate(report.created_at)}`}</Text>
-            <Text style={styles.metaLine}>{report.original_filename || 'חשבונית'}</Text>
+            {/* ONE small, subtle "who + when" line - deliberately the only
+                upload metadata shown here. No filename, file type, size, or
+                other technical attachment detail belongs in this header -
+                see the large preview below for actually inspecting the
+                receipt. */}
+            <Text style={styles.uploadMetaLine}>
+              {`הועלה ע״י ${report.customerName || 'משתמש ללא שם'} · ${isolateLTR(
+                formatReportDate(report.created_at).replace(' ', ', '),
+              )}`}
+            </Text>
             {report.points_awarded > 0 ? (
-              <Text style={styles.pointsLine}>{`נצברו ${report.points_awarded} נק׳`}</Text>
+              <Text style={styles.pointsLine}>{`נצברו ${isolateLTR(report.points_awarded)} נק׳`}</Text>
             ) : null}
           </View>
 
-          <View style={styles.imageCard}>
+          <Pressable
+            style={({ hovered, pressed }) => [
+              styles.imageCard,
+              canOpenPreview && hovered && styles.imageCardHovered,
+              canOpenPreview && pressed && styles.imageCardPressed,
+            ]}
+            onPress={() => canOpenPreview && setPreviewOpen(true)}
+            disabled={!canOpenPreview}
+            accessibilityRole={canOpenPreview ? 'button' : undefined}
+            accessibilityLabel="הגדלת תמונת החשבונית">
             {isPdf ? (
               <View style={styles.imagePlaceholder}>
                 <Ionicons name="document-text-outline" size={28} color={colors.textMuted} />
-                <Text style={styles.imagePlaceholderText}>קובץ PDF</Text>
+                <Text style={styles.imagePlaceholderText}>{`קובץ ${isolateLTR('PDF')}`}</Text>
               </View>
             ) : imageState.status === 'ready' && imageState.url ? (
-              <Image source={{ uri: imageState.url }} style={styles.receiptImage} resizeMode="contain" />
+              <>
+                <Image
+                  source={{ uri: imageState.url }}
+                  style={[
+                    styles.receiptImage,
+                    receiptDisplaySize.width > 0
+                      ? { width: receiptDisplaySize.width, height: receiptDisplaySize.height }
+                      : null,
+                  ]}
+                  resizeMode="contain"
+                />
+                <View style={styles.enlargeHint} pointerEvents="none">
+                  <Ionicons name="expand-outline" size={13} color={colors.white} />
+                  <Text style={styles.enlargeHintText}>הגדלה</Text>
+                </View>
+              </>
             ) : imageState.status === 'loading' ? (
               <View style={styles.imagePlaceholder}>
                 <ActivityIndicator color={colors.primary} size="small" />
@@ -767,10 +1285,10 @@ export default function AdminReportDetailScreen() {
                 <Text style={styles.imagePlaceholderText}>לא ניתן לטעון את התמונה</Text>
               </View>
             )}
-          </View>
+          </Pressable>
 
           <View style={styles.sectionCard}>
-            <Text style={styles.sectionTitle}>סטטוס זיהוי OCR</Text>
+            <Text style={styles.sectionTitle}>{`סטטוס זיהוי ${isolateLTR('OCR')}`}</Text>
             {report.ocrResult ? (
               <>
                 <View style={[styles.statusBadge, styles.sectionBadge, { backgroundColor: ocrStatusMeta.backgroundColor }]}>
@@ -804,7 +1322,7 @@ export default function AdminReportDetailScreen() {
                 )}
               </>
             ) : (
-              <Text style={styles.emptyText}>עדיין לא בוצע זיהוי OCR לחשבונית זו</Text>
+              <Text style={styles.emptyText}>{`עדיין לא בוצע זיהוי ${isolateLTR('OCR')} לחשבונית זו`}</Text>
             )}
           </View>
 
@@ -815,7 +1333,7 @@ export default function AdminReportDetailScreen() {
               or an approved report not currently being corrected) it's a
               plain read-only display of the last saved rows. */}
           {isEditingRows || hasManualItems ? (
-            <View style={styles.sectionCard}>
+            <View style={[styles.sectionCard, hasOpenDescriptionSuggestions && styles.manualSectionElevated]}>
               {isEditingRows ? (
                 <>
                   <Text style={styles.sectionTitle}>פרטי החשבונית</Text>
@@ -834,7 +1352,7 @@ export default function AdminReportDetailScreen() {
                           style={[
                             styles.manualTableHeaderText,
                             { flex: column.flex },
-                            column.key === 'is_golden_light' && styles.manualTableHeaderTextCentered,
+                            column.key === 'match_status' && styles.manualTableHeaderTextCentered,
                           ]}>
                           {column.label}
                         </Text>
@@ -843,17 +1361,45 @@ export default function AdminReportDetailScreen() {
                     </View>
                   ) : null}
 
-                  <View style={styles.manualFormRows}>
-                    {manualRows.map((row, index) =>
-                      isWideManualTable ? (
-                        <View key={row.key} style={styles.manualTableRow}>
-                          <View style={{ flex: MANUAL_COLUMNS[0].flex }}>
+                  <View style={[styles.manualFormRows, hasOpenDescriptionSuggestions && styles.manualRowElevated]}>
+                    {manualRows.map((row, index) => {
+                      // Computed once above (focusedDescriptionSuggestions) -
+                      // only the currently-focused row ever shows anything,
+                      // since only one description input can be focused at
+                      // a time.
+                      const descriptionSuggestions =
+                        row.key === focusedDescriptionRowKey ? focusedDescriptionSuggestions : [];
+                      const handleSelectDescriptionSuggestion = (product) => {
+                        applyProductToRow(row.key, product, 'manual', null);
+                        setFocusedDescriptionRowKey(null);
+                      };
+                      // Raises this specific row above its OWN siblings
+                      // within the same section card (other rows, the
+                      // eligible-total summary below the list) while its
+                      // dropdown is open. On its own this is not enough to
+                      // clear sibling SECTION CARDS below "פרטי החשבונית"
+                      // (e.g. "פעולות בדיקה") - see manualSectionElevated
+                      // on the section card itself, applied from
+                      // hasOpenDescriptionSuggestions above.
+                      const isRowElevated = descriptionSuggestions.length > 0;
+
+                      return isWideManualTable ? (
+                        <View
+                          key={row.key}
+                          style={[styles.manualTableRow, isRowElevated && styles.manualRowElevated]}>
+                          <View style={[{ flex: MANUAL_COLUMNS[0].flex }, styles.descriptionCellAnchor]}>
                             <AppInput
                               value={row.description}
                               onChangeText={(value) => updateManualRow(row.key, 'description', value)}
+                              onFocus={() => handleDescriptionFocus(row.key)}
+                              onBlur={() => handleDescriptionBlur(row.key)}
                               placeholder="תיאור מוצר"
                               editable={!manualSaving && !finalizing}
                               style={styles.manualTableCellInput}
+                            />
+                            <DescriptionSuggestionDropdown
+                              suggestions={descriptionSuggestions}
+                              onSelect={handleSelectDescriptionSuggestion}
                             />
                           </View>
                           <View style={{ flex: MANUAL_COLUMNS[1].flex }}>
@@ -882,19 +1428,29 @@ export default function AdminReportDetailScreen() {
                           </View>
                           <View style={[styles.manualGoldenLightCell, { flex: MANUAL_COLUMNS[3].flex }]}>
                             <Pressable
-                              onPress={() => toggleManualRowGoldenLight(row.key)}
+                              onPress={() => openMatchModal(row.key)}
                               disabled={manualSaving || finalizing}
-                              accessibilityRole="checkbox"
-                              accessibilityState={{ checked: row.is_golden_light }}
-                              accessibilityLabel="מוצר Golden Light"
-                              hitSlop={8}>
+                              accessibilityRole="button"
+                              accessibilityLabel="בחירת מוצר Golden Light"
+                              hitSlop={8}
+                              style={styles.manualMatchStatusPressable}>
                               <Ionicons
-                                name={row.is_golden_light ? 'checkbox' : 'square-outline'}
+                                name={getManualMatchStatusMeta(row.match_status).icon}
                                 size={20}
-                                color={row.is_golden_light ? colors.primary : colors.textMuted}
+                                color={getManualMatchStatusMeta(row.match_status).color}
                               />
+                              <Text
+                                style={[
+                                  styles.manualMatchStatusCellText,
+                                  { color: getManualMatchStatusMeta(row.match_status).color },
+                                ]}
+                                numberOfLines={1}>
+                                {row.match_status === 'matched'
+                                  ? row.matched_product_sku || getManualMatchStatusMeta(row.match_status).label
+                                  : getManualMatchStatusMeta(row.match_status).label}
+                              </Text>
                             </Pressable>
-                            {row.is_golden_light &&
+                            {row.match_status === 'matched' &&
                             computeLineAmount(toNumberOrNull(row.quantity), toNumberOrNull(row.unit_price)) ==
                               null ? (
                               <Ionicons
@@ -916,9 +1472,9 @@ export default function AdminReportDetailScreen() {
                           </Pressable>
                         </View>
                       ) : (
-                        <View key={row.key} style={styles.manualStackedRow}>
+                        <View key={row.key} style={[styles.manualStackedRow, isRowElevated && styles.manualRowElevated]}>
                           <View style={styles.manualStackedRowHeader}>
-                            <Text style={styles.manualStackedRowIndex}>{`שורה ${index + 1}`}</Text>
+                            <Text style={styles.manualStackedRowIndex}>{`שורה ${isolateLTR(index + 1)}`}</Text>
                             <Pressable
                               onPress={() => removeManualRow(row.key)}
                               disabled={manualSaving || finalizing}
@@ -928,13 +1484,21 @@ export default function AdminReportDetailScreen() {
                               <Ionicons name="trash-outline" size={16} color={colors.error} />
                             </Pressable>
                           </View>
-                          <AppInput
-                            label="תיאור מוצר"
-                            value={row.description}
-                            onChangeText={(value) => updateManualRow(row.key, 'description', value)}
-                            editable={!manualSaving && !finalizing}
-                            style={styles.manualFormField}
-                          />
+                          <View style={styles.descriptionCellAnchor}>
+                            <AppInput
+                              label="תיאור מוצר"
+                              value={row.description}
+                              onChangeText={(value) => updateManualRow(row.key, 'description', value)}
+                              onFocus={() => handleDescriptionFocus(row.key)}
+                              onBlur={() => handleDescriptionBlur(row.key)}
+                              editable={!manualSaving && !finalizing}
+                              style={styles.manualFormField}
+                            />
+                            <DescriptionSuggestionDropdown
+                              suggestions={descriptionSuggestions}
+                              onSelect={handleSelectDescriptionSuggestion}
+                            />
+                          </View>
                           <View style={styles.manualFormFieldsRow}>
                             <AppInput
                               label="כמות"
@@ -958,26 +1522,39 @@ export default function AdminReportDetailScreen() {
                             />
                           </View>
                           <Pressable
-                            onPress={() => toggleManualRowGoldenLight(row.key)}
+                            onPress={() => openMatchModal(row.key)}
                             disabled={manualSaving || finalizing}
                             style={styles.manualGoldenLightStackedRow}
-                            accessibilityRole="checkbox"
-                            accessibilityState={{ checked: row.is_golden_light }}>
+                            accessibilityRole="button"
+                            accessibilityLabel="בחירת מוצר Golden Light">
                             <Ionicons
-                              name={row.is_golden_light ? 'checkbox' : 'square-outline'}
+                              name={getManualMatchStatusMeta(row.match_status).icon}
                               size={20}
-                              color={row.is_golden_light ? colors.primary : colors.textMuted}
+                              color={getManualMatchStatusMeta(row.match_status).color}
                             />
-                            <Text style={styles.manualGoldenLightStackedLabel}>מוצר Golden Light</Text>
+                            <Text
+                              style={[
+                                styles.manualGoldenLightStackedLabel,
+                                { color: getManualMatchStatusMeta(row.match_status).color },
+                              ]}>
+                              {row.match_status === 'matched'
+                                ? `${row.matched_product_sku ? isolateLTR(row.matched_product_sku) : ''} — ${row.matched_product_name || ''}`.replace(
+                                    /^ — /,
+                                    '',
+                                  )
+                                : getManualMatchStatusMeta(row.match_status).label}
+                            </Text>
                           </Pressable>
-                          {row.is_golden_light &&
+                          {row.match_status === 'matched' &&
                           computeLineAmount(toNumberOrNull(row.quantity), toNumberOrNull(row.unit_price)) ==
                             null ? (
-                            <Text style={styles.manualRowWarningText}>חסר כמות/מחיר למוצר Golden Light</Text>
+                            <Text style={styles.manualRowWarningText}>
+                              {`חסר כמות/מחיר למוצר ${isolateLTR('Golden Light')}`}
+                            </Text>
                           ) : null}
                         </View>
-                      ),
-                    )}
+                      );
+                    })}
                   </View>
 
                   <Pressable
@@ -995,10 +1572,10 @@ export default function AdminReportDetailScreen() {
                       finalized/saved. */}
                   <View style={styles.eligibleSummaryBox}>
                     <Text style={styles.eligibleSummaryLine}>
-                      {`סכום מוצרי Golden Light לפני מע״מ: ₪${draftEligibleSummary.total.toFixed(2)}`}
+                      {`סכום מוצרי ${isolateLTR('Golden Light')}: ${isolateLTR(`₪${draftEligibleSummary.total.toFixed(2)}`)}`}
                     </Text>
                     <Text style={styles.eligibleSummaryLine}>
-                      {`נקודות ${postApprovalEditing ? 'שיינתנו' : 'שיתווספו'}: ${draftPointsPreview}`}
+                      {`נקודות ${postApprovalEditing ? 'שיינתנו' : 'שיתווספו'}: ${isolateLTR(draftPointsPreview)}`}
                     </Text>
                   </View>
 
@@ -1042,7 +1619,7 @@ export default function AdminReportDetailScreen() {
                             style={[
                               styles.manualTableHeaderText,
                               { flex: column.flex },
-                              column.key === 'is_golden_light' && styles.manualTableHeaderTextCentered,
+                              column.key === 'match_status' && styles.manualTableHeaderTextCentered,
                             ]}>
                             {column.label}
                           </Text>
@@ -1061,10 +1638,20 @@ export default function AdminReportDetailScreen() {
                           </Text>
                           <View style={[styles.manualGoldenLightCell, { flex: MANUAL_COLUMNS[3].flex }]}>
                             <Ionicons
-                              name={item.is_golden_light ? 'checkbox' : 'square-outline'}
+                              name={getManualMatchStatusMeta(item.match_status).icon}
                               size={18}
-                              color={item.is_golden_light ? colors.primary : colors.textMuted}
+                              color={getManualMatchStatusMeta(item.match_status).color}
                             />
+                            <Text
+                              style={[
+                                styles.manualMatchStatusCellText,
+                                { color: getManualMatchStatusMeta(item.match_status).color },
+                              ]}
+                              numberOfLines={1}>
+                              {item.match_status === 'matched'
+                                ? item.matched_product_sku || getManualMatchStatusMeta(item.match_status).label
+                                : getManualMatchStatusMeta(item.match_status).label}
+                            </Text>
                           </View>
                         </View>
                       ))}
@@ -1076,19 +1663,30 @@ export default function AdminReportDetailScreen() {
                           <Text style={styles.manualItemDescription}>{item.description}</Text>
                           <View style={styles.manualItemMetaRow}>
                             {item.quantity != null ? (
-                              <Text style={styles.manualItemMeta}>{`כמות: ${item.quantity}`}</Text>
+                              <Text style={styles.manualItemMeta}>{`כמות: ${isolateLTR(item.quantity)}`}</Text>
                             ) : null}
                             {item.unit_price != null ? (
-                              <Text style={styles.manualItemMeta}>{`מחיר ליח׳: ${item.unit_price}`}</Text>
+                              <Text style={styles.manualItemMeta}>{`מחיר ליח׳: ${isolateLTR(item.unit_price)}`}</Text>
                             ) : null}
                           </View>
                           <View style={styles.manualGoldenLightStackedRow}>
                             <Ionicons
-                              name={item.is_golden_light ? 'checkbox' : 'square-outline'}
+                              name={getManualMatchStatusMeta(item.match_status).icon}
                               size={18}
-                              color={item.is_golden_light ? colors.primary : colors.textMuted}
+                              color={getManualMatchStatusMeta(item.match_status).color}
                             />
-                            <Text style={styles.manualGoldenLightStackedLabel}>מוצר Golden Light</Text>
+                            <Text
+                              style={[
+                                styles.manualGoldenLightStackedLabel,
+                                { color: getManualMatchStatusMeta(item.match_status).color },
+                              ]}>
+                              {item.match_status === 'matched'
+                                ? `${item.matched_product_sku ? isolateLTR(item.matched_product_sku) : ''} — ${item.matched_product_name || ''}`.replace(
+                                    /^ — /,
+                                    '',
+                                  )
+                                : getManualMatchStatusMeta(item.match_status).label}
+                            </Text>
                           </View>
                         </View>
                       ))}
@@ -1118,10 +1716,12 @@ export default function AdminReportDetailScreen() {
             <View style={styles.sectionCard}>
               <Text style={styles.sectionTitle}>פרטי הענקת הנקודות</Text>
               <View style={styles.pointsAwardedInfoBox}>
-                <Text style={styles.pointsAwardedInfoValue}>{`נוספו ${report.pointsAward.points} נקודות`}</Text>
+                <Text style={styles.pointsAwardedInfoValue}>
+                  {`נוספו ${isolateLTR(report.pointsAward.points)} נקודות`}
+                </Text>
                 {report.pointsAward.eligible_pre_vat_amount != null ? (
                   <Text style={styles.pointsAwardedInfoMeta}>
-                    {`סכום מוצרי Golden Light לפני מע״מ: ₪${report.pointsAward.eligible_pre_vat_amount}`}
+                    {`סכום מוצרי ${isolateLTR('Golden Light')}: ${isolateLTR(`₪${report.pointsAward.eligible_pre_vat_amount}`)}`}
                   </Text>
                 ) : null}
               </View>
@@ -1140,9 +1740,9 @@ export default function AdminReportDetailScreen() {
               </Text>
               <View style={styles.eligibleSummaryBox}>
                 <Text style={styles.eligibleSummaryLine}>
-                  {`סכום מוצרי Golden Light לפני מע״מ: ₪${savedEligibleSummary.total.toFixed(2)}`}
+                  {`סכום מוצרי ${isolateLTR('Golden Light')}: ${isolateLTR(`₪${savedEligibleSummary.total.toFixed(2)}`)}`}
                 </Text>
-                <Text style={styles.eligibleSummaryLine}>{`נקודות שיינתנו: ${savedPointsPreview}`}</Text>
+                <Text style={styles.eligibleSummaryLine}>{`נקודות שיינתנו: ${isolateLTR(savedPointsPreview)}`}</Text>
               </View>
               {!hasEligibleAmount ? <Text style={styles.emptyText}>לא קיים סכום מזכה עבור החשבונית</Text> : null}
               {pointsError && !awardModalOpen ? <Text style={styles.errorText}>{pointsError}</Text> : null}
@@ -1210,9 +1810,9 @@ export default function AdminReportDetailScreen() {
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>אישור וסיום טיפול</Text>
             <Text style={styles.modalSubtitle}>
-              {`סכום מזכה לפני מע״מ: ₪${draftEligibleSummary.total.toFixed(2)}`}
+              {`סכום מזכה: ${isolateLTR(`₪${draftEligibleSummary.total.toFixed(2)}`)}`}
             </Text>
-            <Text style={styles.modalSubtitle}>{`נקודות שיתווספו: ${draftPointsPreview}`}</Text>
+            <Text style={styles.modalSubtitle}>{`נקודות שיתווספו: ${isolateLTR(draftPointsPreview)}`}</Text>
             {finalizeError ? <Text style={styles.modalErrorText}>{finalizeError}</Text> : null}
             <View style={styles.modalActionsRow}>
               <Pressable
@@ -1285,9 +1885,9 @@ export default function AdminReportDetailScreen() {
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>האם להעניק את הנקודות?</Text>
             <Text style={styles.modalSubtitle}>
-              {`סכום מוצרי Golden Light לפני מע״מ: ₪${savedEligibleSummary.total.toFixed(2)}`}
+              {`סכום מוצרי ${isolateLTR('Golden Light')}: ${isolateLTR(`₪${savedEligibleSummary.total.toFixed(2)}`)}`}
             </Text>
-            <Text style={styles.modalSubtitle}>{`נקודות לזיכוי: ${savedPointsPreview}`}</Text>
+            <Text style={styles.modalSubtitle}>{`נקודות לזיכוי: ${isolateLTR(savedPointsPreview)}`}</Text>
             {pointsError ? <Text style={styles.modalErrorText}>{pointsError}</Text> : null}
             <View style={styles.modalActionsRow}>
               <Pressable onPress={closeAwardModal} disabled={awarding} style={styles.modalCancelButton} accessibilityRole="button">
@@ -1302,6 +1902,114 @@ export default function AdminReportDetailScreen() {
               />
             </View>
           </View>
+        </View>
+      </Modal>
+
+      {/* Product-match modal: the ONE place a manual receipt line gets
+          linked to a real Golden Light product (or explicitly marked as
+          not one) - and the ONLY place any catalog lookup happens at all.
+          The main row itself (description/quantity/unit_price/status cell)
+          never shows a SKU or barcode field - every lookup, by SKU, barcode,
+          or description/name, goes through the single search box below via
+          getProductSuggestions() (productMatching.js). Reused for every row
+          - identified by matchModal.rowKey - rather than one modal instance
+          per row. Nothing here writes to the database directly: it only
+          updates the in-progress manualRows draft (via
+          selectRowProduct/markRowNotGoldenLight/resetRowMatch above), which
+          is persisted the same way every other row edit already is - via
+          handleFinalize/savePostApprovalEdit calling
+          buildManualItemsPayload() and the existing save RPC. */}
+      <Modal visible={matchModal.open} transparent animationType="fade" onRequestClose={closeMatchModal}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalCard, styles.matchModalCard]}>
+            <Text style={styles.modalTitle}>{`בחירת מוצר ${isolateLTR('Golden Light')}`}</Text>
+            {activeMatchRow ? (
+              <Text style={styles.modalSubtitle} numberOfLines={2}>
+                {activeMatchRow.description || 'שורה ללא תיאור'}
+              </Text>
+            ) : null}
+
+            {catalogError ? <Text style={styles.modalErrorText}>{catalogError}</Text> : null}
+
+            <Text style={styles.modalLabel}>חיפוש מוצר (תיאור, מק״ט או ברקוד)</Text>
+            <AppInput
+              value={matchModal.searchQuery}
+              onChangeText={setMatchModalSearchQuery}
+              placeholder="הקלידו תיאור מוצר, מק״ט או ברקוד..."
+              style={styles.manualFormField}
+            />
+
+            <ScrollView style={styles.matchModalScroll} nestedScrollEnabled>
+              {matchSearchResults.map((product) => (
+                <Pressable
+                  key={product.id}
+                  onPress={() => selectRowProduct(product, 'manual', null)}
+                  style={styles.productPickRow}
+                  accessibilityRole="button">
+                  <View style={styles.productPickTextBox}>
+                    <Text style={styles.productPickSku}>{product.sku}</Text>
+                    <Text style={styles.productPickName} numberOfLines={1}>
+                      {product.name}
+                    </Text>
+                    {product.productFamily ? (
+                      <Text style={styles.productPickSubtitle}>{product.productFamily}</Text>
+                    ) : null}
+                  </View>
+                  <Ionicons name="chevron-back" size={16} color={colors.textMuted} />
+                </Pressable>
+              ))}
+              {matchModal.searchQuery.trim() && matchSearchResults.length === 0 ? (
+                <Text style={styles.emptyText}>לא נמצאו מוצרים תואמים.</Text>
+              ) : null}
+            </ScrollView>
+
+            <View style={styles.matchModalFooterRow}>
+              <Pressable onPress={resetRowMatch} accessibilityRole="button" style={styles.modalCancelButton}>
+                <Text style={styles.modalCancelText}>איפוס</Text>
+              </Pressable>
+              <Pressable onPress={markRowNotGoldenLight} accessibilityRole="button" style={styles.matchNotGoldenLightButton}>
+                <Text style={styles.matchNotGoldenLightButtonText}>{`לא מוצר ${isolateLTR('Golden Light')}`}</Text>
+              </Pressable>
+              <Pressable onPress={closeMatchModal} accessibilityRole="button" style={styles.modalCancelButton}>
+                <Text style={styles.modalCancelText}>סגירה</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Fullscreen click-to-enlarge viewer - the same dark-overlay + small
+          circular top-right X convention already used for the profile
+          avatar preview (see ProfileScreen.js's avatarPreviewVisible
+          modal): a dim backdrop that closes on tap, and the image/close
+          button as its SIBLINGS (not children) so the backdrop's own dim
+          color can never cascade onto them. Deliberately nothing else -
+          no title, date, or other control belongs in this view. */}
+      <Modal visible={previewOpen} transparent animationType="fade" onRequestClose={() => setPreviewOpen(false)}>
+        <View style={styles.previewRoot}>
+          <Pressable
+            style={styles.previewBackdrop}
+            onPress={() => setPreviewOpen(false)}
+            accessibilityRole="button"
+            accessibilityLabel="סגירה"
+          />
+
+          {imageState.status === 'ready' && imageState.url ? (
+            <Image
+              source={{ uri: imageState.url }}
+              style={[styles.previewImage, { width: fullscreenPreviewWidth, height: fullscreenPreviewHeight }]}
+              resizeMode="contain"
+            />
+          ) : null}
+
+          <Pressable
+            style={styles.previewCloseButton}
+            onPress={() => setPreviewOpen(false)}
+            accessibilityRole="button"
+            accessibilityLabel="סגירה"
+            hitSlop={10}>
+            <Ionicons name="close" size={22} color={colors.textOnDark} />
+          </Pressable>
         </View>
       </Modal>
     </AdminShell>
@@ -1368,7 +2076,11 @@ const styles = StyleSheet.create({
     color: colors.text,
     textAlign: 'right',
   },
-  metaLine: {
+  // The ONE small "who + when" line under the heading - deliberately the
+  // only upload metadata shown (see the header card's comment above). Kept
+  // visually secondary: smaller/muted, never competing with the customer
+  // name title above it.
+  uploadMetaLine: {
     ...typography.caption,
     color: colors.textMuted,
     textAlign: 'right',
@@ -1379,21 +2091,61 @@ const styles = StyleSheet.create({
     color: colors.success,
     textAlign: 'right',
   },
+  // The large receipt preview - deliberately NOT a fixed-height box: its
+  // actual size comes from the receiptImage aspectRatio style below (the
+  // image's real aspect ratio, fit within a generous bounding box), so a
+  // portrait phone photo renders tall/narrow and a landscape photo renders
+  // wide, neither ever stretched or cropped. minHeight only guards the
+  // loading/error/PDF placeholder states (imagePlaceholder) and the brief
+  // moment before the image's natural size has resolved.
   imageCard: {
-    minHeight: 260,
+    minHeight: 220,
     backgroundColor: colors.white,
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
     alignItems: 'center',
     justifyContent: 'center',
+    padding: spacing.lg,
     overflow: 'hidden',
     ...shadows.softCard,
   },
+  // Hover/press feedback only matters when the preview is actually
+  // clickable (canOpenPreview) - a subtle tint, not a jarring color change,
+  // keeping the receipt itself the visual focus.
+  imageCardHovered: {
+    borderColor: colors.primary,
+    ...Platform.select({ web: { cursor: 'pointer' } }),
+  },
+  imageCardPressed: {
+    opacity: 0.92,
+  },
+  // Explicit pixel width/height are applied inline once the real natural
+  // size is known (see receiptDisplaySize) - this base style is only the
+  // fallback before that resolves.
   receiptImage: {
     width: '100%',
-    height: '100%',
-    minHeight: 260,
+    minHeight: 220,
+  },
+  // A small, understated "tap to enlarge" affordance in the corner of the
+  // preview - never covers the receipt itself, never competes with it.
+  enlargeHint: {
+    position: 'absolute',
+    bottom: spacing.sm,
+    left: spacing.sm,
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(11,11,11,0.55)',
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+  },
+  enlargeHintText: {
+    ...typography.caption,
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.white,
   },
   imagePlaceholder: {
     alignItems: 'center',
@@ -1404,6 +2156,34 @@ const styles = StyleSheet.create({
   imagePlaceholderText: {
     ...typography.caption,
     color: colors.textMuted,
+  },
+  // Fullscreen click-to-enlarge viewer - same conventions as the profile
+  // avatar preview (see ProfileScreen.js): dark backdrop, backdrop-tap and
+  // top-right X both close it, no other content.
+  previewRoot: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  previewBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(6, 10, 10, 0.9)',
+  },
+  previewImage: {
+    // width/height applied inline per-render (see fullscreenPreviewWidth/
+    // Height above) - a plain fixed bounding box that resizeMode="contain"
+    // then letterboxes the real image within, matching its true ratio.
+  },
+  previewCloseButton: {
+    position: 'absolute',
+    top: spacing.xxl,
+    right: spacing.lg,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   sectionCard: {
     backgroundColor: colors.white,
@@ -1680,6 +2460,90 @@ const styles = StyleSheet.create({
   manualTableCellInput: {
     marginBottom: 0,
   },
+  // On its own, elevating just the manual-item row (below) only wins
+  // against ITS OWN siblings inside the same "פרטי החשבונית" section card
+  // (other rows, the eligible-total summary) - none of that matters if the
+  // section card itself doesn't outrank ITS sibling section cards below it
+  // ("פעולות בדיקה", the points-award cards, ...), since react-native-web
+  // gives every View `position: relative` by default and none of these
+  // cards otherwise establish their own stacking context: the FIRST
+  // ancestor in the chain that has an explicit zIndex is the one whose
+  // rank actually decides paint order against sibling cards. This is what
+  // fixes the dropdown being visually covered by cards further down the
+  // page - applied to the whole "פרטי החשבונית" sectionCard, and only
+  // while a dropdown is actually open (never a permanent elevation).
+  manualSectionElevated: {
+    zIndex: 40,
+  },
+  // Elevates a manual-item row above its own siblings within the SAME
+  // section card (other rows, the eligible-total summary below the list)
+  // while its dropdown is open.
+  manualRowElevated: {
+    zIndex: 30,
+  },
+  // Wraps the description AppInput (in both the wide-table cell and the
+  // narrow-stacked field) so DescriptionSuggestionDropdown, absolutely
+  // positioned below it, anchors to this exact field rather than the row.
+  descriptionCellAnchor: {
+    position: 'relative',
+    zIndex: 1,
+  },
+  // The floating autocomplete panel itself - visually belongs to the
+  // description field it hangs off, not a separate modal/card: white
+  // surface, subtle border, soft shadow, sits directly below the input
+  // without pushing the rest of the table down (position: 'absolute').
+  // Its own zIndex is on top of the elevation chain above
+  // (manualSectionElevated -> manualRowElevated -> this), so it always
+  // paints above the description input itself and anything else in the row.
+  descriptionSuggestionDropdown: {
+    position: 'absolute',
+    top: '100%',
+    left: 0,
+    right: 0,
+    marginTop: 4,
+    zIndex: 50,
+    backgroundColor: colors.white,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    overflow: 'hidden',
+    ...shadows.md,
+  },
+  // Caps the panel's height and scrolls internally once there are more
+  // suggestions than fit, instead of growing indefinitely. A plain View
+  // with overflow scroll here (not the RN ScrollView component) - simpler,
+  // and avoids ScrollView's own internal scroll-container layering
+  // interacting oddly with the zIndex chain above on web.
+  descriptionSuggestionScroll: {
+    maxHeight: 260,
+    ...Platform.select({ web: { overflowY: 'auto' }, default: { overflow: 'scroll' } }),
+  },
+  descriptionSuggestionRow: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    alignItems: 'flex-end',
+    backgroundColor: colors.white,
+    ...Platform.select({ web: { cursor: 'pointer' } }),
+  },
+  descriptionSuggestionRowSeparator: {
+    borderTopWidth: 1,
+    borderTopColor: colors.surfaceMuted,
+  },
+  descriptionSuggestionRowActive: {
+    backgroundColor: colors.primarySoft,
+  },
+  descriptionSuggestionName: {
+    ...typography.caption,
+    fontWeight: '700',
+    color: colors.text,
+    textAlign: 'right',
+  },
+  descriptionSuggestionSku: {
+    ...typography.caption,
+    fontSize: 11,
+    color: colors.primary,
+    textAlign: 'right',
+  },
   manualTableCellText: {
     ...typography.caption,
     color: colors.text,
@@ -1803,6 +2667,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: spacing.xs,
   },
+  manualMatchStatusPressable: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    maxWidth: '100%',
+  },
+  manualMatchStatusCellText: {
+    ...typography.caption,
+    fontWeight: '700',
+    maxWidth: 90,
+  },
   // "מוצר Golden Light" checkbox row (narrow/stacked layout).
   manualGoldenLightStackedRow: {
     flexDirection: 'row-reverse',
@@ -1814,12 +2689,74 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: colors.text,
     textAlign: 'right',
+    flexShrink: 1,
   },
   manualRowWarningText: {
     ...typography.caption,
     fontWeight: '600',
     color: colors.error,
     textAlign: 'right',
+  },
+  // Product-match modal (bחירת מוצר Golden Light).
+  matchModalCard: {
+    maxWidth: 480,
+    maxHeight: '85%',
+  },
+  matchModalScroll: {
+    maxHeight: 320,
+  },
+  productPickRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+    backgroundColor: colors.white,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  productPickTextBox: {
+    flex: 1,
+    gap: 2,
+  },
+  productPickSku: {
+    ...typography.caption,
+    fontWeight: '700',
+    color: colors.text,
+    textAlign: 'right',
+  },
+  productPickName: {
+    ...typography.caption,
+    color: colors.textMuted,
+    textAlign: 'right',
+  },
+  productPickSubtitle: {
+    ...typography.caption,
+    fontSize: 11,
+    color: colors.primary,
+    textAlign: 'right',
+  },
+  matchModalFooterRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.xs,
+    marginTop: spacing.sm,
+  },
+  matchNotGoldenLightButton: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.error,
+  },
+  matchNotGoldenLightButtonText: {
+    ...typography.caption,
+    fontWeight: '700',
+    color: colors.error,
   },
   pointsAwardButton: {
     marginTop: spacing.xs,

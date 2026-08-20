@@ -23,6 +23,14 @@ export default function AppInput({
   // override never accidentally masks the focus/error indicator.
   containerStyle,
   labelStyle,
+  // Optional caller-supplied focus/blur callbacks, invoked ALONGSIDE this
+  // component's own internal focus-ring tracking below (never instead of
+  // it) - purely additive, omitted everywhere except call sites that need
+  // to know focus state for their own purposes (e.g. an inline suggestion
+  // dropdown that should only show while its input is focused). Every
+  // existing call site that doesn't pass these renders exactly as before.
+  onFocus,
+  onBlur,
   ...props
 }) {
   const [isFocused, setIsFocused] = useState(false);
@@ -45,8 +53,14 @@ export default function AppInput({
           secureTextEntry={secureTextEntry}
           selectionColor={colors.primary}
           style={[styles.input, inputStyle, { textAlign, writingDirection }]}
-          onFocus={() => setIsFocused(true)}
-          onBlur={() => setIsFocused(false)}
+          onFocus={(e) => {
+            setIsFocused(true);
+            onFocus?.(e);
+          }}
+          onBlur={(e) => {
+            setIsFocused(false);
+            onBlur?.(e);
+          }}
           {...props}
         />
       </Pressable>

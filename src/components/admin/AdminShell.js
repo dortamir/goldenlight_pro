@@ -3,6 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { useAuth } from '../../context/AuthContext';
 import { colors, radius, spacing, typography } from '../../theme';
+import { isolateLTR } from '../../utils/bidiText';
 
 // Deliberately just two real destinations. A third item ("חשבוניות לבדיקה")
 // that pointed at this same dashboard route was removed as redundant: the
@@ -39,7 +40,7 @@ export default function AdminShell({ activeKey = 'dashboard', children }) {
     <View style={styles.root}>
       <View style={styles.header}>
         <View style={styles.headerInner}>
-          <Text style={styles.brand}>GOLDEN+ · מערכת ניהול</Text>
+          <Text style={styles.brand}>{`${isolateLTR('GOLDEN+')} · מערכת ניהול`}</Text>
 
           <View style={styles.nav}>
             {NAV_ITEMS.map((item) => {

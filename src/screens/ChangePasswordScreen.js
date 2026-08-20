@@ -12,6 +12,7 @@ import PrimaryButton from '../components/common/PrimaryButton';
 import { MIN_PASSWORD_LENGTH, PASSWORD_TOO_SHORT_MESSAGE } from '../constants/validation';
 import { supabase } from '../services/supabase';
 import { colors, radius, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
 
 export default function ChangePasswordScreen() {
   const [newPassword, setNewPassword] = useState('');
@@ -156,7 +157,7 @@ export default function ChangePasswordScreen() {
               <View style={styles.passwordFieldWrapper}>
                 <AppInput
                   label="סיסמה חדשה"
-                  placeholder="לפחות 8 תווים"
+                  placeholder={`לפחות ${isolateLTR(MIN_PASSWORD_LENGTH)} תווים`}
                   secureTextEntry={!showNewPassword}
                   value={newPassword}
                   onChangeText={setNewPassword}

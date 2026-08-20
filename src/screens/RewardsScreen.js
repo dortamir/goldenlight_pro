@@ -9,11 +9,12 @@ import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
 import { getProfile } from '../services/profileService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
 
 const mockRewards = [
   {
     id: 1,
-    title: 'שובר BUYME בסך 100 ₪',
+    title: `שובר ${isolateLTR('BUYME')} בסך ${isolateLTR('100 ₪')}`,
     cost: 1000,
     category: 'שובר מתנה',
   },
@@ -25,13 +26,13 @@ const mockRewards = [
   },
   {
     id: 3,
-    title: 'שובר Golden Light בסך 200 ₪',
+    title: `שובר ${isolateLTR('Golden Light')} בסך ${isolateLTR('200 ₪')}`,
     cost: 2000,
-    category: 'Golden Light',
+    category: isolateLTR('Golden Light'),
   },
 ];
 
-const filters = ['הכל', 'שוברים', 'ציוד', 'Golden Light'];
+const filters = ['הכל', 'שוברים', 'ציוד', isolateLTR('Golden Light')];
 
 export default function RewardsScreen() {
   const { user } = useAuth();
@@ -113,7 +114,7 @@ export default function RewardsScreen() {
 
     const isAvailable = pointsBalance >= reward.cost;
     const missing = formatNumber(Math.max(reward.cost - pointsBalance, 0));
-    return { isAvailable, message: `חסרות ${missing} נק׳` };
+    return { isAvailable, message: `חסרות ${isolateLTR(missing)} נק׳` };
   };
 
   const visibleRewards = useMemo(() => {
@@ -212,23 +213,9 @@ export default function RewardsScreen() {
                         style={[styles.rewardCard, !isAvailable && styles.rewardCardLocked]}>
                         <View style={styles.rewardHeader}>
                           <Text style={styles.rewardCategory}>{reward.category}</Text>
-                          {reward.title.includes('BUYME') ? (
-                            <View style={styles.titleWrap}>
-                              <Text style={styles.rewardTitle}>שובר</Text>
-                              <Text style={styles.rewardTitleInline}>BUYME</Text>
-                              <Text style={styles.rewardTitle}>בסך 100 ₪</Text>
-                            </View>
-                          ) : reward.title.includes('Golden Light') ? (
-                            <View style={styles.titleWrap}>
-                              <Text style={styles.rewardTitle}>שובר</Text>
-                              <Text style={styles.rewardTitleInline}>Golden Light</Text>
-                              <Text style={styles.rewardTitle}>בסך 200 ₪</Text>
-                            </View>
-                          ) : (
-                            <Text style={styles.rewardTitle}>{reward.title}</Text>
-                          )}
+                          <Text style={styles.rewardTitle}>{reward.title}</Text>
                           <View style={styles.rewardCostPill}>
-                            <Text style={styles.rewardCostText}>{reward.cost.toLocaleString('he-IL')} נק׳</Text>
+                            <Text style={styles.rewardCostText}>{`${isolateLTR(reward.cost.toLocaleString('he-IL'))} נק׳`}</Text>
                           </View>
                         </View>
 
@@ -411,13 +398,6 @@ const styles = StyleSheet.create({
   rewardHeader: {
     alignItems: 'flex-end',
   },
-  titleWrap: {
-    flexDirection: 'row-reverse',
-    flexWrap: 'wrap',
-    justifyContent: 'flex-end',
-    alignItems: 'baseline',
-    marginTop: 4,
-  },
   rewardCategory: {
     fontSize: 11,
     fontWeight: '700',
@@ -430,13 +410,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: colors.text,
     textAlign: 'right',
-  },
-  rewardTitleInline: {
-    fontSize: typography.body.fontSize,
-    fontWeight: '700',
-    color: colors.text,
-    textAlign: 'right',
-    marginHorizontal: 4,
+    marginTop: 4,
   },
   // Compact turquoise pill instead of plain muted text - easy to scan at a
   // glance, matching PurchaseScreen's receiptStatusPill treatment.

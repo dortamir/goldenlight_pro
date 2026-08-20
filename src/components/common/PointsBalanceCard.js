@@ -2,6 +2,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { colors, radius, shadows, spacing, typography } from '../../theme';
+import { isolateLTR } from '../../utils/bidiText';
 
 // Loyalty tier -> accent color. Only real, currently-reachable tiers
 // (membership_level is validated/defaulted by the caller - see HomeScreen's
@@ -116,7 +117,7 @@ export default function PointsBalanceCard({
           {tierKey ? (
             <>
               <View style={styles.tierRow}>
-                <Text style={[styles.tierBadge, { color: tierColor }]}>{`G Level · ${tierKey}`}</Text>
+                <Text style={[styles.tierBadge, { color: tierColor }]}>{isolateLTR(`G Level · ${tierKey}`)}</Text>
                 <Text style={styles.tierMeta}>{progressLabel}</Text>
               </View>
               <View style={styles.progressTrack}>

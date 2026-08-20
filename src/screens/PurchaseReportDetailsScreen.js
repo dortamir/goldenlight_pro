@@ -11,6 +11,7 @@ import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
 import { getPurchaseReportById, getReceiptManualItems, getReceiptSignedUrl } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
+import { isolateLTR } from '../utils/bidiText';
 
 function formatReportDate(value) {
   const date = new Date(value);
@@ -58,13 +59,15 @@ function DetectedProductRow({ product }) {
     <View style={styles.productRow}>
       <View style={styles.productRowInfo}>
         <Text style={styles.productName}>{product.name}</Text>
-        <Text style={styles.productSku}>{`מק"ט ${product.sku}`}</Text>
+        <Text style={styles.productSku}>{`מק"ט ${isolateLTR(product.sku)}`}</Text>
       </View>
       <View style={styles.productRowMeta}>
-        <Text style={styles.productMetaText}>{`${product.quantity} יח׳ × ${product.unitPrice} ₪`}</Text>
-        <Text style={styles.productTotalText}>{`סה"כ ${product.lineTotal} ₪`}</Text>
+        <Text style={styles.productMetaText}>
+          {`${isolateLTR(product.quantity)} יח׳ × ${isolateLTR(`${product.unitPrice} ₪`)}`}
+        </Text>
+        <Text style={styles.productTotalText}>{`סה"כ ${isolateLTR(`${product.lineTotal} ₪`)}`}</Text>
         {product.pointsAwarded ? (
-          <Text style={styles.productPointsText}>{`+${product.pointsAwarded} נק׳`}</Text>
+          <Text style={styles.productPointsText}>{`+${isolateLTR(product.pointsAwarded)} נק׳`}</Text>
         ) : null}
       </View>
     </View>
@@ -87,16 +90,16 @@ function ManualItemRow({ item }) {
   const details = [];
 
   if (item.quantity != null) {
-    details.push({ key: 'quantity', label: 'כמות', value: String(item.quantity) });
+    details.push({ key: 'quantity', label: 'כמות', value: isolateLTR(item.quantity) });
   }
   if (item.unit_price != null) {
-    details.push({ key: 'unit_price', label: 'מחיר ליחידה', value: `₪${item.unit_price}` });
+    details.push({ key: 'unit_price', label: 'מחיר ליחידה', value: isolateLTR(`₪${item.unit_price}`) });
   }
   if (item.line_total != null) {
-    details.push({ key: 'line_total', label: 'סה״כ', value: `₪${item.line_total}` });
+    details.push({ key: 'line_total', label: 'סה״כ', value: isolateLTR(`₪${item.line_total}`) });
   }
   if (item.sku) {
-    details.push({ key: 'sku', label: 'מק״ט', value: item.sku });
+    details.push({ key: 'sku', label: 'מק״ט', value: isolateLTR(item.sku) });
   }
 
   return (
@@ -327,7 +330,9 @@ export default function PurchaseReportDetailsScreen() {
             />
             <View style={styles.headerTextBlock}>
               <Text style={styles.title}>פרטי חשבונית</Text>
-              {report ? <Text style={styles.subtitle}>{`הועלתה ב-${formatReportDate(report.created_at)}`}</Text> : null}
+              {report ? (
+                <Text style={styles.subtitle}>{`הועלתה ב-${isolateLTR(formatReportDate(report.created_at))}`}</Text>
+              ) : null}
             </View>
           </View>
         </View>
@@ -361,7 +366,7 @@ export default function PurchaseReportDetailsScreen() {
                   accessibilityLabel="הגדלת תמונת החשבונית">
                   {isPdf ? (
                     <View style={styles.imagePlaceholder}>
-                      <Text style={styles.imagePlaceholderText}>קובץ PDF</Text>
+                      <Text style={styles.imagePlaceholderText}>{`קובץ ${isolateLTR('PDF')}`}</Text>
                     </View>
                   ) : imageState.status === 'ready' && imageState.url ? (
                     <Image source={{ uri: imageState.url }} style={styles.receiptImage} resizeMode="contain" />
@@ -380,7 +385,7 @@ export default function PurchaseReportDetailsScreen() {
                   <View style={styles.summaryTopRow}>
                     <Text style={styles.summaryCardTitle}>חשבונית</Text>
                     <Text style={styles.summaryFilename} numberOfLines={1}>
-                      {report.original_filename || 'חשבונית'}
+                      {report.original_filename ? isolateLTR(report.original_filename) : 'חשבונית'}
                     </Text>
                   </View>
 
@@ -389,7 +394,7 @@ export default function PurchaseReportDetailsScreen() {
                   <View style={styles.summaryBottomRow}>
                     <View style={styles.summaryDataItem}>
                       <Text style={styles.summaryRowLabel}>תאריך העלאה</Text>
-                      <Text style={styles.summaryRowValue}>{formatReportDate(report.created_at)}</Text>
+                      <Text style={styles.summaryRowValue}>{isolateLTR(formatReportDate(report.created_at))}</Text>
                     </View>
                     <View style={styles.summaryDataItem}>
                       <Text style={styles.summaryRowLabel}>סטטוס</Text>
@@ -434,12 +439,12 @@ export default function PurchaseReportDetailsScreen() {
                       <View style={styles.sectionIconChip}>
                         <Ionicons name="cube-outline" size={18} color={colors.primary} />
                       </View>
-                      <Text style={styles.sectionCardTitle}>מוצרי Golden Light שזוהו</Text>
+                      <Text style={styles.sectionCardTitle}>{`מוצרי ${isolateLTR('Golden Light')} שזוהו`}</Text>
                     </View>
                     <View style={styles.pendingBox}>
                       <Text style={styles.pendingBoxTitle}>ממתינים לזיהוי המוצרים בחשבונית</Text>
                       <Text style={styles.pendingBoxSubtitle}>
-                        לאחר סריקת החשבונית יוצגו כאן מוצרי Golden Light שזוהו.
+                        {`לאחר סריקת החשבונית יוצגו כאן מוצרי ${isolateLTR('Golden Light')} שזוהו.`}
                       </Text>
                     </View>
                   </View>
@@ -464,7 +469,9 @@ export default function PurchaseReportDetailsScreen() {
                     </View>
                     {showPoints ? (
                       <View style={styles.pointsAwardedBox}>
-                        <Text style={styles.pointsAwardedValue}>{`+${formatNumber(report.points_awarded)} נק׳`}</Text>
+                        <Text style={styles.pointsAwardedValue}>
+                          {`+${isolateLTR(formatNumber(report.points_awarded))} נק׳`}
+                        </Text>
                         <Text style={styles.pointsAwardedMeta}>נוספו לחשבון</Text>
                       </View>
                     ) : (
@@ -517,7 +524,7 @@ export default function PurchaseReportDetailsScreen() {
         <SafeAreaView style={styles.previewOverlay}>
           <View style={styles.previewHeader}>
             <Text style={styles.previewTitle}>חשבונית</Text>
-            {report ? <Text style={styles.previewDate}>{formatReportDate(report.created_at)}</Text> : null}
+            {report ? <Text style={styles.previewDate}>{isolateLTR(formatReportDate(report.created_at))}</Text> : null}
           </View>
 
           <View style={styles.previewBody}>
