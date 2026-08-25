@@ -69,8 +69,8 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="rewards"
         options={{
-          title: 'הטבות',
-          tabBarLabel: renderTabLabel('הטבות'),
+          title: 'מתנות',
+          tabBarLabel: renderTabLabel('מתנות'),
           tabBarIcon: renderTabIcon('gift-outline', 'gift'),
         }}
       />

@@ -50,19 +50,26 @@ function isPdfFile(name) {
   return /\.pdf$/i.test(String(name || ''));
 }
 
+// STAGE 9: a customer never needs to know which internal pipeline stage
+// their receipt is at - submitted (uploaded, not yet picked up),
+// processing (OCR running), and needs_review (OCR finished, waiting for an
+// admin) are three internal states of the SAME thing from the customer's
+// point of view: "we have it, we're on it". All three collapse to one
+// label/visual treatment - never a technical word like "OCR"/"processing"/
+// "review" that implies the customer should know or care how far along
+// the internal pipeline is. Only approved/rejected are real, distinct,
+// final outcomes worth their own label.
 function getStatusMeta(status) {
   switch (status) {
-    case 'processing':
-      return { label: 'בעיבוד', backgroundColor: colors.primarySoft, textColor: colors.primary };
-    case 'needs_review':
-      return { label: 'נדרשת בדיקה', backgroundColor: colors.surfaceMuted, textColor: colors.textMuted };
     case 'approved':
       return { label: 'אושרה', backgroundColor: colors.successSoft, textColor: colors.success };
     case 'rejected':
       return { label: 'נדחתה', backgroundColor: colors.errorSoft, textColor: colors.error };
     case 'submitted':
+    case 'processing':
+    case 'needs_review':
     default:
-      return { label: 'נשלחה לבדיקה', backgroundColor: colors.primarySoft, textColor: colors.primaryPressed };
+      return { label: 'בבדיקה', backgroundColor: colors.primarySoft, textColor: colors.primaryPressed };
   }
 }
 

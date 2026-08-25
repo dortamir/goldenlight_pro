@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
@@ -33,8 +33,8 @@ const quickActions = [
     icon: 'receipt-outline',
   },
   {
-    title: 'הטבות',
-    subtitle: 'צפייה בהטבות שלך',
+    title: 'מתנות',
+    subtitle: 'צפייה במתנות שלך',
     route: '/(tabs)/rewards',
     icon: 'gift-outline',
   },
@@ -72,47 +72,58 @@ export default function HomeScreen() {
   const sheetMinHeight =
     rootHeight > 0 && heroHeight > 0 ? rootHeight - heroHeight + radius.xl : undefined;
 
-  useEffect(() => {
-    let isMounted = true;
+  // STAGE 9: useFocusEffect, not a plain mount-only useEffect - a customer
+  // whose receipt gets approved elsewhere (while this tab stays mounted in
+  // the background, the normal case for a bottom-tab navigator) must see
+  // their real points_balance on returning to this tab, not a stale value
+  // from whenever it first mounted. Matches the exact pattern
+  // ProfileScreen.js's own profile load already uses, and the pattern
+  // recentReports already uses right below for the same reason. The
+  // backend profile/ledger remains the sole source of truth - this never
+  // adds/estimates points locally, only re-fetches the authoritative value.
+  useFocusEffect(
+    useCallback(() => {
+      let isMounted = true;
 
-    async function loadProfile() {
-      if (!user?.id) {
-        setProfile(null);
-        setLoading(false);
-        setError('');
-        return;
-      }
-
-      try {
-        setLoading(true);
-        setError('');
-        const data = await getProfile(user.id);
-
-        if (!isMounted) {
-          return;
-        }
-
-        setProfile(data);
-      } catch (err) {
-        if (!isMounted) {
-          return;
-        }
-
-        setProfile(null);
-        setError('לא הצלחנו לטעון את נתוני החשבון');
-      } finally {
-        if (isMounted) {
+      async function loadProfile() {
+        if (!user?.id) {
+          setProfile(null);
           setLoading(false);
+          setError('');
+          return;
+        }
+
+        try {
+          setLoading(true);
+          setError('');
+          const data = await getProfile(user.id);
+
+          if (!isMounted) {
+            return;
+          }
+
+          setProfile(data);
+        } catch (err) {
+          if (!isMounted) {
+            return;
+          }
+
+          setProfile(null);
+          setError('לא הצלחנו לטעון את נתוני החשבון');
+        } finally {
+          if (isMounted) {
+            setLoading(false);
+          }
         }
       }
-    }
 
-    loadProfile();
+      loadProfile();
 
-    return () => {
-      isMounted = false;
-    };
-  }, [user?.id]);
+      return () => {
+        isMounted = false;
+      };
+    }, [user?.id]),
+  );
 
   // Thumbnails are only requested for the 2 reports actually rendered in
   // "פעילות אחרונה" (see recentReports.slice below), never the full report
@@ -288,7 +299,7 @@ export default function HomeScreen() {
               membershipLevel={safeMembershipLevel}
               progressPercent={levelInfo.progressPercent ?? 100}
               progressLabel={levelProgressLabel}
-              meta="הטבות יופיעו בהמשך"
+              meta="מתנות יופיעו בהמשך"
               loading={loading}
               error={error}
               onRetry={() =>

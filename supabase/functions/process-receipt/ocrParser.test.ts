@@ -10,7 +10,7 @@
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 
-import { isEmptyOcrResult, normalizeNonNegativeNumber, parseOcrResult } from './ocrParser.ts';
+import { isEmptyOcrResult, normalizeConfidence, normalizeNonNegativeNumber, parseOcrResult } from './ocrParser.ts';
 
 // A: "  מוצר   לד   7W  " -> "מוצר לד 7W"
 Deno.test('trims edges and collapses repeated internal whitespace while preserving Hebrew, English, and digits', () => {
@@ -82,4 +82,65 @@ Deno.test('an OCR result with no raw text and no lines is treated as empty', () 
 Deno.test('an OCR result with real raw text and at least one line is not empty', () => {
   const result = parseOcrResult({ rawText: 'receipt text', lines: [{ text: 'פריט אחד' }] });
   assertEquals(isEmptyOcrResult(result), false);
+});
+
+// --- Stage 1: Azure structured extras (productCode/confidence/rawItem) -----
+
+// CASE A: "600302 9" (a real observed Azure ProductCode value - a stray
+// adjacent row number glued onto the actual SKU) must survive
+// parseOcrResult() unchanged - only whitespace-collapse/trim is applied,
+// exactly like rawText, never a split/clean.
+Deno.test('CASE A: preserves productCode exactly as provided, including an embedded stray token', () => {
+  const result = parseOcrResult({
+    rawText: 'receipt',
+    lines: [{ text: 'ספוט לד', productCode: '  600302   9  ' }],
+  });
+
+  // Same cleanLineText() treatment as rawText: trim + collapse repeated
+  // whitespace only - the single space between "600302" and "9" is
+  // original structure, not collapsed away or split.
+  assertEquals(result.lines[0].productCode, '600302 9');
+});
+
+Deno.test('a missing/non-string productCode becomes null, never an empty string', () => {
+  const result = parseOcrResult({ rawText: 'receipt', lines: [{ text: 'line with no product code' }] });
+  assertEquals(result.lines[0].productCode, null);
+});
+
+// CASE C: a low confidence value is preserved as-is (never dropped,
+// upgraded, or used to filter/hide the row).
+Deno.test('CASE C: preserves a low confidence value exactly, never treating it as authoritative or filtering it out', () => {
+  const result = parseOcrResult({
+    rawText: 'receipt',
+    lines: [{ text: 'unclear row', productCode: 'GX12', productCodeConfidence: 0.12, quantityConfidence: 0.08 }],
+  });
+
+  assertEquals(result.lines[0].productCodeConfidence, 0.12);
+  assertEquals(result.lines[0].quantityConfidence, 0.08);
+  // The row itself is still present - low confidence never removes a line.
+  assertEquals(result.lines.length, 1);
+});
+
+Deno.test('normalizeConfidence accepts any value in [0, 1]', () => {
+  assertEquals(normalizeConfidence(0), 0);
+  assertEquals(normalizeConfidence(0.5), 0.5);
+  assertEquals(normalizeConfidence(1), 1);
+});
+
+Deno.test('normalizeConfidence rejects a value outside [0, 1] as null rather than clamping it', () => {
+  assertEquals(normalizeConfidence(1.5), null);
+  assertEquals(normalizeConfidence(-0.1), null);
+});
+
+Deno.test('normalizeConfidence rejects NaN/Infinity/non-numeric values as null', () => {
+  assertEquals(normalizeConfidence(Number.NaN), null);
+  assertEquals(normalizeConfidence(Number.POSITIVE_INFINITY), null);
+  assertEquals(normalizeConfidence('0.9'), null);
+  assertEquals(normalizeConfidence(undefined), null);
+});
+
+Deno.test('rawItem is passed through verbatim without being parsed or modified', () => {
+  const rawItem = { content: 'raw azure item', confidence: 0.77, boundingRegions: [{ pageNumber: 1 }] };
+  const result = parseOcrResult({ rawText: 'receipt', lines: [{ text: 'line', rawItem }] });
+  assertEquals(result.lines[0].rawItem, rawItem);
 });

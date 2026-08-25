@@ -223,34 +223,95 @@ export async function getAdminReportDetail(reportId) {
     throw ocrError;
   }
 
+  // Deliberately isolated in its own try/catch, same reasoning as
+  // manualItems/pointsAward below: OCR/matching data is a convenience the
+  // admin review form (Stage 4 - see AdminReportDetailScreen's
+  // buildRowsFromOcrEvidence) uses to prefill from when no manual items
+  // exist yet, never a hard requirement for the rest of this screen to
+  // render. A failure here must not block the receipt image/approve-
+  // reject actions, and must not regress the existing manual-entry
+  // workflow for a report with missing/failed OCR.
   let ocrLines = [];
   let lineMatches = [];
 
-  if (ocrResult) {
-    const { data: lines, error: linesError } = await supabase
-      .from('receipt_ocr_lines')
-      .select('id, line_index, raw_text, detected_quantity, detected_unit_price, detected_total')
-      .eq('ocr_result_id', ocrResult.id)
-      .order('line_index', { ascending: true });
+  try {
+    if (ocrResult) {
+      // receipt_ocr_lines' Stage 1 (product_code/*_confidence) and Stage 2
+      // (normalized_product_code/normalized_quantity/normalized_unit_price/
+      // normalized_total/normalization_status/normalization_notes/
+      // source_ocr_line_id/is_recovered_row) columns are deliberately
+      // excluded from the plain customer/admin-shared column grant (see
+      // 021_ocr_azure_document_intelligence.sql/022_ocr_normalization.sql)
+      // - read them through this SECURITY DEFINER RPC instead, the same
+      // pattern already used for receipt_manual_items/
+      // get_admin_manual_items. A plain `.from('receipt_ocr_lines').select(...)`
+      // here would silently come back without any of the Stage 2
+      // normalized fields Stage 4's prefill needs.
+      const { data: lines, error: linesError } = await supabase.rpc('get_admin_ocr_lines', {
+        p_report_id: reportId,
+      });
 
-    if (linesError) {
-      throw linesError;
-    }
-
-    ocrLines = lines || [];
-
-    if (ocrLines.length > 0) {
-      const { data: matches, error: matchesError } = await supabase
-        .from('receipt_line_matches')
-        .select('id, ocr_line_id, match_status, match_method, confidence, matched_text')
-        .in('ocr_line_id', ocrLines.map((line) => line.id));
-
-      if (matchesError) {
-        throw matchesError;
+      if (linesError) {
+        throw linesError;
       }
 
-      lineMatches = matches || [];
+      ocrLines = lines || [];
+
+      if (ocrLines.length > 0) {
+        // product_id is included here (unlike before) - it's already part
+        // of receipt_line_matches' existing column-level grant
+        // (007_create_product_matching.sql), just not previously selected
+        // by this query. Needed so a 'matched' OCR line can be prefilled
+        // with an authoritative product, not just its status label.
+        const { data: matches, error: matchesError } = await supabase
+          .from('receipt_line_matches')
+          .select('id, ocr_line_id, product_id, match_status, match_method, confidence, matched_text')
+          .in('ocr_line_id', ocrLines.map((line) => line.id));
+
+        if (matchesError) {
+          throw matchesError;
+        }
+
+        lineMatches = matches || [];
+
+        // One small, targeted lookup for the matched products' own
+        // sku/name - never the full ~211-row catalog, never a per-row
+        // query. Enriches each matched row in place so the admin review
+        // form can show/prefill the official product identity (Stage 4's
+        // "green matched state + official SKU/product identity")
+        // directly, without a separate round trip per row.
+        const matchedProductIds = [
+          ...new Set(lineMatches.filter((match) => match.product_id).map((match) => match.product_id)),
+        ];
+
+        if (matchedProductIds.length > 0) {
+          const { data: matchedProducts, error: productsError } = await supabase
+            .from('products')
+            .select('id, sku, name')
+            .in('id', matchedProductIds);
+
+          if (productsError) {
+            throw productsError;
+          }
+
+          const productById = new Map((matchedProducts || []).map((product) => [product.id, product]));
+          lineMatches = lineMatches.map((match) => {
+            const product = match.product_id ? productById.get(match.product_id) : null;
+            return {
+              ...match,
+              matched_product_sku: product?.sku || null,
+              matched_product_name: product?.name || null,
+            };
+          });
+        }
+      }
     }
+  } catch (err) {
+    if (__DEV__) {
+      console.warn('[Admin] Failed to load OCR/matching data', { code: err?.code, message: err?.message });
+    }
+    ocrLines = [];
+    lineMatches = [];
   }
 
   // Deliberately isolated in its own try/catch, unlike the reads above: the
@@ -420,6 +481,11 @@ export const REVIEWABLE_STATUSES = ['submitted', 'needs_review'];
 // that's no longer reviewable, ...), the entire call rolls back - there is
 // no way for items to end up saved without the report being approved, or
 // approved without points being awarded. Returns the awarded points.
+//
+// An item left 'unresolved' is allowed and does not block this call (see
+// 024_allow_unresolved_finalize.sql, which removed 023's brief
+// 'unresolved_items_remain' guard) - it is simply excluded from the
+// eligible total the same way a 'not_golden_light' item already is.
 export async function finalizePurchaseReport(reportId, items) {
   if (!supabase || !reportId) {
     throw new Error('report_not_found');
@@ -483,16 +549,23 @@ export async function rejectAdminReport(reportId, reason) {
 // parameter anywhere in this call, and no direct
 // `.from('points_transactions').insert(...)` or `.from('profiles').update(...)`
 // anywhere in this module. The RPC independently loads the report's
-// receipt_manual_items rows marked is_golden_light, sums each row's
-// coalesce(line_total, quantity * unit_price), and recalculates
-// floor(eligible_total * 0.2) in NUMERIC arithmetic - that is the only
-// source of the authoritative value. The RPC itself re-verifies admin
-// membership, that the report is 'approved', that a real eligible amount
-// exists ('no_eligible_amount' otherwise), and that no purchase_reward
-// transaction already exists for it ('points_already_awarded' otherwise) -
-// this function only forwards the report id and lets whatever the RPC
-// raises propagate as a real Error for the screen to translate into safe
-// Hebrew text.
+// receipt_manual_items rows with match_status = 'matched' (is_golden_light
+// is still stored on each row for display, but has been a pure computed
+// mirror of match_status = 'matched' since 019_product_matching_manual_
+// items.sql - it is not read here), sums each row's quantity * unit_price
+// (line_total is always null - see 016_simplify_eligible_amount_calc.sql),
+// and recalculates floor(eligible_total * 0.2) in NUMERIC arithmetic -
+// that is the only source of the authoritative value; it can only ever
+// reflect what the admin actually saved to receipt_manual_items, never a
+// live/OCR value. The RPC itself re-verifies admin membership, that the
+// report is 'approved', that a real eligible amount exists
+// ('no_eligible_amount' otherwise), and that no purchase_reward
+// transaction already exists for it ('points_already_awarded' otherwise,
+// backed by a genuine partial UNIQUE INDEX on points_transactions so a
+// second purchase-reward row for the same report is impossible even under
+// a race) - this function only forwards the report id and lets whatever
+// the RPC raises propagate as a real Error for the screen to translate
+// into safe Hebrew text.
 export async function awardPurchasePoints(reportId) {
   if (!supabase || !reportId) {
     throw new Error('report_not_found');

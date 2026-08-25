@@ -12,6 +12,15 @@ export interface PersistOcrResultParams {
   purchaseReportId: string;
   provider: string;
   parsedResult: ParsedOcrResult;
+  // Which Azure (or future provider) model/version actually produced this
+  // result - written into receipt_ocr_results.model_id/api_version.
+  // Optional so a hypothetical provider without this concept can omit it.
+  modelId?: string | null;
+  apiVersion?: string | null;
+  // The complete raw provider response (Azure's analyzeResult envelope),
+  // written verbatim into receipt_ocr_results.raw_response for
+  // traceability/debugging - never inspected here, only stored.
+  rawResponse?: unknown;
 }
 
 // The persisted shape of one receipt_ocr_lines row, as needed by product
@@ -51,12 +60,16 @@ export interface PersistOcrResultOutcome {
 export async function persistOcrResult(
   params: PersistOcrResultParams,
 ): Promise<PersistOcrResultOutcome> {
-  const { adminClient, purchaseReportId, provider, parsedResult } = params;
+  const { adminClient, purchaseReportId, provider, parsedResult, modelId, apiVersion, rawResponse } = params;
 
   // A + B. Upsert the matching receipt_ocr_results row. Idempotent on the
   // unique purchase_report_id column, so calling this more than once for
   // the same report (retries) updates the same row rather than creating a
-  // duplicate.
+  // duplicate. model_id/api_version/raw_response are written here too -
+  // raw_response is the complete Azure analyzeResult envelope, preserved
+  // verbatim for traceability/debugging (see the task's own "why we need
+  // this" - recovering fields or debugging a missed row later without
+  // rerunning OCR).
   const { data: ocrResult, error: upsertError } = await adminClient
     .from('receipt_ocr_results')
     .upsert(
@@ -64,6 +77,9 @@ export async function persistOcrResult(
         purchase_report_id: purchaseReportId,
         raw_text: parsedResult.rawText,
         provider,
+        model_id: modelId ?? null,
+        api_version: apiVersion ?? null,
+        raw_response: rawResponse ?? null,
         status: 'completed',
         processed_at: new Date().toISOString(),
         error_message: null,
@@ -105,6 +121,16 @@ export async function persistOcrResult(
       detected_quantity: line.detectedQuantity,
       detected_unit_price: line.detectedUnitPrice,
       detected_total: line.detectedTotal,
+      // Structured Azure extras (021_ocr_azure_document_intelligence.sql) -
+      // stored exactly as parseOcrResult() produced them, never
+      // re-validated or "fixed" here.
+      product_code: line.productCode,
+      description_confidence: line.descriptionConfidence,
+      product_code_confidence: line.productCodeConfidence,
+      quantity_confidence: line.quantityConfidence,
+      unit_price_confidence: line.unitPriceConfidence,
+      amount_confidence: line.amountConfidence,
+      raw_item: line.rawItem,
       // normalized_text is intentionally omitted here - the
       // receipt_ocr_lines_set_normalized_text trigger (migration
       // 005_create_receipt_ocr.sql) computes it from raw_text on insert.
@@ -146,16 +172,30 @@ export async function persistOcrResult(
 // currentPurchaseReportStatus guards the purchase_reports update so this
 // never overwrites a status something else (e.g. an admin) may have already
 // moved on to while this call was in flight.
+//
+// modelId/apiVersion/rawResponse are optional and only meaningful when an
+// Azure call was actually attempted (i.e. the failure wasn't
+// 'not_configured') - see index.ts's call sites. rawResponse here is
+// Azure's own error body (safe - Azure never echoes the subscription key
+// back), preserved for the same debugging reasons as a successful result's
+// raw_response.
 export async function markOcrFailed(
   adminClient: SupabaseClient,
   ocrResultId: string,
   purchaseReportId: string,
   currentPurchaseReportStatus: string,
   safeErrorMessage: string,
+  extra?: { modelId?: string | null; apiVersion?: string | null; rawResponse?: unknown },
 ): Promise<void> {
   await adminClient
     .from('receipt_ocr_results')
-    .update({ status: 'failed', error_message: safeErrorMessage })
+    .update({
+      status: 'failed',
+      error_message: safeErrorMessage,
+      model_id: extra?.modelId ?? null,
+      api_version: extra?.apiVersion ?? null,
+      raw_response: extra?.rawResponse ?? null,
+    })
     .eq('id', ocrResultId);
 
   await adminClient
@@ -163,4 +203,34 @@ export async function markOcrFailed(
     .update({ status: 'needs_review' })
     .eq('id', purchaseReportId)
     .eq('status', currentPurchaseReportStatus);
+}
+
+export type ClaimOcrProcessingOutcome =
+  | { ok: true; ocrResultId: string }
+  | { ok: false; reason: 'report_not_found' | 'already_processing' | 'already_completed' | 'unknown'; message: string };
+
+// Wraps public.claim_ocr_processing() (021_ocr_azure_document_intelligence.sql),
+// the single concurrency-safe entry point for starting/retrying an OCR run
+// - see that migration for the full locking behavior. This is the ONLY
+// place index.ts should mark a report "processing"; it replaces the old
+// plain upsert() that had no protection against two near-simultaneous
+// invocations for the same report both proceeding to call Azure.
+export async function claimOcrProcessing(
+  adminClient: SupabaseClient,
+  purchaseReportId: string,
+  forceRetry: boolean,
+): Promise<ClaimOcrProcessingOutcome> {
+  const { data, error } = await adminClient.rpc('claim_ocr_processing', {
+    p_report_id: purchaseReportId,
+    p_force_retry: forceRetry,
+  });
+
+  if (error) {
+    if (error.message === 'report_not_found') return { ok: false, reason: 'report_not_found', message: error.message };
+    if (error.message === 'already_processing') return { ok: false, reason: 'already_processing', message: error.message };
+    if (error.message === 'already_completed') return { ok: false, reason: 'already_completed', message: error.message };
+    return { ok: false, reason: 'unknown', message: error.message };
+  }
+
+  return { ok: true, ocrResultId: data as string };
 }

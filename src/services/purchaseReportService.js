@@ -85,6 +85,45 @@ export async function createPurchaseReport({ id, userId, receiptPath, originalFi
   return data;
 }
 
+// Dispatches OCR processing (supabase/functions/process-receipt) for an
+// already-submitted report - never called until AFTER both the receipt
+// file and the purchase_reports row are durably persisted (see
+// submitPurchaseReceipt below). Carries the normal signed-in user's own
+// session automatically (supabase.functions.invoke() attaches the current
+// Authorization header itself - no service-role key, no Azure key, and no
+// manual header handling here or anywhere in the client).
+//
+// Deliberately fire-and-forget from the caller's perspective: process-receipt
+// runs Azure's full submit+poll cycle server-side (up to ~90s, see
+// ocrProvider.ts), and the customer must not be blocked on the upload
+// screen for that - submitPurchaseReceipt() below does not await this
+// function's full resolution, only starts it. Any failure here (network
+// error, function not reachable, non-2xx response) is caught and logged
+// here and never rejects/propagates - the receipt and purchase_reports row
+// already exist regardless, so the report stays reviewable/retryable
+// through the existing admin flow either way. This never retries on its
+// own (no client-side retry loop) - process-receipt's own
+// claim_ocr_processing() is the single source of truth for whether a retry
+// is safe.
+async function invokeProcessReceiptOcr(purchaseReportId) {
+  if (!supabase || !purchaseReportId) {
+    return;
+  }
+
+  try {
+    console.log('[Purchase] OCR processing invocation dispatched', purchaseReportId);
+    const { error } = await supabase.functions.invoke('process-receipt', {
+      body: { purchaseReportId },
+    });
+
+    if (error) {
+      console.warn('[Purchase] OCR processing invocation failed to start', purchaseReportId, error.message);
+    }
+  } catch (error) {
+    console.warn('[Purchase] OCR processing invocation failed to start', purchaseReportId, error?.message);
+  }
+}
+
 export async function submitPurchaseReceipt({ file, userId }) {
   const purchaseReportId = generatePurchaseReportId();
   const uploadResult = await uploadReceipt({ file, userId, purchaseReportId });
@@ -96,6 +135,13 @@ export async function submitPurchaseReceipt({ file, userId }) {
       receiptPath: uploadResult.storagePath,
       originalFilename: file?.name || file?.fileName || null,
     });
+
+    // Both preconditions are now durably satisfied (receipt uploaded,
+    // purchase_reports row exists with the correct receipt_path) - dispatch
+    // OCR without awaiting its full completion, so the caller's own
+    // success/navigation flow isn't blocked on Azure's response time. Not
+    // awaited on purpose - see invokeProcessReceiptOcr()'s own comment.
+    invokeProcessReceiptOcr(purchaseReportId);
 
     return {
       purchaseReportId,

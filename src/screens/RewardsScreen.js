@@ -1,43 +1,63 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useFocusEffect } from 'expo-router';
+import { useCallback, useState } from 'react';
+import { Image, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
 import PointsBalanceCard from '../components/common/PointsBalanceCard';
 import PrimaryButton from '../components/common/PrimaryButton';
+import { GOLDEN_LIGHT_WEBSITE_URL, POINTS_REDEMPTION_URL } from '../constants/externalLinks';
 import { useAuth } from '../context/AuthContext';
 import { getProfile } from '../services/profileService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { isolateLTR } from '../utils/bidiText';
 
-const mockRewards = [
-  {
-    id: 1,
-    title: `שובר ${isolateLTR('BUYME')} בסך ${isolateLTR('100 ₪')}`,
-    cost: 1000,
-    category: 'שובר מתנה',
-  },
-  {
-    id: 2,
-    title: 'ערכת כלי עבודה מקצועית',
-    cost: 1500,
-    category: 'ציוד מקצועי',
-  },
-  {
-    id: 3,
-    title: `שובר ${isolateLTR('Golden Light')} בסך ${isolateLTR('200 ₪')}`,
-    cost: 2000,
-    category: isolateLTR('Golden Light'),
-  },
-];
+// Opens an external link through the same safe canOpenURL-gated mechanism
+// already used elsewhere in the app (see HelpSupportScreen's
+// openUrlSafely), plus an explicit guard for the not-yet-configured
+// placeholder URLs in constants/externalLinks.js: a null/empty url means
+// "this destination isn't ready yet" and is intentionally a no-op, never a
+// navigation to a fake/invented destination.
+async function openExternalLinkSafely(url) {
+  if (!url) {
+    if (__DEV__) {
+      console.warn('[Rewards] Tried to open a link before its real URL was configured in constants/externalLinks.js.');
+    }
+    return;
+  }
 
-const filters = ['הכל', 'שוברים', 'ציוד', isolateLTR('Golden Light')];
+  try {
+    const canOpen = await Linking.canOpenURL(url);
+    if (canOpen) {
+      await Linking.openURL(url);
+    }
+  } catch (err) {
+    if (__DEV__) {
+      console.warn('[Rewards] Failed to open URL', url, err);
+    }
+  }
+}
+
+// A clearly labeled placeholder "asset slot" for a Golden Light
+// promotional/product photo that doesn't exist in the repo yet - never
+// invented stock photography, never a remote placeholder-image service,
+// just a dashed box marking exactly where a real image belongs and which
+// file to add. Once that file exists at src/assets/images/<fileName>,
+// replace this component's contents with
+// `<Image source={require('../assets/images/<fileName>')} style={styles.imageSlotPhoto} resizeMode="cover" />`.
+function BrandImageSlot({ label, fileName, style }) {
+  return (
+    <View style={[styles.imageSlot, style]}>
+      <Ionicons name="image-outline" size={22} color={colors.textMuted} />
+      <Text style={styles.imageSlotLabel}>{label}</Text>
+      <Text style={styles.imageSlotFileName}>{isolateLTR(fileName)}</Text>
+    </View>
+  );
+}
 
 export default function RewardsScreen() {
   const { user } = useAuth();
-  const [activeFilter, setActiveFilter] = useState('הכל');
-  const [selectedRewardId, setSelectedRewardId] = useState(null);
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -58,72 +78,52 @@ export default function RewardsScreen() {
   const sheetMinHeight =
     rootHeight > 0 && heroHeight > 0 ? rootHeight - heroHeight + radius.xl : undefined;
 
-  useEffect(() => {
-    let isActive = true;
+  // STAGE 9: useFocusEffect, not a plain mount-only useEffect - see the
+  // identical reasoning on HomeScreen's own profile load. A customer
+  // returning to this tab after a receipt is approved elsewhere must see
+  // their real points_balance, not a stale value from first mount. The
+  // backend profile/ledger remains authoritative - this only re-fetches it.
+  useFocusEffect(
+    useCallback(() => {
+      let isActive = true;
 
-    async function loadProfile() {
-      if (!user?.id) {
-        setProfile(null);
-        setLoading(false);
-        setError('');
-        return;
-      }
-
-      try {
-        setLoading(true);
-        setError('');
-        const data = await getProfile(user.id);
-
-        if (isActive) {
-          setProfile(data);
-        }
-      } catch (err) {
-        if (isActive) {
+      async function loadProfile() {
+        if (!user?.id) {
           setProfile(null);
-          setError('לא הצלחנו לטעון את יתרת הנקודות');
-        }
-      } finally {
-        if (isActive) {
           setLoading(false);
+          setError('');
+          return;
+        }
+
+        try {
+          setLoading(true);
+          setError('');
+          const data = await getProfile(user.id);
+
+          if (isActive) {
+            setProfile(data);
+          }
+        } catch (err) {
+          if (isActive) {
+            setProfile(null);
+            setError('לא הצלחנו לטעון את יתרת הנקודות');
+          }
+        } finally {
+          if (isActive) {
+            setLoading(false);
+          }
         }
       }
-    }
 
-    loadProfile();
+      loadProfile();
 
-    return () => {
-      isActive = false;
-    };
-  }, [user?.id]);
+      return () => {
+        isActive = false;
+      };
+    }, [user?.id]),
+  );
 
   const pointsBalance = profile?.points_balance ?? 0;
-
-  const formatNumber = (value) => {
-    const numericValue = Number.isFinite(value) ? value : 0;
-    return numericValue.toLocaleString('he-IL');
-  };
-
-  const getAvailability = (reward) => {
-    if (loading) {
-      return { isAvailable: false, message: 'טוען יתרה...' };
-    }
-
-    if (error) {
-      return { isAvailable: false, message: 'לא ניתן לבדוק זמינות' };
-    }
-
-    const isAvailable = pointsBalance >= reward.cost;
-    const missing = formatNumber(Math.max(reward.cost - pointsBalance, 0));
-    return { isAvailable, message: `חסרות ${isolateLTR(missing)} נק׳` };
-  };
-
-  const visibleRewards = useMemo(() => {
-    if (activeFilter === 'הכל') {
-      return mockRewards;
-    }
-
-    return mockRewards.filter((reward) => reward.category === activeFilter);
-  }, [activeFilter]);
 
   return (
     <View style={styles.root} onLayout={onRootLayout}>
@@ -148,8 +148,10 @@ export default function RewardsScreen() {
         edges={['top', 'left', 'right']}>
         <View style={styles.heroSection} onLayout={onHeroLayout}>
           <View style={styles.heroInner}>
-            <Text style={styles.title}>הטבות</Text>
-            <Text style={styles.subtitle}>ממשו את הנקודות שלכם להטבות ומתנות</Text>
+            <Text style={styles.title}>מתנות</Text>
+            <Text style={styles.subtitle}>
+              {`ממשו את הנקודות שצברתם וגלו את העולם של ${isolateLTR('Golden Light')}`}
+            </Text>
 
             <PointsBalanceCard
               pointsBalance={pointsBalance}
@@ -175,74 +177,77 @@ export default function RewardsScreen() {
             own sheet. */}
         <View style={[styles.sheet, sheetMinHeight ? { minHeight: sheetMinHeight } : null]}>
           <View style={styles.sheetInner}>
-            <View style={styles.filterRow}>
-              {filters.map((filter) => {
-                const active = filter === activeFilter;
-                return (
-                  <Pressable
-                    key={filter}
-                    style={[styles.filterChip, active && styles.filterChipActive]}
-                    onPress={() => setActiveFilter(filter)}>
-                    <Text style={[styles.filterText, active && styles.filterTextActive]}>{filter}</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-
-            <View style={styles.section}>
-              <View style={styles.sectionHeaderRow}>
-                <View style={styles.sectionHeadingGroup}>
-                  <Text style={styles.sectionTitle}>הטבות זמינות</Text>
-                  <View style={styles.sectionAccentDot} />
-                </View>
+            {/* Point redemption CTA - near the top of the sheet, directly
+                under the real points balance above. The destination URL
+                isn't available yet - see POINTS_REDEMPTION_URL in
+                constants/externalLinks.js, the one place to insert it once
+                it exists. openExternalLinkSafely no-ops on a missing URL,
+                so this never navigates anywhere fake in the meantime. No
+                internal points formula/calculation is shown or referenced
+                here - only the real balance already displayed above. */}
+            <Pressable
+              style={({ pressed }) => [styles.redeemCard, pressed && styles.redeemCardPressed]}
+              onPress={() => openExternalLinkSafely(POINTS_REDEMPTION_URL)}
+              accessibilityRole="button"
+              accessibilityLabel="למימוש הנקודות שלך לחץ כאן">
+              <View style={styles.redeemIconWrap}>
+                <Ionicons name="wallet-outline" size={20} color={colors.primary} />
               </View>
+              <Text style={styles.redeemText}>למימוש הנקודות שלך לחץ כאן</Text>
+              <Ionicons name="chevron-back" size={18} color={colors.primary} />
+            </Pressable>
 
-              {visibleRewards.length === 0 ? (
-                <View style={styles.emptyState}>
-                  <Text style={styles.emptyStateText}>אין הטבות להצגה בקטגוריה זו</Text>
-                </View>
-              ) : (
-                <View style={styles.rewardsList}>
-                  {visibleRewards.map((reward) => {
-                    const isSelected = selectedRewardId === reward.id;
-                    const { isAvailable, message: unavailableMessage } = getAvailability(reward);
+            {/* Golden Light brand section - replaces the old per-benefit
+                progress list entirely (no more "X points remaining until
+                Y" cards). A premium branded landing block instead: a dark
+                hero-style card (logo + headline + supporting copy + website
+                CTA) followed by promotional-image slots. The CTA's
+                destination isn't available yet - see
+                GOLDEN_LIGHT_WEBSITE_URL in constants/externalLinks.js, the
+                one place to insert it once it exists; openExternalLinkSafely
+                no-ops until then. */}
+            <View style={styles.brandSection}>
+              <LinearGradient
+                colors={[colors.gradientDarkStart, colors.gradientDarkEnd]}
+                start={{ x: 0.1, y: 0 }}
+                end={{ x: 0.9, y: 1 }}
+                style={styles.brandCard}>
+                <Image
+                  source={require('../assets/images/golden-light-logo-white.png')}
+                  style={styles.brandLogo}
+                  resizeMode="contain"
+                />
+                <Text style={styles.brandHeadline}>{`גלו את העולם של ${isolateLTR('Golden Light')}`}</Text>
+                <Text style={styles.brandSubtext}>
+                  הכירו את המוצרים, הקולקציות והפתרונות שלנו — וקבלו השראה לפרויקט הבא שלכם.
+                </Text>
+                <PrimaryButton
+                  title={`לעולם של ${isolateLTR('Golden Light')}`}
+                  onPress={() => openExternalLinkSafely(GOLDEN_LIGHT_WEBSITE_URL)}
+                  style={styles.brandButton}
+                />
+              </LinearGradient>
 
-                    return (
-                      <View
-                        key={reward.id}
-                        style={[styles.rewardCard, !isAvailable && styles.rewardCardLocked]}>
-                        <View style={styles.rewardHeader}>
-                          <Text style={styles.rewardCategory}>{reward.category}</Text>
-                          <Text style={styles.rewardTitle}>{reward.title}</Text>
-                          <View style={styles.rewardCostPill}>
-                            <Text style={styles.rewardCostText}>{`${isolateLTR(reward.cost.toLocaleString('he-IL'))} נק׳`}</Text>
-                          </View>
-                        </View>
+              {/* Promotional-image slots - see BrandImageSlot above for
+                  exactly how/where to swap each one for a real asset. */}
+              <BrandImageSlot
+                label="באנר ראשי - קולקציה או פרויקט לדוגמה"
+                fileName="golden-light-hero-banner.jpg"
+                style={styles.imageSlotWide}
+              />
 
-                        {isSelected ? (
-                          <View style={styles.selectedState}>
-                            <Text style={styles.selectedTitle}>ההטבה נבחרה למימוש</Text>
-                            <Text style={styles.selectedText}>קוד המימוש יוצג כאן לאחר חיבור המערכת</Text>
-                          </View>
-                        ) : null}
-
-                        {isAvailable ? (
-                          <PrimaryButton
-                            title="מימוש ההטבה"
-                            onPress={() => setSelectedRewardId(reward.id)}
-                            style={styles.actionButton}
-                          />
-                        ) : (
-                          <View style={styles.disabledBox}>
-                            <Ionicons name="lock-closed-outline" size={14} color={colors.textMuted} />
-                            <Text style={styles.disabledText}>{unavailableMessage}</Text>
-                          </View>
-                        )}
-                      </View>
-                    );
-                  })}
-                </View>
-              )}
+              <View style={styles.imageSlotRow}>
+                <BrandImageSlot
+                  label="תמונת מוצר"
+                  fileName="golden-light-showcase-1.jpg"
+                  style={styles.imageSlotSquare}
+                />
+                <BrandImageSlot
+                  label="תמונת מוצר"
+                  fileName="golden-light-showcase-2.jpg"
+                  style={styles.imageSlotSquare}
+                />
+              </View>
             </View>
           </View>
         </View>
@@ -319,168 +324,116 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingTop: spacing.xl,
     paddingBottom: spacing.xxl,
-    gap: spacing.lg,
+    gap: spacing.xl,
   },
-  filterRow: {
+  // The redemption CTA - a single, elegant row rather than a full card, so
+  // it reads as an action, not another content block competing with the
+  // brand section below.
+  redeemCard: {
     flexDirection: 'row-reverse',
-    flexWrap: 'wrap',
+    alignItems: 'center',
     gap: spacing.sm,
-  },
-  filterChip: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: 8,
-    borderRadius: radius.pill,
-    backgroundColor: colors.surfaceMuted,
-    borderWidth: 1,
-    borderColor: colors.border,
-    minHeight: 34,
-    justifyContent: 'center',
-  },
-  filterChipActive: {
-    backgroundColor: colors.primarySoft,
-    borderColor: colors.primary,
-  },
-  filterText: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '600',
-    color: colors.textMuted,
-    textAlign: 'right',
-  },
-  filterTextActive: {
-    color: colors.primary,
-  },
-  section: {
-    gap: spacing.md,
-  },
-  sectionHeaderRow: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-  },
-  sectionHeadingGroup: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    gap: spacing.xs,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    lineHeight: 24,
-    color: colors.text,
-    textAlign: 'right',
-  },
-  sectionAccentDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: colors.primary,
-  },
-  rewardsList: {
-    gap: spacing.md,
-  },
-  rewardCard: {
     backgroundColor: colors.white,
     borderRadius: radius.lg,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
     borderWidth: 1,
     borderColor: colors.border,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    minHeight: 64,
     ...shadows.softCard,
   },
-  // Not-eligible rewards read as quietly muted rather than a fully separate
-  // treatment - a softer border only, no opacity dip on the whole card
-  // (which would also fade the real point-cost text), keeping the
-  // disabledBox below as the one clear "locked" signal.
-  rewardCardLocked: {
-    borderColor: colors.border,
-    shadowOpacity: 0,
-    elevation: 0,
+  redeemCardPressed: {
+    opacity: 0.85,
   },
-  rewardHeader: {
-    alignItems: 'flex-end',
+  redeemIconWrap: {
+    width: 38,
+    height: 38,
+    borderRadius: 13,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  rewardCategory: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: colors.primary,
-    textAlign: 'right',
-    letterSpacing: 0.3,
-  },
-  rewardTitle: {
+  redeemText: {
+    flex: 1,
     fontSize: typography.body.fontSize,
     fontWeight: '700',
     color: colors.text,
     textAlign: 'right',
-    marginTop: 4,
   },
-  // Compact turquoise pill instead of plain muted text - easy to scan at a
-  // glance, matching PurchaseScreen's receiptStatusPill treatment.
-  rewardCostPill: {
-    marginTop: spacing.sm,
-    alignSelf: 'flex-end',
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 4,
-    backgroundColor: colors.primarySoft,
+  brandSection: {
+    gap: spacing.md,
   },
-  rewardCostText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: colors.primaryPressed,
+  brandCard: {
+    borderRadius: radius.xl,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.xxl,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.charcoalBorder,
+    ...shadows.glow,
+  },
+  // Same aspect ratio as the real logo file (see AuthScreenShell's own
+  // 220x110 usage) - only scaled down for this smaller card context, never
+  // stretched/cropped.
+  brandLogo: {
+    width: 120,
+    height: 60,
+    marginBottom: spacing.md,
+  },
+  brandHeadline: {
+    fontSize: typography.heading.fontSize,
+    lineHeight: typography.heading.lineHeight,
+    fontWeight: typography.heading.fontWeight,
+    color: colors.textOnDark,
     textAlign: 'center',
   },
-  selectedState: {
-    marginTop: spacing.md,
-    backgroundColor: colors.primarySoft,
-    borderRadius: radius.md,
-    padding: spacing.md,
+  brandSubtext: {
+    marginTop: spacing.sm,
+    fontSize: typography.body.fontSize,
+    lineHeight: typography.body.lineHeight,
+    color: colors.mutedOnDark,
+    textAlign: 'center',
+    maxWidth: 320,
   },
-  selectedTitle: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '700',
-    color: colors.text,
-    textAlign: 'right',
+  brandButton: {
+    marginTop: spacing.xl,
   },
-  selectedText: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '500',
-    color: colors.textMuted,
-    textAlign: 'right',
-    marginTop: 4,
-  },
-  actionButton: {
-    marginTop: spacing.md,
-  },
-  disabledBox: {
-    flexDirection: 'row-reverse',
+  // Dashed border + muted fill deliberately reads as "placeholder", never
+  // mistakeable for a finished design - see BrandImageSlot above.
+  imageSlot: {
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.xs,
-    marginTop: spacing.md,
-    borderRadius: radius.md,
-    paddingVertical: spacing.md,
-    backgroundColor: colors.surfaceMuted,
-    borderWidth: 1,
+    borderRadius: radius.lg,
+    borderWidth: 1.5,
+    borderStyle: 'dashed',
     borderColor: colors.border,
+    backgroundColor: colors.surfaceMuted,
+    padding: spacing.md,
   },
-  disabledText: {
+  imageSlotWide: {
+    width: '100%',
+    aspectRatio: 16 / 9,
+  },
+  imageSlotRow: {
+    flexDirection: 'row-reverse',
+    gap: spacing.md,
+  },
+  imageSlotSquare: {
+    flex: 1,
+    aspectRatio: 1,
+  },
+  imageSlotLabel: {
     fontSize: typography.caption.fontSize,
     fontWeight: '600',
     color: colors.textMuted,
     textAlign: 'center',
   },
-  emptyState: {
-    minHeight: 96,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.white,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  emptyStateText: {
-    fontSize: typography.caption.fontSize,
+  imageSlotFileName: {
+    fontSize: 10,
     fontWeight: '500',
     color: colors.textMuted,
     textAlign: 'center',
+    opacity: 0.8,
   },
 });

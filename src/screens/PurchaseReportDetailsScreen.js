@@ -35,19 +35,21 @@ function isPdfFile(name) {
   return /\.pdf$/i.test(String(name || ''));
 }
 
+// STAGE 9: matches PurchaseHistoryScreen.js's own getStatusMeta() exactly -
+// see that file's comment for why submitted/processing/needs_review are
+// deliberately one customer-facing label/state, never distinguished. Only
+// approved/rejected are real, final, distinct outcomes.
 function getStatusMeta(status) {
   switch (status) {
-    case 'processing':
-      return { label: 'בעיבוד', backgroundColor: colors.primarySoft, textColor: colors.primary };
-    case 'needs_review':
-      return { label: 'נדרשת בדיקה', backgroundColor: colors.surfaceMuted, textColor: colors.textMuted };
     case 'approved':
       return { label: 'אושרה', backgroundColor: colors.successSoft, textColor: colors.success };
     case 'rejected':
       return { label: 'נדחתה', backgroundColor: colors.errorSoft, textColor: colors.error };
     case 'submitted':
+    case 'processing':
+    case 'needs_review':
     default:
-      return { label: 'נשלחה לבדיקה', backgroundColor: colors.primarySoft, textColor: colors.primaryPressed };
+      return { label: 'בבדיקה', backgroundColor: colors.primarySoft, textColor: colors.primaryPressed };
   }
 }
 
@@ -450,15 +452,22 @@ export default function PurchaseReportDetailsScreen() {
                   </View>
                 ) : null}
 
-                {/* Points logic doesn't exist yet. A pending report keeps
-                    the existing "points will be calculated later" message.
-                    An approved report only shows this section when real
-                    points were actually awarded (showPoints) - otherwise
-                    the section is hidden entirely rather than showing "no
-                    points were earned", which would read as a final
-                    business decision rather than "the points engine simply
-                    isn't built yet". A rejected report never shows this
-                    section at all. */}
+                {/* Points ARE fully wired up server-side (finalize_purchase_
+                    report()/award_purchase_points()) - this section only
+                    ever shows the already-awarded, authoritative
+                    report.points_awarded (never recomputed client-side from
+                    manual items/invoice rows - see purchaseReportService.js's
+                    getPurchaseReportById(), which selects it directly). A
+                    pending report shows the existing "points will be
+                    calculated after approval" message, never how far OCR/
+                    admin review has actually progressed. An approved report
+                    only shows this section when real points were actually
+                    awarded (showPoints) - otherwise the section is hidden
+                    entirely rather than showing "0 points", which could
+                    misleadingly read as a final "you earned nothing"
+                    decision when in fact no points-eligible item existed to
+                    award from. A rejected report never shows this section at
+                    all - see isFinalized/isRejected above. */}
                 {showPoints || isPending ? (
                   <View style={styles.sectionCard}>
                     <View style={styles.sectionHeaderRow}>
@@ -480,13 +489,6 @@ export default function PurchaseReportDetailsScreen() {
                         <Text style={styles.pointsNeutralSubtext}>לאחר אישור החשבונית יתווספו הנקודות לחשבונך.</Text>
                       </View>
                     )}
-                  </View>
-                ) : null}
-
-                {report.status === 'needs_review' ? (
-                  <View style={styles.infoCard}>
-                    <Text style={styles.infoCardTitle}>החשבונית דורשת בדיקה נוספת</Text>
-                    <Text style={styles.infoCardSubtitle}>נעדכן אתכם לאחר השלמת הבדיקה.</Text>
                   </View>
                 ) : null}
 
@@ -830,25 +832,6 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     textAlign: 'center',
     lineHeight: 16,
-  },
-  infoCard: {
-    backgroundColor: colors.primarySoft,
-    borderRadius: radius.lg,
-    padding: spacing.md,
-    alignItems: 'flex-end',
-    gap: 4,
-  },
-  infoCardTitle: {
-    fontSize: typography.body.fontSize,
-    fontWeight: '700',
-    color: colors.text,
-    textAlign: 'right',
-  },
-  infoCardSubtitle: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '500',
-    color: colors.textMuted,
-    textAlign: 'right',
   },
   errorInfoCard: {
     backgroundColor: colors.errorSoft,

@@ -16,6 +16,29 @@ export interface NormalizedOcrLine {
   quantity?: number | null;
   unitPrice?: number | null;
   total?: number | null;
+  // --- Structured extras (Azure Document Intelligence prebuilt-invoice) --
+  // All optional - a provider without these concepts simply omits them.
+  // NEVER cleaned/interpreted by a provider adapter or by this module:
+  // productCode is preserved exactly as the provider returned it (e.g. a
+  // stray adjacent row number like "600302 9" is NOT stripped at this
+  // stage - see the OCR Integration Stage 1 spec's own example). Product
+  // matching, a later stage, is responsible for reconciling this against
+  // the real catalog, not persistence.
+  productCode?: string | null;
+  // Per-field confidence in [0, 1], or null/omitted when the provider
+  // doesn't report one. Never treated as authoritative here - only
+  // persisted so a low-confidence value can be surfaced later.
+  descriptionConfidence?: number | null;
+  productCodeConfidence?: number | null;
+  quantityConfidence?: number | null;
+  unitPriceConfidence?: number | null;
+  amountConfidence?: number | null;
+  // The complete provider-specific raw object for this one row/item
+  // (values, content/source text, confidence, bounding regions/spans -
+  // whatever the provider returned), preserved verbatim for later
+  // debugging/recovery. Never parsed or relied upon by this module - pure
+  // pass-through into receipt_ocr_lines.raw_item.
+  rawItem?: unknown;
 }
 
 export interface NormalizedOcrResult {
@@ -34,6 +57,13 @@ export interface ParsedOcrLine {
   detectedQuantity: number | null;
   detectedUnitPrice: number | null;
   detectedTotal: number | null;
+  productCode: string | null;
+  descriptionConfidence: number | null;
+  productCodeConfidence: number | null;
+  quantityConfidence: number | null;
+  unitPriceConfidence: number | null;
+  amountConfidence: number | null;
+  rawItem: unknown | null;
 }
 
 export interface ParsedOcrResult {
@@ -76,6 +106,25 @@ export function normalizeNonNegativeNumber(value: unknown): number | null {
   return value;
 }
 
+// --- Safe confidence normalization -------------------------------------------
+// A provider's per-field confidence must be a finite number in [0, 1] to be
+// persisted - anything else (missing, NaN, Infinity, a string, or a value
+// outside that range) becomes null. Mirrors normalizeNonNegativeNumber()'s
+// "never guess" posture: a confidence outside the valid range is discarded,
+// never clamped into range (clamping would misrepresent what the provider
+// actually reported).
+export function normalizeConfidence(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+
+  if (value < 0 || value > 1) {
+    return null;
+  }
+
+  return value;
+}
+
 // --- Main parse/validate entry point -----------------------------------------
 // Converts a provider's NormalizedOcrResult into the DB-ready
 // ParsedOcrResult: empty/whitespace-only lines are dropped entirely (not
@@ -96,12 +145,26 @@ export function parseOcrResult(input: NormalizedOcrResult): ParsedOcrResult {
       continue;
     }
 
+    // productCode is cleaned exactly like rawText (trim + collapse repeated
+    // whitespace only) - never split, never stripped of trailing/adjacent
+    // tokens. "600302 9" stays "600302 9": the single internal space is
+    // original structure, not incidental whitespace to collapse away.
+    const cleanedProductCode =
+      typeof sourceLine?.productCode === 'string' ? cleanLineText(sourceLine.productCode) || null : null;
+
     lines.push({
       lineIndex: nextIndex,
       rawText: cleanedText,
       detectedQuantity: normalizeNonNegativeNumber(sourceLine?.quantity),
       detectedUnitPrice: normalizeNonNegativeNumber(sourceLine?.unitPrice),
       detectedTotal: normalizeNonNegativeNumber(sourceLine?.total),
+      productCode: cleanedProductCode,
+      descriptionConfidence: normalizeConfidence(sourceLine?.descriptionConfidence),
+      productCodeConfidence: normalizeConfidence(sourceLine?.productCodeConfidence),
+      quantityConfidence: normalizeConfidence(sourceLine?.quantityConfidence),
+      unitPriceConfidence: normalizeConfidence(sourceLine?.unitPriceConfidence),
+      amountConfidence: normalizeConfidence(sourceLine?.amountConfidence),
+      rawItem: sourceLine?.rawItem ?? null,
     });
 
     nextIndex += 1;

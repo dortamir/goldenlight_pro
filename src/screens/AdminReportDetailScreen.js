@@ -111,6 +111,160 @@ function buildRowsFromManualItems(items) {
     : [createEmptyManualRow()];
 }
 
+// OCR ADMIN REVIEW INTEGRATION (Stage 4): the SEED-ONLY fallback used when
+// a report has no receipt_manual_items yet (see loadDetail below - this is
+// never called once real manual items exist, matching
+// buildRowsFromManualItems' own "authoritative once saved" rule). Builds
+// the exact same editable row shape buildRowsFromManualItems/
+// createEmptyManualRow/applyProductToRow already use - this is not a
+// second row format, just a different initial source for it.
+//
+// One review row per matchable OCR line (ocrLines - from
+// get_admin_ocr_lines(), already includes Stage 2's normalized_* columns)
+// joined in memory to its receipt_line_matches row (lineMatches - already
+// enriched with matched_product_sku/matched_product_name by
+// adminReportService.js, no extra query here). A merged-item PARENT row is
+// never shown on its own - same exact check Stage 3's own
+// wasMergedParent() uses (normalization_notes.merge.detected === true),
+// read-only here, never recomputed differently. Its recovered children
+// (their own real OCR lines, no merge key of their own) are never
+// filtered out by this check and appear like any other row, in the order
+// get_admin_ocr_lines() already returns (line_index ascending - recovered
+// children naturally sort after the original rows, since Stage 2 assigns
+// them a continuing line_index).
+//
+// quantity/unit_price prefer Stage 2's normalized_quantity/
+// normalized_unit_price, falling back to Stage 1's detected_quantity/
+// detected_unit_price only when no normalized value exists - an admin
+// must never see the known-wrong original Azure quantity as the main
+// editable value once Stage 2 already corrected it (see the task's own
+// live example: detected_quantity 195, normalized_quantity 42 - the row
+// must show 42).
+//
+// A 'matched' OCR line (receipt_line_matches.match_status === 'matched'
+// AND a real product_id) is prefilled EXACTLY like applyProductToRow()
+// already treats a manual selection - description/sku overwritten to the
+// matched product's own canonical values, so this row can never violate
+// the existing "matched row's description always equals matched_product_
+// name" invariant updateManualRow() relies on to detect a stale match.
+// match_type is the real Stage 3 match_method (e.g. 'normalized_sku_exact'),
+// never 'manual' - alias learning (save_manual_receipt_items(), gated on
+// match_type === 'manual') is therefore never triggered by an OCR-driven
+// match, only by a genuine admin selection, exactly as before.
+//
+// Anything NOT confidently 'matched' (Stage 3 'needs_review' or
+// 'unmatched' alike - see the Stage 4 task's own CASE B/C, which are
+// deliberately identical here: receipt_line_matches never persists a
+// candidate product for either state today) becomes 'unresolved' - never
+// 'not_golden_light', which stays an explicit admin-only decision. The
+// admin uses the exact same product-match modal/search either way.
+//
+// STAGE 4 FIX: raw_text/normalized_text (receipt_ocr_lines) hold the ENTIRE
+// Azure line item's text - SKU, barcode, quantity, unit price, amount, and
+// description all concatenated (see ocrProvider.ts's extractInvoiceItems():
+// `text = item.content ?? ...`, where item.content is the whole row).
+// raw_item (also returned by get_admin_ocr_lines(), see 021/022) is the
+// COMPLETE Azure item object for that same row - it always carries a
+// structured valueObject.Description field (the actual Azure invoice-item
+// Description field, confidence-scored independently of the row's other
+// fields), which is what an admin review row's description should show.
+// raw_text is only used as a last-resort fallback, for the rare row whose
+// raw_item is missing/shaped unexpectedly.
+function getOcrLineDescription(line) {
+  const descriptionField = line?.raw_item?.valueObject?.Description;
+  const structured =
+    (typeof descriptionField?.valueString === 'string' && descriptionField.valueString.trim()) ||
+    (typeof descriptionField?.content === 'string' && descriptionField.content.trim()) ||
+    '';
+  return structured || (line?.raw_text || '').trim();
+}
+
+function buildRowsFromOcrEvidence(ocrLines, lineMatches) {
+  // Keys normalized to String() on both sides of the join - ocr_line_id/id
+  // are uuid columns on both receipt_line_matches and the get_admin_ocr_lines()
+  // RPC, so they're always plain strings in practice, but this makes the
+  // ocr_line_id -> id association robust to either side ever coming back as
+  // something other than a bare JS string, without changing behavior for the
+  // normal case.
+  const matchByOcrLineId = new Map((lineMatches || []).map((match) => [String(match.ocr_line_id), match]));
+
+  const matchableLines = (ocrLines || []).filter((line) => {
+    const notes = line.normalization_notes;
+    const merge = notes && typeof notes === 'object' ? notes.merge : null;
+    return !(merge && merge.detected === true);
+  });
+
+  if (matchableLines.length === 0) {
+    return [createEmptyManualRow()];
+  }
+
+  return matchableLines.map((line) => {
+    const match = matchByOcrLineId.get(String(line.id)) || null;
+    const isMatched = Boolean(match && match.match_status === 'matched' && match.product_id);
+    const ocrDescription = getOcrLineDescription(line);
+
+    const quantity = line.normalized_quantity != null ? line.normalized_quantity : line.detected_quantity;
+    const unitPrice = line.normalized_unit_price != null ? line.normalized_unit_price : line.detected_unit_price;
+
+    const base = {
+      key: `ocr-${line.id}`,
+      quantity: quantity != null ? String(quantity) : '',
+      unit_price: unitPrice != null ? String(unitPrice) : '',
+      // Prefill-only hint, never sent to save_manual_receipt_items() -
+      // buildManualItemsPayload() below never reads this key. Drives the
+      // subtle "זוהה ותוקן אוטומטית"-style caption in the row render.
+      normalizationStatus: line.normalization_status || null,
+    };
+
+    if (isMatched) {
+      return {
+        ...base,
+        description: match.matched_product_name || ocrDescription,
+        sku: match.matched_product_sku || '',
+        product_id: match.product_id,
+        match_type: match.match_method,
+        match_confidence: match.confidence,
+        match_status: 'matched',
+        matched_product_sku: match.matched_product_sku || null,
+        matched_product_name: match.matched_product_name || null,
+        alias_candidate_text: null,
+      };
+    }
+
+    return {
+      ...base,
+      description: ocrDescription,
+      sku: '',
+      product_id: null,
+      match_type: null,
+      match_confidence: null,
+      match_status: 'unresolved',
+      matched_product_sku: null,
+      matched_product_name: null,
+      alias_candidate_text: null,
+    };
+  });
+}
+
+// Small, non-alarming caption shown under a prefilled row's description -
+// never raw confidence/JSON (see the task's own "screen should remain
+// clean" rule). null (nothing rendered) for a plain manually-entered row
+// or a 'clean'/never-normalized OCR row. Stays visible for the row's
+// lifetime once shown (not cleared on edit) - purely informational, never
+// blocking, and every field it describes remains fully visible/editable
+// either way.
+function getOcrNormalizationHint(status) {
+  switch (status) {
+    case 'corrected':
+      return 'זוהה ותוקן אוטומטית - מומלץ לוודא';
+    case 'needs_review':
+    case 'ambiguous':
+      return 'נדרשת בדיקה - הפרטים לא ודאיים';
+    default:
+      return null;
+  }
+}
+
 // A trimmed numeric-looking string -> a finite number, or null for
 // blank/invalid input. Used only by the lenient live preview below - never
 // by validation, which goes through buildManualItemsPayload()'s stricter
@@ -326,38 +480,11 @@ function getStatusMeta(status) {
   }
 }
 
-function getOcrStatusMeta(status) {
-  switch (status) {
-    case 'completed':
-      return { label: 'הושלם', backgroundColor: colors.successSoft, textColor: colors.success };
-    case 'processing':
-      return { label: 'בעיבוד', backgroundColor: colors.primarySoft, textColor: colors.primary };
-    case 'failed':
-      return { label: 'נכשל', backgroundColor: colors.errorSoft, textColor: colors.error };
-    case 'pending':
-    default:
-      return { label: 'ממתין', backgroundColor: colors.surfaceMuted, textColor: colors.textMuted };
-  }
-}
-
-function getMatchStatusMeta(status) {
-  switch (status) {
-    case 'matched':
-      return { label: 'זוהה מוצר', backgroundColor: colors.successSoft, textColor: colors.success };
-    case 'needs_review':
-      return { label: 'דורש בדיקה', backgroundColor: colors.surfaceMuted, textColor: colors.textMuted };
-    case 'unmatched':
-    default:
-      return { label: 'לא זוהה מוצר', backgroundColor: colors.surfaceMuted, textColor: colors.textMuted };
-  }
-}
-
 // Three-state status for a receipt_manual_items row (019_product_matching_
-// manual_items.sql) - deliberately distinct from getMatchStatusMeta above,
-// which describes an OCR line's receipt_line_matches row. 'unresolved' (the
-// default - nothing decided yet) must never be visually confused with
-// 'not_golden_light' (an explicit admin decision that this line is NOT a
-// Golden Light product) - see the task's "three distinct states" rule.
+// manual_items.sql). 'unresolved' (the default - nothing decided yet) must
+// never be visually confused with 'not_golden_light' (an explicit admin
+// decision that this line is NOT a Golden Light product) - see the task's
+// "three distinct states" rule.
 function getManualMatchStatusMeta(status) {
   switch (status) {
     case 'matched':
@@ -426,6 +553,37 @@ function getActionErrorMessage(err) {
   }
 }
 
+// Every error public.finalize_purchase_report() (and the
+// save_manual_receipt_items()/award_purchase_points() calls it makes
+// internally) can raise BEFORE writing anything that matters - each one
+// rolls back the whole atomic transaction, so a client that sees one of
+// these knows with certainty the report was NOT approved and no points
+// were awarded. Deliberately excludes 'report_not_reviewable' and
+// 'points_already_awarded' - both mean the report already reached a
+// terminal state, which could be from an EARLIER call (ours or someone
+// else's) that actually succeeded - see handleFinalize's read-back-on-
+// ambiguous-failure logic below, which treats anything not in this set the
+// same way.
+const FINALIZE_KNOWN_SAFE_ERRORS = new Set([
+  'not_admin',
+  'report_not_found',
+  'invalid_items',
+  'items_required',
+  'too_many_items',
+  'description_required',
+  'description_too_long',
+  'sku_too_long',
+  'invalid_quantity',
+  'invalid_unit_price',
+  'invalid_line_total',
+  'invalid_is_golden_light',
+  'invalid_match_status',
+  'invalid_product',
+  'match_type_required',
+  'no_eligible_amount',
+  'no_points_to_award',
+]);
+
 // Client-side-only gate for enabling "אישור וסיום טיפול" - re-validates the
 // exact same rules the database will (buildManualItemsPayload, then the
 // Golden-Light-eligibility/points rules public.finalize_purchase_report()
@@ -434,6 +592,15 @@ function getActionErrorMessage(err) {
 // instead of letting the admin submit and only then see a generic failure.
 // The database remains the real authority regardless - this can never be
 // used to bypass anything server-side.
+//
+// STAGE 5 CORRECTION (024_allow_unresolved_finalize.sql): an 'unresolved'
+// row is deliberately NOT a blocker here (023's now-removed
+// 'unresolved_items_remain' guard briefly made it one). A row still sitting
+// at 'unresolved' is simply excluded from the eligible total below - same
+// as 'not_golden_light' - never treated as an error. Only a 'matched' row
+// missing a valid quantity/unit_price, or a report with no positive
+// eligible amount, still blocks finalization (both already existed before
+// Stage 5 and are unrelated to this correction).
 function getFinalizeBlockingReason(rows) {
   let payload;
   try {
@@ -645,10 +812,28 @@ export default function AdminReportDetailScreen() {
         setReport(data);
 
         // A reviewable report's line-item table is always editable - no
-        // separate "start editing" step - preloaded from whatever manual
-        // items already exist (or one empty row for a brand-new report).
+        // separate "start editing" step. Source priority (Stage 4): real
+        // saved receipt_manual_items are ALWAYS authoritative once they
+        // exist - this branch is unchanged from before Stage 4 in that
+        // case, protecting any existing admin edits. Only when NO manual
+        // items exist yet (data.manualItems is empty - a brand-new,
+        // never-saved report) does the form seed itself from OCR +
+        // product-matching evidence instead of a single blank row -
+        // buildRowsFromOcrEvidence() itself falls back to one blank row
+        // when there's no usable OCR evidence either (missing/failed OCR,
+        // or zero matchable lines), so a report with no OCR data behaves
+        // exactly as it always has. OCR is only ever the INITIAL seed:
+        // nothing here writes receipt_manual_items - that still only
+        // happens when the admin actually saves/finalizes (see
+        // saveAdminManualItems/finalizePurchaseReport below), at which
+        // point real manual items start existing and every future load of
+        // this report takes the manual-items branch instead, permanently.
         if (REVIEWABLE_STATUSES.includes(data.status)) {
-          setManualRows(buildRowsFromManualItems(data.manualItems));
+          setManualRows(
+            data.manualItems && data.manualItems.length > 0
+              ? buildRowsFromManualItems(data.manualItems)
+              : buildRowsFromOcrEvidence(data.ocrLines, data.lineMatches),
+          );
         }
 
         if (!isPdfFile(data.original_filename) && data.receipt_path) {
@@ -940,7 +1125,60 @@ export default function AdminReportDetailScreen() {
       if (__DEV__) {
         console.error('[Admin finalize report]', err);
       }
-      setFinalizeError(getActionErrorMessage(err));
+
+      // finalize_purchase_report() is one atomic transaction (save items ->
+      // approve -> recalculate membership -> award points) - there is no
+      // partial state to worry about, but the CLIENT can still fail to
+      // receive the response after the server already committed (a
+      // gateway/network timeout - observed live as an HTTP 504 while the
+      // report had already been approved and awarded in the database).
+      // FINALIZE_KNOWN_SAFE_ERRORS is every error finalize_purchase_report()
+      // can raise BEFORE any write that matters - each one rolls back the
+      // whole transaction, so there is nothing to double-check. Everything
+      // else is treated as ambiguous and read back from the database rather
+      // than guessed at: that deliberately includes 'report_not_reviewable'/
+      // 'points_already_awarded' (which can only mean an earlier call -
+      // ours or someone else's - already finished this exact report), and
+      // any unrecognized error (a raw gateway timeout's body, a network
+      // exception, ...), since either could mean the real outcome was never
+      // actually delivered to us.
+      const isAmbiguous = !FINALIZE_KNOWN_SAFE_ERRORS.has(err?.message);
+
+      if (!isAmbiguous) {
+        setFinalizeError(getActionErrorMessage(err));
+        return;
+      }
+
+      // Read the real, current state back from the database rather than
+      // guessing - never re-invoke finalizePurchaseReport() here, under any
+      // outcome, to avoid ever risking a second attempt at the authoritative
+      // write.
+      let confirmed = null;
+      try {
+        confirmed = await getAdminReportDetail(report.id);
+      } catch (readBackErr) {
+        if (__DEV__) {
+          console.error('[Admin finalize report] read-back failed', readBackErr);
+        }
+      }
+
+      if (confirmed && confirmed.status === 'approved') {
+        // Our call (or an earlier one) already succeeded server-side - this
+        // is a real success, not a failure to report.
+        setFinalizeModalOpen(false);
+        setFinalizeError('');
+        loadDetail();
+      } else if (confirmed) {
+        // Read-back succeeded and genuinely shows the report is still
+        // reviewable (or rejected) - the failure was real.
+        setFinalizeError(getActionErrorMessage(err));
+      } else {
+        // Could not even confirm the outcome - never silently retry;
+        // let the admin refresh and check for themselves.
+        setFinalizeError(
+          'לא ניתן היה לאמת האם האישור הושלם בהצלחה. רעננו את המסך ובדקו את סטטוס החשבונית לפני ניסיון נוסף.',
+        );
+      }
     } finally {
       setFinalizing(false);
     }
@@ -981,6 +1219,13 @@ export default function AdminReportDetailScreen() {
       setRejectReason('');
       loadDetail();
     } catch (err) {
+      // Dev-only: the real Supabase/Postgres error - never shown to the
+      // admin, who only ever sees the safe Hebrew message below. Matches
+      // the same dev-logging convention already used by handleFinalize/
+      // handleAwardPoints above.
+      if (__DEV__) {
+        console.error('[Admin reject report]', err);
+      }
       setRejectError(getActionErrorMessage(err));
     } finally {
       setRejecting(false);
@@ -1113,8 +1358,6 @@ export default function AdminReportDetailScreen() {
   const fullscreenPreviewWidth = Math.max(windowWidth - spacing.xl * 2, 0);
   const fullscreenPreviewHeight = Math.max(windowHeight - spacing.xxl * 2, 0);
   const statusMeta = report ? getStatusMeta(report.status) : null;
-  const ocrStatusMeta = report?.ocrResult ? getOcrStatusMeta(report.ocrResult.status) : null;
-  const matchByLineId = new Map((report?.lineMatches || []).map((match) => [match.ocr_line_id, match]));
   const isReviewable = report ? REVIEWABLE_STATUSES.includes(report.status) : false;
   const isApproved = report?.status === 'approved';
   const isRejected = report?.status === 'rejected';
@@ -1122,6 +1365,14 @@ export default function AdminReportDetailScreen() {
   const hasManualItems = Boolean(report?.manualItems && report.manualItems.length > 0);
   const hasPointsAward = Boolean(report?.pointsAward);
   const isEditingRows = isReviewable || postApprovalEditing;
+  // STAGE 8: single source of truth for "is a row-level control disabled
+  // right now" (a save/finalize request is in flight) - was previously
+  // repeated inline as `manualSaving || finalizing`/`!manualSaving &&
+  // !finalizing` at every input/button call site below. Also drives
+  // rowControlDisabled (a visible dimming), since disabling a control
+  // without any visual change left no indication anything had changed -
+  // see Section 11's "disabled/loading state must be visually clear".
+  const rowsDisabled = manualSaving || finalizing;
 
   // Live draft preview - recomputed on every render from the in-progress
   // manualRows editing state (never persisted), so it updates immediately
@@ -1224,7 +1475,9 @@ export default function AdminReportDetailScreen() {
         <>
           <View style={styles.headerCard}>
             <View style={styles.headerTopRow}>
-              <Text style={styles.customerName}>{report.customerName || 'משתמש ללא שם'}</Text>
+              <Text style={styles.customerName} numberOfLines={1}>
+                {report.customerName || 'משתמש ללא שם'}
+              </Text>
               <View style={[styles.statusBadge, { backgroundColor: statusMeta.backgroundColor }]}>
                 <Text style={[styles.statusBadgeText, { color: statusMeta.textColor }]}>{statusMeta.label}</Text>
               </View>
@@ -1287,45 +1540,6 @@ export default function AdminReportDetailScreen() {
             )}
           </Pressable>
 
-          <View style={styles.sectionCard}>
-            <Text style={styles.sectionTitle}>{`סטטוס זיהוי ${isolateLTR('OCR')}`}</Text>
-            {report.ocrResult ? (
-              <>
-                <View style={[styles.statusBadge, styles.sectionBadge, { backgroundColor: ocrStatusMeta.backgroundColor }]}>
-                  <Text style={[styles.statusBadgeText, { color: ocrStatusMeta.textColor }]}>{ocrStatusMeta.label}</Text>
-                </View>
-
-                {report.ocrLines.length === 0 ? (
-                  <Text style={styles.emptyText}>לא זוהו שורות בחשבונית</Text>
-                ) : (
-                  <View style={styles.linesList}>
-                    {report.ocrLines.map((line) => {
-                      const match = matchByLineId.get(line.id);
-                      const matchMeta = match ? getMatchStatusMeta(match.match_status) : null;
-
-                      return (
-                        <View key={line.id} style={styles.lineRow}>
-                          <Text style={styles.lineText} numberOfLines={2}>
-                            {line.raw_text}
-                          </Text>
-                          {matchMeta ? (
-                            <View style={[styles.statusBadge, { backgroundColor: matchMeta.backgroundColor }]}>
-                              <Text style={[styles.statusBadgeText, { color: matchMeta.textColor }]}>
-                                {matchMeta.label}
-                              </Text>
-                            </View>
-                          ) : null}
-                        </View>
-                      );
-                    })}
-                  </View>
-                )}
-              </>
-            ) : (
-              <Text style={styles.emptyText}>{`עדיין לא בוצע זיהוי ${isolateLTR('OCR')} לחשבונית זו`}</Text>
-            )}
-          </View>
-
           {/* Unified "פרטי החשבונית" section - always editable while the
               report is reviewable (isEditingRows via isReviewable), or
               editable in the clearly separate, points-safe "עריכת טיפול"
@@ -1382,6 +1596,12 @@ export default function AdminReportDetailScreen() {
                       // on the section card itself, applied from
                       // hasOpenDescriptionSuggestions above.
                       const isRowElevated = descriptionSuggestions.length > 0;
+                      // Stage 4: a small, optional caption for a row still
+                      // carrying its original OCR normalization outcome -
+                      // see getOcrNormalizationHint. null for every
+                      // manually-entered row (no normalizationStatus key
+                      // at all) and for a 'clean' OCR row.
+                      const ocrHint = getOcrNormalizationHint(row.normalizationStatus);
 
                       return isWideManualTable ? (
                         <View
@@ -1394,9 +1614,11 @@ export default function AdminReportDetailScreen() {
                               onFocus={() => handleDescriptionFocus(row.key)}
                               onBlur={() => handleDescriptionBlur(row.key)}
                               placeholder="תיאור מוצר"
-                              editable={!manualSaving && !finalizing}
-                              style={styles.manualTableCellInput}
+                              editable={!rowsDisabled}
+                              accessibilityLabel={`תיאור מוצר, שורה ${isolateLTR(index + 1)}`}
+                              style={[styles.manualTableCellInput, rowsDisabled && styles.rowControlDisabled]}
                             />
+                            {ocrHint ? <Text style={styles.ocrNormalizationHintText}>{ocrHint}</Text> : null}
                             <DescriptionSuggestionDropdown
                               suggestions={descriptionSuggestions}
                               onSelect={handleSelectDescriptionSuggestion}
@@ -1408,10 +1630,11 @@ export default function AdminReportDetailScreen() {
                               onChangeText={(value) => updateManualRow(row.key, 'quantity', value)}
                               placeholder="כמות"
                               keyboardType="decimal-pad"
-                              editable={!manualSaving && !finalizing}
+                              editable={!rowsDisabled}
+                              accessibilityLabel={`כמות, שורה ${isolateLTR(index + 1)}`}
                               textAlign="left"
                               writingDirection="ltr"
-                              style={styles.manualTableCellInput}
+                              style={[styles.manualTableCellInput, rowsDisabled && styles.rowControlDisabled]}
                             />
                           </View>
                           <View style={{ flex: MANUAL_COLUMNS[2].flex }}>
@@ -1420,20 +1643,21 @@ export default function AdminReportDetailScreen() {
                               onChangeText={(value) => updateManualRow(row.key, 'unit_price', value)}
                               placeholder="מחיר ליחידה"
                               keyboardType="decimal-pad"
-                              editable={!manualSaving && !finalizing}
+                              editable={!rowsDisabled}
+                              accessibilityLabel={`מחיר ליחידה, שורה ${isolateLTR(index + 1)}`}
                               textAlign="left"
                               writingDirection="ltr"
-                              style={styles.manualTableCellInput}
+                              style={[styles.manualTableCellInput, rowsDisabled && styles.rowControlDisabled]}
                             />
                           </View>
                           <View style={[styles.manualGoldenLightCell, { flex: MANUAL_COLUMNS[3].flex }]}>
                             <Pressable
                               onPress={() => openMatchModal(row.key)}
-                              disabled={manualSaving || finalizing}
+                              disabled={rowsDisabled}
                               accessibilityRole="button"
-                              accessibilityLabel="בחירת מוצר Golden Light"
+                              accessibilityLabel={`בחירת מוצר Golden Light, שורה ${isolateLTR(index + 1)}`}
                               hitSlop={8}
-                              style={styles.manualMatchStatusPressable}>
+                              style={[styles.manualMatchStatusPressable, rowsDisabled && styles.rowControlDisabled]}>
                               <Ionicons
                                 name={getManualMatchStatusMeta(row.match_status).icon}
                                 size={20}
@@ -1463,10 +1687,10 @@ export default function AdminReportDetailScreen() {
                           </View>
                           <Pressable
                             onPress={() => removeManualRow(row.key)}
-                            disabled={manualSaving || finalizing}
-                            style={styles.manualTableDeleteCell}
+                            disabled={rowsDisabled}
+                            style={[styles.manualTableDeleteCell, rowsDisabled && styles.rowControlDisabled]}
                             accessibilityRole="button"
-                            accessibilityLabel="מחיקת שורה"
+                            accessibilityLabel={`מחיקת שורה ${isolateLTR(index + 1)}`}
                             hitSlop={8}>
                             <Ionicons name="trash-outline" size={16} color={colors.error} />
                           </Pressable>
@@ -1477,10 +1701,11 @@ export default function AdminReportDetailScreen() {
                             <Text style={styles.manualStackedRowIndex}>{`שורה ${isolateLTR(index + 1)}`}</Text>
                             <Pressable
                               onPress={() => removeManualRow(row.key)}
-                              disabled={manualSaving || finalizing}
+                              disabled={rowsDisabled}
                               accessibilityRole="button"
-                              accessibilityLabel="מחיקת שורה"
-                              hitSlop={8}>
+                              accessibilityLabel={`מחיקת שורה ${isolateLTR(index + 1)}`}
+                              hitSlop={8}
+                              style={rowsDisabled && styles.rowControlDisabled}>
                               <Ionicons name="trash-outline" size={16} color={colors.error} />
                             </Pressable>
                           </View>
@@ -1491,9 +1716,10 @@ export default function AdminReportDetailScreen() {
                               onChangeText={(value) => updateManualRow(row.key, 'description', value)}
                               onFocus={() => handleDescriptionFocus(row.key)}
                               onBlur={() => handleDescriptionBlur(row.key)}
-                              editable={!manualSaving && !finalizing}
-                              style={styles.manualFormField}
+                              editable={!rowsDisabled}
+                              style={[styles.manualFormField, rowsDisabled && styles.rowControlDisabled]}
                             />
+                            {ocrHint ? <Text style={styles.ocrNormalizationHintText}>{ocrHint}</Text> : null}
                             <DescriptionSuggestionDropdown
                               suggestions={descriptionSuggestions}
                               onSelect={handleSelectDescriptionSuggestion}
@@ -1504,29 +1730,29 @@ export default function AdminReportDetailScreen() {
                               label="כמות"
                               value={row.quantity}
                               onChangeText={(value) => updateManualRow(row.key, 'quantity', value)}
-                              editable={!manualSaving && !finalizing}
+                              editable={!rowsDisabled}
                               keyboardType="decimal-pad"
                               textAlign="left"
                               writingDirection="ltr"
-                              style={styles.manualFormFieldHalf}
+                              style={[styles.manualFormFieldHalf, rowsDisabled && styles.rowControlDisabled]}
                             />
                             <AppInput
                               label="מחיר ליחידה"
                               value={row.unit_price}
                               onChangeText={(value) => updateManualRow(row.key, 'unit_price', value)}
-                              editable={!manualSaving && !finalizing}
+                              editable={!rowsDisabled}
                               keyboardType="decimal-pad"
                               textAlign="left"
                               writingDirection="ltr"
-                              style={styles.manualFormFieldHalf}
+                              style={[styles.manualFormFieldHalf, rowsDisabled && styles.rowControlDisabled]}
                             />
                           </View>
                           <Pressable
                             onPress={() => openMatchModal(row.key)}
-                            disabled={manualSaving || finalizing}
-                            style={styles.manualGoldenLightStackedRow}
+                            disabled={rowsDisabled}
+                            style={[styles.manualGoldenLightStackedRow, rowsDisabled && styles.rowControlDisabled]}
                             accessibilityRole="button"
-                            accessibilityLabel="בחירת מוצר Golden Light">
+                            accessibilityLabel={`בחירת מוצר Golden Light, שורה ${isolateLTR(index + 1)}`}>
                             <Ionicons
                               name={getManualMatchStatusMeta(row.match_status).icon}
                               size={20}
@@ -1559,9 +1785,10 @@ export default function AdminReportDetailScreen() {
 
                   <Pressable
                     onPress={addManualRow}
-                    disabled={manualSaving || finalizing}
-                    style={styles.addRowButton}
-                    accessibilityRole="button">
+                    disabled={rowsDisabled}
+                    style={[styles.addRowButton, rowsDisabled && styles.rowControlDisabled]}
+                    accessibilityRole="button"
+                    accessibilityLabel="הוספת שורה">
                     <Ionicons name="add" size={16} color={colors.primary} />
                     <Text style={styles.addRowButtonText}>הוספת שורה</Text>
                   </Pressable>
@@ -1721,7 +1948,14 @@ export default function AdminReportDetailScreen() {
                 </Text>
                 {report.pointsAward.eligible_pre_vat_amount != null ? (
                   <Text style={styles.pointsAwardedInfoMeta}>
-                    {`סכום מוצרי ${isolateLTR('Golden Light')}: ${isolateLTR(`₪${report.pointsAward.eligible_pre_vat_amount}`)}`}
+                    {/* STAGE 8: Number(...).toFixed(2), matching every other
+                        eligible-amount display on this screen - this is the
+                        one value that comes straight from the DB's NUMERIC
+                        column (via report.pointsAward) rather than a
+                        client-computed .toFixed(2) preview, and could
+                        otherwise show a different number of decimal places
+                        than the rest of the screen. */}
+                    {`סכום מוצרי ${isolateLTR('Golden Light')}: ${isolateLTR(`₪${Number(report.pointsAward.eligible_pre_vat_amount).toFixed(2)}`)}`}
                   </Text>
                 ) : null}
               </View>
@@ -1844,6 +2078,7 @@ export default function AdminReportDetailScreen() {
               onChangeText={setRejectReason}
               placeholder="הזינו את הסיבה לדחיית החשבונית"
               placeholderTextColor={colors.textMuted}
+              accessibilityLabel="סיבת הדחייה"
               multiline
               numberOfLines={4}
               maxLength={1000}
@@ -1936,6 +2171,7 @@ export default function AdminReportDetailScreen() {
               value={matchModal.searchQuery}
               onChangeText={setMatchModalSearchQuery}
               placeholder="הקלידו תיאור מוצר, מק״ט או ברקוד..."
+              accessibilityLabel="חיפוש מוצר Golden Light"
               style={styles.manualFormField}
             />
 
@@ -2075,6 +2311,11 @@ const styles = StyleSheet.create({
     ...typography.title,
     color: colors.text,
     textAlign: 'right',
+    // STAGE 8: a long name must truncate (numberOfLines=1 in the render)
+    // rather than push the status badge off the narrow-mobile viewport -
+    // RN doesn't shrink an unconstrained Text by default, so without this
+    // a long name could overflow headerTopRow horizontally.
+    flexShrink: 1,
   },
   // The ONE small "who + when" line under the heading - deliberately the
   // only upload metadata shown (see the header card's comment above). Kept
@@ -2200,9 +2441,6 @@ const styles = StyleSheet.create({
     color: colors.text,
     textAlign: 'right',
   },
-  sectionBadge: {
-    alignSelf: 'flex-end',
-  },
   statusBadge: {
     borderRadius: radius.pill,
     paddingHorizontal: spacing.sm,
@@ -2213,25 +2451,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     textAlign: 'center',
-  },
-  linesList: {
-    gap: spacing.xs,
-  },
-  lineRow: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.sm,
-    borderTopWidth: 1,
-    borderTopColor: colors.surfaceMuted,
-    paddingTop: spacing.xs,
-  },
-  lineText: {
-    flex: 1,
-    ...typography.caption,
-    color: colors.text,
-    textAlign: 'right',
-    writingDirection: 'rtl',
   },
   // Final review actions.
   actionsRow: {
@@ -2459,6 +2678,16 @@ const styles = StyleSheet.create({
   },
   manualTableCellInput: {
     marginBottom: 0,
+  },
+  // STAGE 8: a row-level control (input/button) disabled while a
+  // save/finalize request is in flight (rowsDisabled) is otherwise
+  // visually identical to an active one, even though it no longer
+  // responds to touch - dims it so "this is temporarily locked" is
+  // obvious without relying on trying to interact with it. Matches
+  // PrimaryButton's own existing disabled treatment (opacity 0.7) closely
+  // enough to read as the same convention, not a new one.
+  rowControlDisabled: {
+    opacity: 0.55,
   },
   // On its own, elevating just the manual-item row (below) only wins
   // against ITS OWN siblings inside the same "פרטי החשבונית" section card
@@ -2696,6 +2925,18 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: colors.error,
     textAlign: 'right',
+  },
+  // Stage 4 OCR prefill hint - deliberately muted/non-alarming (never
+  // colors.error, which manualRowWarningText above already owns for a
+  // real blocking problem) and small, so a still-untouched OCR row reads
+  // as "worth a glance", not "broken". See getOcrNormalizationHint.
+  ocrNormalizationHintText: {
+    ...typography.caption,
+    fontSize: 11,
+    fontWeight: '500',
+    color: colors.textMuted,
+    textAlign: 'right',
+    marginTop: 2,
   },
   // Product-match modal (bחירת מוצר Golden Light).
   matchModalCard: {
