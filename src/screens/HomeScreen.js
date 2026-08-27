@@ -43,7 +43,19 @@ const quickActions = [
 ];
 
 export default function HomeScreen() {
-  const { user } = useAuth();
+  // STAGE 15.2 COLD-START FIX: `authLoading` (AuthContext's own `loading`)
+  // is pulled in explicitly and used to gate every data fetch below - not
+  // just `user?.id`. Routing already prevents this screen from mounting
+  // while auth is loading (app/index.js, app/(tabs)/_layout.js), but that
+  // gate is on a DIFFERENT component tree than this one; relying on it
+  // alone left this screen with no explicit signal of its own to react to
+  // "auth just became ready" as an event, only to `user?.id`'s scalar
+  // value - which, per the cold-start reports, was not always enough by
+  // itself. Depending on `authLoading` directly here means this screen's
+  // own effects re-run the moment auth settles even in an edge case where
+  // it were ever reached while still marked loading, instead of silently
+  // firing a request against not-yet-fully-settled auth state.
+  const { user, loading: authLoading } = useAuth();
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -89,7 +101,21 @@ export default function HomeScreen() {
 
       async function loadProfile() {
         if (__DEV__) {
-          console.log('[Home] Focus - loadProfile start', { hasUserId: Boolean(user?.id) });
+          console.log('[Home] Focus - loadProfile start', { authLoading, hasUserId: Boolean(user?.id) });
+        }
+
+        // Auth itself may still be settling (e.g. immediately after a cold
+        // start's session restoration reaches this screen through some
+        // future navigation path this screen doesn't control) - never issue
+        // a request against not-yet-ready auth state, and leave `loading`
+        // as-is (still true from its initial state) rather than flipping it
+        // false with nothing real to show, which would let the points card
+        // render a bare "0" as if it were the authoritative balance.
+        if (authLoading) {
+          if (__DEV__) {
+            console.log('[Home] loadProfile deferred - auth still loading');
+          }
+          return;
         }
 
         if (!user?.id) {
@@ -136,7 +162,7 @@ export default function HomeScreen() {
       return () => {
         isMounted = false;
       };
-    }, [user?.id]),
+    }, [user?.id, authLoading]),
   );
 
   // Thumbnails are only requested for the 2 reports actually rendered in
@@ -184,7 +210,18 @@ export default function HomeScreen() {
 
       async function loadReports() {
         if (__DEV__) {
-          console.log('[Home] Focus - loadReports start', { hasUserId: Boolean(user?.id) });
+          console.log('[Home] Focus - loadReports start', { authLoading, hasUserId: Boolean(user?.id) });
+        }
+
+        // Same auth-readiness gate as loadProfile above - never fetch
+        // against not-yet-settled auth state, and leave reportsLoading as
+        // its current (initially true) value instead of clearing it with
+        // nothing real to show.
+        if (authLoading) {
+          if (__DEV__) {
+            console.log('[Home] loadReports deferred - auth still loading');
+          }
+          return;
         }
 
         if (!user?.id) {
@@ -226,7 +263,7 @@ export default function HomeScreen() {
       return () => {
         isActiveRef.current = false;
       };
-    }, [user?.id, loadThumbnails]),
+    }, [user?.id, authLoading, loadThumbnails]),
   );
 
   const firstName = (() => {
