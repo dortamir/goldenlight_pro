@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import * as Linking from 'expo-linking';
 
-import { clearAvatarUrlCache } from '../services/profileService';
+import { clearAvatarUrlCache, clearProfileCache } from '../services/profileService';
 import { clearReceiptUrlCache } from '../services/purchaseReportService';
 import { supabase } from '../services/supabase';
 
@@ -347,6 +347,7 @@ export function AuthProvider({ children }) {
     // previous session indefinitely.
     clearReceiptUrlCache();
     clearAvatarUrlCache();
+    clearProfileCache();
 
     setSession(null);
     setUser(null);

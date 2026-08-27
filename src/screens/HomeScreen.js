@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
@@ -62,6 +62,19 @@ export default function HomeScreen() {
   const [reports, setReports] = useState([]);
   const [reportsLoading, setReportsLoading] = useState(true);
   const [reportsError, setReportsError] = useState('');
+  // STAGE 15.3: tracks whether a profile/reports fetch has ever SUCCEEDED
+  // this session, independent of React state/re-renders (a ref, not state,
+  // so it can't itself trigger a re-render or become a useCallback
+  // dependency - putting `profile`/`reports` state directly in
+  // loadProfile/loadReports' own dependency arrays would recreate those
+  // callbacks on every successful fetch, which would re-trigger
+  // useFocusEffect's own re-run-while-focused behavior and fetch in a
+  // loop). Used to distinguish the true first load (full-screen
+  // spinner) from a background refresh-on-focus (last-good data stays
+  // visible the whole time, per Stage 15.3's stale-while-refresh
+  // requirement).
+  const hasLoadedProfileRef = useRef(false);
+  const hasLoadedReportsRef = useRef(false);
   const [previewUrls, setPreviewUrls] = useState({});
   const [rootHeight, setRootHeight] = useState(0);
   const [heroHeight, setHeroHeight] = useState(0);
@@ -119,14 +132,26 @@ export default function HomeScreen() {
         }
 
         if (!user?.id) {
+          hasLoadedProfileRef.current = false;
           setProfile(null);
           setLoading(false);
           setError('');
           return;
         }
 
+        // STAGE 15.3: only the TRUE first load blocks with the full-screen
+        // spinner. A background refresh-on-focus (points/membership may
+        // have changed elsewhere) keeps showing the last-good profile the
+        // whole time instead of flashing back to a loading state on every
+        // tab revisit - this is what actually made switching tabs feel
+        // slow, not the network request itself (already fast per prior
+        // stages' fixes).
+        const isInitialLoad = !hasLoadedProfileRef.current;
+
         try {
-          setLoading(true);
+          if (isInitialLoad) {
+            setLoading(true);
+          }
           setError('');
           const data = await getProfile(user.id);
 
@@ -135,21 +160,29 @@ export default function HomeScreen() {
           }
 
           if (__DEV__) {
-            console.log('[Home] loadProfile succeeded');
+            console.log('[Home] loadProfile succeeded', { isInitialLoad });
           }
 
           setProfile(data);
+          hasLoadedProfileRef.current = true;
         } catch (err) {
           if (!isMounted) {
             return;
           }
 
           if (__DEV__) {
-            console.warn('[Home] loadProfile failed', { code: err?.code, message: err?.message });
+            console.warn('[Home] loadProfile failed', { isInitialLoad, code: err?.code, message: err?.message });
           }
 
-          setProfile(null);
-          setError('לא הצלחנו לטעון את נתוני החשבון');
+          // A background-refresh failure keeps the last-good profile
+          // visible (stale-while-refresh) rather than replacing it with an
+          // error card - the data on screen is still real, just not
+          // reconfirmed this time. Only the true first load, which has
+          // nothing valid to fall back to, shows the error state.
+          if (isInitialLoad) {
+            setProfile(null);
+            setError('לא הצלחנו לטעון את נתוני החשבון');
+          }
         } finally {
           if (isMounted) {
             setLoading(false);
@@ -225,31 +258,45 @@ export default function HomeScreen() {
         }
 
         if (!user?.id) {
+          hasLoadedReportsRef.current = false;
           setReports([]);
           setReportsLoading(false);
           setReportsError('');
           return;
         }
 
+        // STAGE 15.3: same true-first-load-only spinner as loadProfile
+        // above - a background refresh keeps the last-good recent-activity
+        // list visible instead of blanking it to a spinner on every focus.
+        const isInitialLoad = !hasLoadedReportsRef.current;
+
         try {
-          setReportsLoading(true);
+          if (isInitialLoad) {
+            setReportsLoading(true);
+          }
           setReportsError('');
           const data = await getMyPurchaseReports(user.id);
 
           if (isActiveRef.current) {
             if (__DEV__) {
-              console.log('[Home] loadReports succeeded', { count: data.length });
+              console.log('[Home] loadReports succeeded', { isInitialLoad, count: data.length });
             }
             setReports(data);
+            hasLoadedReportsRef.current = true;
             loadThumbnails(data.slice(0, 2), isActiveRef);
           }
         } catch (err) {
           if (isActiveRef.current) {
             if (__DEV__) {
-              console.warn('[Home] loadReports failed', { code: err?.code, message: err?.message });
+              console.warn('[Home] loadReports failed', { isInitialLoad, code: err?.code, message: err?.message });
             }
-            setReports([]);
-            setReportsError('לא הצלחנו לטעון את הפעילות האחרונה');
+            // Background-refresh failure keeps the last-good list visible
+            // (stale-while-refresh) - only the true first load, with
+            // nothing to fall back to, shows the error state.
+            if (isInitialLoad) {
+              setReports([]);
+              setReportsError('לא הצלחנו לטעון את הפעילות האחרונה');
+            }
           }
         } finally {
           if (isActiveRef.current) {

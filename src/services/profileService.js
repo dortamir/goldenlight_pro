@@ -64,31 +64,117 @@ export function clearAvatarUrlCache() {
   avatarUrlInflight.clear();
 }
 
+// STAGE 15.3: short-lived profile-row cache + in-flight de-duplication,
+// mirroring the avatar/receipt signed-URL cache pattern above. Home,
+// Rewards, and Profile each independently call getProfile() on their own
+// focus - switching between them in quick succession (Home -> Rewards ->
+// Profile -> Home) was issuing 3-4 separate, near-simultaneous requests for
+// the exact same profile row. The TTL is deliberately short (unlike the
+// hour-long avatar-URL cache) - long enough to de-duplicate a quick tab
+// switch, short enough that returning to any screen more than a few seconds
+// later (the realistic case for "an admin approved my receipt while I was
+// looking elsewhere") always gets a fresh fetch. The backend row remains
+// the sole source of truth - this only avoids redundant round-trips for the
+// exact same data within the same few seconds; it never invents or
+// estimates a value.
+const PROFILE_CACHE_TTL_MS = 8 * 1000;
+const profileCache = new Map();
+const profileInflight = new Map();
+
+// Synchronous - lets a caller decide to skip its own loading state on a
+// cache hit, same as getCachedAvatarUrl/getCachedReceiptUrl.
+export function getCachedProfile(userId) {
+  if (!userId) {
+    return null;
+  }
+
+  const entry = profileCache.get(userId);
+  if (!entry || Date.now() >= entry.expiresAt) {
+    return null;
+  }
+
+  return entry.data;
+}
+
+function setCachedProfile(userId, data) {
+  if (!userId) {
+    return;
+  }
+
+  profileCache.set(userId, { data, expiresAt: Date.now() + PROFILE_CACHE_TTL_MS });
+}
+
+// Drops this user's cached/in-flight profile fetch - called after a
+// successful updateProfile() below, so a save is reflected immediately
+// rather than being masked by a still-valid cache entry holding the
+// pre-edit row.
+export function invalidateProfileCache(userId) {
+  if (!userId) {
+    return;
+  }
+
+  profileCache.delete(userId);
+  profileInflight.delete(userId);
+}
+
+// Drops every cached/in-flight profile fetch, regardless of user - called
+// on sign-out (AuthContext.js), same reasoning as clearAvatarUrlCache/
+// clearReceiptUrlCache: a different user signing in on the same device must
+// never see a stale cached profile row left over from the previous session.
+export function clearProfileCache() {
+  profileCache.clear();
+  profileInflight.clear();
+}
+
 export async function getProfile(userId) {
   if (!supabase || !userId) {
     throw new Error('Profile not available');
   }
 
+  const cached = getCachedProfile(userId);
+  if (cached) {
+    return cached;
+  }
+
+  const inflight = profileInflight.get(userId);
+  if (inflight) {
+    return inflight;
+  }
+
   const startedAt = __DEV__ ? Date.now() : 0;
 
-  const { data, error } = await supabase
-    .from('profiles')
-    .select(PROFILE_COLUMNS)
-    .eq('id', userId)
-    .maybeSingle();
+  const requestPromise = (async () => {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select(PROFILE_COLUMNS)
+      .eq('id', userId)
+      .maybeSingle();
 
-  if (error) {
-    if (__DEV__) {
-      console.warn('[Profile] getProfile failed', { code: error.code, message: error.message, elapsedMs: Date.now() - startedAt });
+    if (error) {
+      if (__DEV__) {
+        console.warn('[Profile] getProfile failed', { code: error.code, message: error.message, elapsedMs: Date.now() - startedAt });
+      }
+      throw error;
     }
-    throw error;
-  }
 
-  if (__DEV__) {
-    console.log('[Profile] getProfile succeeded', { elapsedMs: Date.now() - startedAt });
-  }
+    if (__DEV__) {
+      console.log('[Profile] getProfile succeeded', { elapsedMs: Date.now() - startedAt });
+    }
 
-  return data;
+    if (data) {
+      setCachedProfile(userId, data);
+    }
+
+    return data;
+  })();
+
+  profileInflight.set(userId, requestPromise);
+
+  try {
+    return await requestPromise;
+  } finally {
+    profileInflight.delete(userId);
+  }
 }
 
 export async function updateProfile(userId, updates) {
@@ -123,6 +209,16 @@ export async function updateProfile(userId, updates) {
 
   if (error) {
     throw error;
+  }
+
+  // The row just changed server-side - a still-valid cache entry from
+  // before this save would otherwise keep serving the pre-edit data to
+  // ProfileScreen/RewardsScreen/HomeScreen for up to PROFILE_CACHE_TTL_MS
+  // after returning to them. The fresh row is already in hand here, so it's
+  // written directly rather than merely invalidating and forcing another
+  // round-trip.
+  if (data) {
+    setCachedProfile(userId, data);
   }
 
   return data;

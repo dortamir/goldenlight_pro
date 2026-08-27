@@ -1,7 +1,7 @@
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect } from 'expo-router';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppBackButton from '../components/common/AppBackButton';
@@ -61,6 +61,10 @@ export default function PurchaseHistoryScreen() {
   const [previewUrls, setPreviewUrls] = useState({});
   const [rootHeight, setRootHeight] = useState(0);
   const [heroHeight, setHeroHeight] = useState(0);
+  // STAGE 15.3: see HomeScreen.js's own hasLoadedReportsRef for the full
+  // explanation - distinguishes the true first load (full-screen spinner)
+  // from a background refresh-on-focus (last-good list stays visible).
+  const hasLoadedReportsRef = useRef(false);
 
   // Same measured-minHeight approach as HomeScreen/ProfileScreen/
   // PurchaseScreen/RewardsScreen's dark hero + light sheet (see HomeScreen
@@ -113,23 +117,36 @@ export default function PurchaseHistoryScreen() {
 
       async function loadReports() {
         if (!user?.id) {
+          hasLoadedReportsRef.current = false;
           setReports([]);
           setLoading(false);
           setError('');
           return;
         }
 
+        // STAGE 15.3: only the true first load blocks with the spinner - a
+        // background refresh-on-focus keeps the last-good list visible the
+        // whole time instead of blanking the whole screen to a spinner on
+        // every tab revisit.
+        const isInitialLoad = !hasLoadedReportsRef.current;
+
         try {
-          setLoading(true);
+          if (isInitialLoad) {
+            setLoading(true);
+          }
           setError('');
           const data = await getMyPurchaseReports(user.id);
 
           if (isActiveRef.current) {
             setReports(data);
+            hasLoadedReportsRef.current = true;
             loadThumbnails(data, isActiveRef);
           }
         } catch (err) {
-          if (isActiveRef.current) {
+          // Background-refresh failure keeps the last-good list visible
+          // (stale-while-refresh) - only the true first load, with nothing
+          // to fall back to, shows the error state.
+          if (isActiveRef.current && isInitialLoad) {
             setReports([]);
             setError('לא הצלחנו לטעון את היסטוריית הרכישות');
           }
@@ -159,6 +176,7 @@ export default function PurchaseHistoryScreen() {
     getMyPurchaseReports(user.id)
       .then((data) => {
         setReports(data);
+        hasLoadedReportsRef.current = true;
         loadThumbnails(data, isActiveRef);
       })
       .catch(() => setError('לא הצלחנו לטעון את היסטוריית הרכישות'))

@@ -50,6 +50,12 @@ export default function ProfileScreen() {
   // useFocusEffect callback below, which is only recreated when user?.id
   // changes.
   const currentAvatarUrlRef = useRef(null);
+  // STAGE 15.3: see HomeScreen.js's own hasLoadedProfileRef for the full
+  // explanation - distinguishes the true first load (full-screen spinner)
+  // from a background refresh-on-focus (last-good name/points/membership
+  // text stays visible). The avatar itself already has its own equivalent
+  // stale-while-refresh handling above (currentAvatarUrlRef) - unchanged.
+  const hasLoadedProfileRef = useRef(false);
   const [rootHeight, setRootHeight] = useState(0);
   const [heroHeight, setHeroHeight] = useState(0);
   // View-only full-size preview - never opened for the loading/none/error
@@ -92,6 +98,7 @@ export default function ProfileScreen() {
 
       async function loadProfile() {
         if (!user?.id) {
+          hasLoadedProfileRef.current = false;
           setProfile(null);
           setLoading(false);
           setError('');
@@ -100,12 +107,23 @@ export default function ProfileScreen() {
           return;
         }
 
+        // STAGE 15.3: only the true first load blocks with the spinner - a
+        // background refresh-on-focus keeps the last-good name/points/tier
+        // text visible the whole time instead of flashing to a spinner on
+        // every tab revisit. The avatar image itself already has its own
+        // independent stale-while-refresh handling below, unaffected by
+        // `loading`.
+        const isInitialLoad = !hasLoadedProfileRef.current;
+
         try {
-          setLoading(true);
+          if (isInitialLoad) {
+            setLoading(true);
+          }
           setError('');
           const data = await getProfile(user.id);
           if (isActive) {
             setProfile(data);
+            hasLoadedProfileRef.current = true;
           }
 
           const avatarPath = data?.avatar_path || null;
@@ -169,7 +187,11 @@ export default function ProfileScreen() {
             }
           }
         } catch (err) {
-          if (isActive) {
+          // A background-refresh failure keeps the last-good profile
+          // visible (stale-while-refresh) rather than replacing it with an
+          // error card. Only the true first load, with nothing valid to
+          // fall back to, shows the error state.
+          if (isActive && isInitialLoad) {
             setError('לא הצלחנו לטעון את פרטי החשבון');
             setProfile(null);
           }

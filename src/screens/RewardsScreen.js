@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Image, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
@@ -63,6 +63,10 @@ export default function RewardsScreen() {
   const [error, setError] = useState('');
   const [rootHeight, setRootHeight] = useState(0);
   const [heroHeight, setHeroHeight] = useState(0);
+  // STAGE 15.3: see HomeScreen.js's own hasLoadedProfileRef for the full
+  // explanation - distinguishes the true first load (full-screen spinner)
+  // from a background refresh-on-focus (last-good points stay visible).
+  const hasLoadedProfileRef = useRef(false);
 
   // Same measured-minHeight approach as HomeScreen/ProfileScreen/
   // PurchaseScreen's dark hero + light sheet (see HomeScreen for the full
@@ -89,22 +93,32 @@ export default function RewardsScreen() {
 
       async function loadProfile() {
         if (!user?.id) {
+          hasLoadedProfileRef.current = false;
           setProfile(null);
           setLoading(false);
           setError('');
           return;
         }
 
+        // STAGE 15.3: only the true first load blocks with the spinner - a
+        // background refresh-on-focus keeps the last-good points balance
+        // visible the whole time instead of flashing to a spinner on every
+        // tab revisit.
+        const isInitialLoad = !hasLoadedProfileRef.current;
+
         try {
-          setLoading(true);
+          if (isInitialLoad) {
+            setLoading(true);
+          }
           setError('');
           const data = await getProfile(user.id);
 
           if (isActive) {
             setProfile(data);
+            hasLoadedProfileRef.current = true;
           }
         } catch (err) {
-          if (isActive) {
+          if (isActive && isInitialLoad) {
             setProfile(null);
             setError('לא הצלחנו לטעון את יתרת הנקודות');
           }
