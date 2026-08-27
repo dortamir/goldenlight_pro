@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Redirect, Tabs } from 'expo-router';
-import { StyleSheet } from 'react-native';
+import { StyleSheet, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAuth } from '../../src/context/AuthContext';
@@ -9,6 +9,24 @@ import { colors } from '../../src/theme';
 function renderTabIcon(outlineName, filledName) {
   return ({ focused, color, size }) => (
     <Ionicons name={focused ? filledName : outlineName} size={size} color={color} />
+  );
+}
+
+// STAGE 15.2 BLOCKING-FIX PASS: back to an explicit custom tabBarLabel
+// renderer, this time using the `color` the renderer itself supplies
+// (already resolved from tabBarActiveTintColor/tabBarInactiveTintColor
+// below per focus state) instead of either a plain string or a
+// closure-hardcoded focused/color computation - the most explicit, least
+// ambiguous label-rendering path available, with nothing left implicit for
+// native rendering to silently drop. `numberOfLines`/`adjustsFontSizeToFit`
+// are set directly (not inherited from the library's own <Label> element),
+// so this renders identically regardless of platform/library-version
+// label-resolution differences.
+function renderTabLabel(text) {
+  return ({ color }) => (
+    <Text style={[styles.tabBarLabel, { color }]} numberOfLines={1} adjustsFontSizeToFit={false}>
+      {text}
+    </Text>
   );
 }
 
@@ -51,36 +69,20 @@ export default function TabsLayout() {
         headerShown: false,
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.grayDark,
-        // Base height raised from 68 to 76 (STAGE 15.1 FOLLOW-UP): the
-        // previous 68px, minus this bar's own paddingTop(8)/paddingBottom(10),
-        // left only ~50px for icon+label content - close enough to the
-        // actual icon(28) + label(~18) + the tab item's own internal
-        // padding that a few extra device/version-dependent pixels could
-        // push the label out of the visible row. The extra headroom costs
-        // no visual redesign (background/border/shadow all unchanged) and
-        // removes that margin entirely.
-        tabBarStyle: [styles.tabBar, { height: 76 + insets.bottom, paddingBottom: 10 + insets.bottom }],
+        // Base height raised from 68 (Stage 15.1) to 76 (Stage 15.1
+        // follow-up) to 82 (STAGE 15.2 BLOCKING-FIX PASS): the tab item's
+        // real content budget is `height - paddingTop(8) - paddingBottom(10)`
+        // (insets.bottom is added equally to both height and paddingBottom
+        // below, so it cancels out of this interior row height on every
+        // device). Content needed: icon(28, the library's own UIKit-variant
+        // icon box height) + label(lineHeight 18) + the tab item's own
+        // internal vertical padding (5+5=10) = 56px. 76 only left a ~2px
+        // margin - not "reasonable" headroom for font-metric/rounding
+        // variance across devices. 82 leaves the content row at 64px against
+        // a 56px need - real margin, still no per-device magic number, no
+        // visual redesign (background/border/shadow all unchanged).
+        tabBarStyle: [styles.tabBar, { height: 82 + insets.bottom, paddingBottom: 10 + insets.bottom }],
         tabBarItemStyle: styles.tabBarItem,
-        // STAGE 15.1 FOLLOW-UP: a per-screen `tabBarLabel` render FUNCTION
-        // used to be set on every Tabs.Screen below (rendering a custom
-        // <Text> ourselves). That takes a different, far less-exercised
-        // internal render path than a plain string label - it renders fine
-        // on web but was found to render no visible label at all on a
-        // physical iPhone. `tabBarLabelStyle` only carries this app's
-        // RTL/sizing tweaks, not color - color comes from
-        // tabBarActiveTintColor/tabBarInactiveTintColor above, applied
-        // automatically by the library's own label element for a plain
-        // string label (STAGE 15.2: each Tabs.Screen below now sets its own
-        // explicit `tabBarLabel` string rather than only relying on `title`
-        // - traced this exact rendering path in both this project's SDK 57
-        // expo-router (vendors @react-navigation/bottom-tabs internally)
-        // and, read-only, the SDK 54 iPhone test shell's standalone
-        // @react-navigation/bottom-tabs@7 package: both resolve a string
-        // `tabBarLabel` (or `title` as fallback) through the identical
-        // standard <Label> element, so `title`-only should already have
-        // worked - this makes the label source fully explicit as well,
-        // removing any dependency on that fallback resolution).
-        tabBarLabelStyle: styles.tabBarLabel,
         tabBarHideOnKeyboard: true,
         tabBarShowLabel: true,
       }}>
@@ -88,7 +90,7 @@ export default function TabsLayout() {
         name="profile"
         options={{
           title: 'אזור אישי',
-          tabBarLabel: 'אזור אישי',
+          tabBarLabel: renderTabLabel('אזור אישי'),
           tabBarIcon: renderTabIcon('person-outline', 'person'),
         }}
       />
@@ -96,7 +98,7 @@ export default function TabsLayout() {
         name="rewards"
         options={{
           title: 'מתנות',
-          tabBarLabel: 'מתנות',
+          tabBarLabel: renderTabLabel('מתנות'),
           tabBarIcon: renderTabIcon('gift-outline', 'gift'),
         }}
       />
@@ -104,7 +106,7 @@ export default function TabsLayout() {
         name="purchase"
         options={{
           title: 'דיווח רכישה',
-          tabBarLabel: 'דיווח רכישה',
+          tabBarLabel: renderTabLabel('דיווח רכישה'),
           tabBarIcon: renderTabIcon('receipt-outline', 'receipt'),
         }}
       />
@@ -112,7 +114,7 @@ export default function TabsLayout() {
         name="index"
         options={{
           title: 'בית',
-          tabBarLabel: 'בית',
+          tabBarLabel: renderTabLabel('בית'),
           tabBarIcon: renderTabIcon('home-outline', 'home'),
         }}
       />
@@ -145,9 +147,8 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: -4 },
     elevation: 8,
   },
-  // No `color` here - the library's own Label element applies
-  // tabBarActiveTintColor/tabBarInactiveTintColor (set above) automatically
-  // based on focus state.
+  // No `color` here - renderTabLabel() above applies it inline from the
+  // `color` the tabBarLabel renderer itself supplies per focus state.
   tabBarLabel: {
     fontSize: 12,
     fontWeight: '600',

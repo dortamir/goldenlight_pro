@@ -105,14 +105,15 @@ async function resolveReceiptAsset(asset, sourceLabel) {
   if (__DEV__) {
     console.log('[Purchase] Receipt asset resolved', {
       source: sourceLabel,
-      uriScheme: String(asset.uri || '').split(':')[0] || null,
+      originalUri: asset.uri || null,
       claimedFileName: asset.fileName || null,
       claimedMimeType: asset.mimeType || null,
       detectedFormat,
       convertedToJpeg: Boolean(converted),
       convertedWidth: converted?.width ?? null,
       convertedHeight: converted?.height ?? null,
-      resolvedUriScheme: result ? String(result.uri || '').split(':')[0] || null : null,
+      resolvedUri: result?.uri || null,
+      resolvedName: result?.name || null,
       resolvedType: result?.type || null,
       supported: Boolean(result),
     });

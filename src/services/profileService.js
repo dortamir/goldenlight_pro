@@ -1,3 +1,6 @@
+import { Platform } from 'react-native';
+
+import { readLocalFileAsArrayBuffer } from '../utils/localFileBytes';
 import { supabase } from './supabase';
 
 const PROFILE_COLUMNS =
@@ -138,17 +141,25 @@ function getAvatarExtension(mimeType) {
   }
 }
 
-// STAGE 15.2: same fix as purchaseReportService.js's createUploadPayload()
-// (see its comment for the full explanation) - `{uri,name,type}` passed
-// directly to `@supabase/storage-js`'s `upload()` is not a Blob/FormData, so
-// it falls through to a branch that sends the object itself as the fetch
-// body rather than the file's real bytes. Fetching the local `file://` URI
-// and reading its actual bytes via `.blob()` (already used here for web, now
-// unconditional) produces a genuine Blob on every platform.
+// STAGE 15.2 FOLLOW-UP: same fix as purchaseReportService.js's
+// createUploadPayload() (see its comment for the full explanation). React
+// Native's own `Blob` class only supports wrapping OTHER Blobs, not raw
+// bytes, and re-uploading a native-blob reference produced by
+// `fetch(uri).blob()` through a second fetch call is unreliable for local
+// files on iOS - it broke new receipt uploads entirely on the physical
+// device. On native, this now reads the real bytes directly into an
+// ArrayBuffer via expo-file-system's `File#arrayBuffer()` and uploads that
+// directly - never wrapped in RN's own Blob. Web keeps using a real browser
+// Blob (fully spec-compliant there, unlike RN's).
 async function createAvatarUploadPayload(asset, mimeType, fileName) {
-  const response = await fetch(asset.uri);
-  const blob = await response.blob();
-  return new File([blob], fileName, { type: mimeType });
+  if (Platform.OS === 'web') {
+    const response = await fetch(asset.uri);
+    const blob = await response.blob();
+    return { body: new File([blob], fileName, { type: mimeType }), byteSize: blob.size ?? null };
+  }
+
+  const arrayBuffer = await readLocalFileAsArrayBuffer(asset.uri);
+  return { body: arrayBuffer, byteSize: arrayBuffer.byteLength };
 }
 
 export async function uploadProfileAvatar(userId, asset) {
@@ -162,9 +173,13 @@ export async function uploadProfileAvatar(userId, asset) {
   const storagePath = `${userId}/${fileName}`;
   const uploadPayload = await createAvatarUploadPayload(asset, mimeType, fileName);
 
+  if (__DEV__) {
+    console.log('[Profile] Uploading avatar to Storage', { storagePath, contentType: mimeType, byteSize: uploadPayload.byteSize });
+  }
+
   const { error: uploadError } = await supabase.storage
     .from(AVATAR_BUCKET)
-    .upload(storagePath, uploadPayload, {
+    .upload(storagePath, uploadPayload.body, {
       contentType: mimeType,
       upsert: true,
     });

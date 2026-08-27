@@ -1,3 +1,6 @@
+import { Platform } from 'react-native';
+
+import { readLocalFileAsArrayBuffer } from '../utils/localFileBytes';
 import { supabase } from './supabase';
 
 // STAGE 15.1: receipt-image signed-URL cache, mirroring profileService.js's
@@ -51,39 +54,46 @@ function sanitizeFilename(fileName) {
   return `${trimmed || 'receipt'}${extension}`;
 }
 
-// STAGE 15.2: reads the local file's REAL bytes into a genuine Blob/File on
-// every platform, instead of handing native's `{uri, name, type}` descriptor
-// object straight to `@supabase/storage-js`'s `upload()`. That object shape
-// is the conventional React Native FormData-file convention (only meaningful
-// when appended to a FormData via `formData.append('file', {uri,name,type})`)
-// - `@supabase/storage-js` does NOT do that internally. Its `uploadOrUpdate()`
-// only builds a proper multipart FormData body when the value passed in is
-// already `instanceof Blob` or `instanceof FormData`; anything else (this
-// object included) falls through to a branch that sends the value directly
-// as the fetch body, with headers built from `options.contentType`. A plain
-// JS object passed as a fetch `body` is not file content - live Storage
-// inspection (`storage.objects.metadata.size`) confirmed every camera
-// upload was landing at 251 bytes regardless of the real photo's size,
-// consistent with some serialized form of this descriptor object being
-// uploaded instead of the photo. Fetching the local `file://` URI and
-// reading its real bytes via `.blob()` - already used here for web, now
-// used unconditionally - produces a genuine `Blob`, which IS handled by
-// that Blob-specific branch and uploads correctly on every platform.
+// STAGE 15.2 FOLLOW-UP (blocking-fix pass): the previous fix here - reading
+// the file via `fetch(uri).then(r => r.blob())` and passing the resulting
+// Blob straight into `@supabase/storage-js`'s `upload()` - broke NEW receipt
+// uploads on the physical iPhone entirely (they never completed). Root
+// cause: React Native's own `Blob` class (`react-native/Libraries/Blob/
+// Blob.js`) is NOT a full W3C Blob implementation - its own doc comment
+// states "Currently we only support creating Blobs from other Blobs", and
+// it represents blob data as an opaque reference into NATIVE-side storage
+// (`BlobManager`), not real in-JS bytes. Re-uploading that native-blob
+// reference through a SECOND fetch/XHR call (inside `uploadOrUpdate()`'s own
+// FormData-building branch) is a known-unreliable path for local files on
+// iOS - unlike a genuine browser Blob (which web correctly still uses
+// below, since browsers implement the full spec), it does not reliably
+// round-trip large local file data across two separate native-bridge hops.
+//
+// Fix: on native, read the file's real bytes directly into an `ArrayBuffer`
+// via readLocalFileAsArrayBuffer() (../utils/localFileBytes.js, wrapping
+// expo-file-system's `File#arrayBuffer()` - already the exact API this app
+// uses successfully in `receiptImageFormat.js` for magic-byte detection),
+// and upload that ArrayBuffer directly. `@supabase/storage-js` does not
+// wrap a plain ArrayBuffer in FormData (only Blob/FormData get that
+// treatment) - it sends it as the raw fetch body with the `content-type`
+// header set from `options.contentType` below, which IS a standard,
+// spec-compliant `BodyInit` type that React Native's fetch/XHR bridge
+// supports directly, without ever touching RN's own limited Blob class.
+// This is NOT the `{uri,name,type}` descriptor object from before Stage
+// 15.2 either - `body` here is real, already-read binary data.
 async function createUploadPayload(file) {
   const mimeType = file?.type || 'image/jpeg';
   const safeName = sanitizeFilename(file?.name || file?.fileName || 'receipt.jpg');
 
-  const response = await fetch(file.uri);
-  const blob = await response.blob();
-
-  if (__DEV__) {
-    console.log('[Purchase] Receipt read into upload Blob', {
-      byteSize: typeof blob.size === 'number' ? blob.size : null,
-      contentType: mimeType,
-    });
+  if (Platform.OS === 'web') {
+    const response = await fetch(file.uri);
+    const blob = await response.blob();
+    return { body: new File([blob], safeName, { type: mimeType }), contentType: mimeType, byteSize: blob.size ?? null };
   }
 
-  return new File([blob], safeName, { type: mimeType });
+  const arrayBuffer = await readLocalFileAsArrayBuffer(file.uri);
+
+  return { body: arrayBuffer, contentType: mimeType, byteSize: arrayBuffer.byteLength };
 }
 
 export async function uploadReceipt({ file, userId, purchaseReportId }) {
@@ -98,17 +108,15 @@ export async function uploadReceipt({ file, userId, purchaseReportId }) {
   if (__DEV__) {
     console.log('[Purchase] Uploading receipt to Storage', {
       storagePath,
-      contentType: uploadPayload.type || null,
-      // `.size` only exists on web's Blob/File payload - not available for
-      // native's `{uri,name,type}` shape without an extra file read.
-      byteSize: typeof uploadPayload.size === 'number' ? uploadPayload.size : null,
+      contentType: uploadPayload.contentType,
+      byteSize: uploadPayload.byteSize,
     });
   }
 
   const { data: uploadData, error: uploadError } = await supabase.storage
     .from('receipts')
-    .upload(storagePath, uploadPayload, {
-      contentType: uploadPayload.type || 'image/jpeg',
+    .upload(storagePath, uploadPayload.body, {
+      contentType: uploadPayload.contentType,
       upsert: false,
     });
 
@@ -143,7 +151,14 @@ export async function createPurchaseReport({ id, userId, receiptPath, originalFi
   });
 
   if (error) {
+    if (__DEV__) {
+      console.warn('[Purchase] purchase_reports insert failed', id, error.code, error.message);
+    }
     throw error;
+  }
+
+  if (__DEV__) {
+    console.log('[Purchase] purchase_reports insert succeeded', id);
   }
 
   return data;
