@@ -1,24 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Redirect, Tabs } from 'expo-router';
-import { StyleSheet, Text } from 'react-native';
+import { StyleSheet } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAuth } from '../../src/context/AuthContext';
 import { colors } from '../../src/theme';
-
-function renderTabLabel(label) {
-  return ({ focused }) => (
-    <Text
-      style={[
-        styles.tabBarLabel,
-        { color: focused ? colors.primary : colors.grayDark },
-      ]}
-      numberOfLines={1}
-      adjustsFontSizeToFit={false}>
-      {label}
-    </Text>
-  );
-}
 
 function renderTabIcon(outlineName, filledName) {
   return ({ focused, color, size }) => (
@@ -65,8 +51,29 @@ export default function TabsLayout() {
         headerShown: false,
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.grayDark,
-        tabBarStyle: [styles.tabBar, { height: 68 + insets.bottom, paddingBottom: 10 + insets.bottom }],
+        // Base height raised from 68 to 76 (STAGE 15.1 FOLLOW-UP): the
+        // previous 68px, minus this bar's own paddingTop(8)/paddingBottom(10),
+        // left only ~50px for icon+label content - close enough to the
+        // actual icon(28) + label(~18) + the tab item's own internal
+        // padding that a few extra device/version-dependent pixels could
+        // push the label out of the visible row. The extra headroom costs
+        // no visual redesign (background/border/shadow all unchanged) and
+        // removes that margin entirely.
+        tabBarStyle: [styles.tabBar, { height: 76 + insets.bottom, paddingBottom: 10 + insets.bottom }],
         tabBarItemStyle: styles.tabBarItem,
+        // STAGE 15.1 FOLLOW-UP: a per-screen `tabBarLabel` render FUNCTION
+        // used to be set on every Tabs.Screen below (rendering a custom
+        // <Text> ourselves). That takes a different, far less-exercised
+        // internal render path than a plain string label - it renders fine
+        // on web but was found to render no visible label at all on a
+        // physical iPhone. Passing plain strings (each screen's own
+        // `title`, already identical to what those custom labels rendered)
+        // uses the library's own standard label element instead, which
+        // already reads `tabBarActiveTintColor`/`tabBarInactiveTintColor`
+        // above to color itself per focus state - no custom function
+        // needed. `tabBarLabelStyle` only carries this app's RTL/sizing
+        // tweaks, not color.
+        tabBarLabelStyle: styles.tabBarLabel,
         tabBarHideOnKeyboard: true,
         tabBarShowLabel: true,
       }}>
@@ -74,7 +81,6 @@ export default function TabsLayout() {
         name="profile"
         options={{
           title: 'אזור אישי',
-          tabBarLabel: renderTabLabel('אזור אישי'),
           tabBarIcon: renderTabIcon('person-outline', 'person'),
         }}
       />
@@ -82,7 +88,6 @@ export default function TabsLayout() {
         name="rewards"
         options={{
           title: 'מתנות',
-          tabBarLabel: renderTabLabel('מתנות'),
           tabBarIcon: renderTabIcon('gift-outline', 'gift'),
         }}
       />
@@ -90,7 +95,6 @@ export default function TabsLayout() {
         name="purchase"
         options={{
           title: 'דיווח רכישה',
-          tabBarLabel: renderTabLabel('דיווח רכישה'),
           tabBarIcon: renderTabIcon('receipt-outline', 'receipt'),
         }}
       />
@@ -98,7 +102,6 @@ export default function TabsLayout() {
         name="index"
         options={{
           title: 'בית',
-          tabBarLabel: renderTabLabel('בית'),
           tabBarIcon: renderTabIcon('home-outline', 'home'),
         }}
       />
@@ -131,6 +134,9 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: -4 },
     elevation: 8,
   },
+  // No `color` here - the library's own Label element applies
+  // tabBarActiveTintColor/tabBarInactiveTintColor (set above) automatically
+  // based on focus state.
   tabBarLabel: {
     fontSize: 12,
     fontWeight: '600',
@@ -138,7 +144,6 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     includeFontPadding: false,
     writingDirection: 'rtl',
-    color: colors.grayDark,
     marginTop: 0,
   },
   tabBarItem: {

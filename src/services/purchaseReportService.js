@@ -79,6 +79,16 @@ export async function uploadReceipt({ file, userId, purchaseReportId }) {
   const storagePath = `${userId}/${purchaseReportId}/${safeName}`;
   const uploadPayload = await createUploadPayload(file);
 
+  if (__DEV__) {
+    console.log('[Purchase] Uploading receipt to Storage', {
+      storagePath,
+      contentType: uploadPayload.type || null,
+      // `.size` only exists on web's Blob/File payload - not available for
+      // native's `{uri,name,type}` shape without an extra file read.
+      byteSize: typeof uploadPayload.size === 'number' ? uploadPayload.size : null,
+    });
+  }
+
   const { data: uploadData, error: uploadError } = await supabase.storage
     .from('receipts')
     .upload(storagePath, uploadPayload, {
@@ -87,7 +97,14 @@ export async function uploadReceipt({ file, userId, purchaseReportId }) {
     });
 
   if (uploadError) {
+    if (__DEV__) {
+      console.warn('[Purchase] Receipt Storage upload failed', storagePath, uploadError.message);
+    }
     throw uploadError;
+  }
+
+  if (__DEV__) {
+    console.log('[Purchase] Receipt Storage upload succeeded', storagePath);
   }
 
   return {
@@ -305,10 +322,19 @@ export async function getReceiptSignedUrl(receiptPath, expiresInSeconds = RECEIP
       .createSignedUrl(receiptPath, expiresInSeconds);
 
     if (error) {
+      // Never log the receiptPath's actual signed URL - only success/failure
+      // and the storage path (already known to belong to this user).
+      if (__DEV__) {
+        console.warn('[Purchase] Failed to create receipt signed URL', receiptPath, error.message);
+      }
       throw error;
     }
 
     const url = data?.signedUrl || null;
+
+    if (__DEV__) {
+      console.log('[Purchase] Receipt signed URL created', receiptPath, url ? 'ok' : 'empty');
+    }
 
     if (url) {
       receiptUrlCache.set(receiptPath, {

@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useCallback, useMemo, useRef, useState } from 'react';
@@ -10,6 +11,7 @@ import { useAuth } from '../context/AuthContext';
 import { submitPurchaseReceipt } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { isolateLTR } from '../utils/bidiText';
+import { detectImageFormat } from '../utils/receiptImageFormat';
 
 const UNSUPPORTED_IMAGE_FORMAT_MESSAGE = `פורמט תמונה לא נתמך. בחרו ${isolateLTR('JPG, PNG')} או ${isolateLTR('WEBP')}.`;
 
@@ -36,6 +38,12 @@ const tips = [
 
 const supportedReceiptTypes = ['image/jpeg', 'image/png', 'image/webp'];
 
+const DETECTED_FORMAT_MIME_TYPES = {
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+};
+
 function isSupportedReceiptAsset(asset) {
   const mimeType = asset?.mimeType || asset?.type || '';
   if (!mimeType) {
@@ -44,6 +52,61 @@ function isSupportedReceiptAsset(asset) {
   }
 
   return supportedReceiptTypes.includes(mimeType.toLowerCase());
+}
+
+// STAGE 15.1 FOLLOW-UP: since Expo SDK 54, ImagePicker (used here with
+// `allowsEditing: false`) can return an asset's ORIGINAL file untouched -
+// including native HEIC photos, the iPhone Camera app's default capture
+// format - while `asset.mimeType`/`asset.fileName` may be missing or not
+// reflect that. Trusting those fields alone (the previous behavior) could
+// silently upload real HEIC bytes labeled as JPEG, which most image
+// decoders then refuse to render - a successful upload with a permanently
+// blank thumbnail.
+//
+// This reads the asset's real file signature first. When it can be
+// determined AND is already one of this app's supported formats, that
+// verified format is used directly (skipping the metadata-based guess
+// entirely - no re-encoding, so receipt quality for OCR is untouched).
+// When the real format is HEIC, the file is converted to JPEG via
+// expo-image-manipulator before upload - the smallest change that makes a
+// same format actually renderable, since there's no way to store or display
+// the original HEIC bytes correctly otherwise. When the real format can't
+// be determined (e.g. running on web, or a native read failure), this falls
+// back to the original metadata-based check unchanged, exactly as before.
+async function resolveReceiptAsset(asset) {
+  const detectedFormat = await detectImageFormat(asset.uri);
+
+  if (detectedFormat === 'heic') {
+    if (__DEV__) {
+      console.log('[Purchase] HEIC/HEIF receipt detected - converting to JPEG before upload', {
+        claimedMimeType: asset.mimeType || null,
+        claimedFileName: asset.fileName || null,
+      });
+    }
+
+    const rendered = await ImageManipulator.manipulate(asset.uri).renderAsync();
+    const converted = await rendered.saveAsync({ format: SaveFormat.JPEG, compress: 1 });
+
+    return { uri: converted.uri, name: 'receipt.jpg', type: 'image/jpeg' };
+  }
+
+  if (detectedFormat === 'jpeg' || detectedFormat === 'png' || detectedFormat === 'webp') {
+    return {
+      uri: asset.uri,
+      name: asset.fileName || 'receipt.jpg',
+      type: DETECTED_FORMAT_MIME_TYPES[detectedFormat],
+    };
+  }
+
+  if (!isSupportedReceiptAsset(asset)) {
+    return null;
+  }
+
+  return {
+    uri: asset.uri,
+    name: asset.fileName || 'receipt.jpg',
+    type: asset.mimeType || 'image/jpeg',
+  };
 }
 
 export default function PurchaseScreen() {
@@ -104,16 +167,22 @@ export default function PurchaseScreen() {
           return;
         }
 
-        if (!isSupportedReceiptAsset(asset)) {
+        if (__DEV__) {
+          console.log('[Purchase] Receipt picked', {
+            source: 'camera',
+            fileName: asset.fileName || null,
+            mimeType: asset.mimeType || null,
+            uriScheme: String(asset.uri || '').split(':')[0] || null,
+          });
+        }
+
+        const resolvedCamera = await resolveReceiptAsset(asset);
+        if (!resolvedCamera) {
           setError(UNSUPPORTED_IMAGE_FORMAT_MESSAGE);
           return;
         }
 
-        setSelectedReceipt({
-          uri: asset.uri,
-          name: asset.fileName || 'receipt.jpg',
-          type: asset.mimeType || 'image/jpeg',
-        });
+        setSelectedReceipt(resolvedCamera);
         setStatus('מוכן לשליחה');
         return;
       }
@@ -139,16 +208,22 @@ export default function PurchaseScreen() {
         return;
       }
 
-      if (!isSupportedReceiptAsset(asset)) {
+      if (__DEV__) {
+        console.log('[Purchase] Receipt picked', {
+          source: 'library',
+          fileName: asset.fileName || null,
+          mimeType: asset.mimeType || null,
+          uriScheme: String(asset.uri || '').split(':')[0] || null,
+        });
+      }
+
+      const resolvedLibrary = await resolveReceiptAsset(asset);
+      if (!resolvedLibrary) {
         setError(UNSUPPORTED_IMAGE_FORMAT_MESSAGE);
         return;
       }
 
-      setSelectedReceipt({
-        uri: asset.uri,
-        name: asset.fileName || 'receipt.jpg',
-        type: asset.mimeType || 'image/jpeg',
-      });
+      setSelectedReceipt(resolvedLibrary);
       setStatus('מוכן לשליחה');
     } catch (err) {
       if (__DEV__) {
