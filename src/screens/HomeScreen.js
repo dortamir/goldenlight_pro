@@ -12,6 +12,7 @@ import { getProfile } from '../services/profileService';
 import { getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { isolateLTR } from '../utils/bidiText';
+import { getCustomerReceiptStatusMeta } from '../utils/purchaseReportStatus';
 
 function isPdfFile(name) {
   return /\.pdf$/i.test(String(name || ''));
@@ -240,22 +241,6 @@ export default function HomeScreen() {
     return `${day}.${month}.${year}`;
   };
 
-  const getStatusMeta = (status) => {
-    switch (status) {
-      case 'processing':
-        return { label: 'בעיבוד', backgroundColor: colors.primarySoft, textColor: colors.primary };
-      case 'needs_review':
-        return { label: 'נדרשת בדיקה', backgroundColor: colors.surfaceMuted, textColor: colors.textMuted };
-      case 'approved':
-        return { label: 'אושרה', backgroundColor: colors.successSoft, textColor: colors.success };
-      case 'rejected':
-        return { label: 'נדחתה', backgroundColor: colors.errorSoft, textColor: colors.error };
-      case 'submitted':
-      default:
-        return { label: 'נשלחה לבדיקה', backgroundColor: colors.primarySoft, textColor: colors.primaryPressed };
-    }
-  };
-
   const recentReports = reports.slice(0, 2);
 
   return (
@@ -393,7 +378,7 @@ export default function HomeScreen() {
               ) : (
                 <View style={styles.activityList}>
                   {recentReports.map((report) => {
-                    const statusMeta = getStatusMeta(report.status);
+                    const statusMeta = getCustomerReceiptStatusMeta(report.status);
                     const showPoints = report.status === 'approved' && report.points_awarded > 0;
                     const isPdf = isPdfFile(report.original_filename);
                     const preview = previewUrls[report.id];

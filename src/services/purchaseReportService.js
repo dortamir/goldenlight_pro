@@ -111,16 +111,20 @@ async function invokeProcessReceiptOcr(purchaseReportId) {
   }
 
   try {
-    console.log('[Purchase] OCR processing invocation dispatched', purchaseReportId);
+    if (__DEV__) {
+      console.log('[Purchase] OCR processing invocation dispatched', purchaseReportId);
+    }
     const { error } = await supabase.functions.invoke('process-receipt', {
       body: { purchaseReportId },
     });
 
-    if (error) {
+    if (error && __DEV__) {
       console.warn('[Purchase] OCR processing invocation failed to start', purchaseReportId, error.message);
     }
   } catch (error) {
-    console.warn('[Purchase] OCR processing invocation failed to start', purchaseReportId, error?.message);
+    if (__DEV__) {
+      console.warn('[Purchase] OCR processing invocation failed to start', purchaseReportId, error?.message);
+    }
   }
 }
 
@@ -151,7 +155,9 @@ export async function submitPurchaseReceipt({ file, userId }) {
     try {
       await supabase.storage.from('receipts').remove([uploadResult.storagePath]);
     } catch (cleanupError) {
-      console.warn('[Purchase] Upload cleanup failed due to storage policy or environment constraints.', cleanupError);
+      if (__DEV__) {
+        console.warn('[Purchase] Upload cleanup failed due to storage policy or environment constraints.', cleanupError);
+      }
     }
 
     throw error;
@@ -165,7 +171,9 @@ export async function getMyPurchaseReports(userId) {
 
   const { data, error } = await supabase
     .from('purchase_reports')
-    .select('*')
+    .select(
+      'id, user_id, receipt_path, original_filename, status, points_awarded, rejection_reason, created_at, updated_at, reviewed_at',
+    )
     .eq('user_id', userId)
     .order('created_at', { ascending: false });
 
@@ -195,28 +203,31 @@ export async function getPurchaseReportById(reportId, userId) {
   return data;
 }
 
-// Read-only: the receipt line items an admin manually entered while
-// reviewing this report (see public.receipt_manual_items /
-// public.save_manual_receipt_items, supabase/migrations/011_receipt_manual_items.sql
-// and 012_customer_manual_items_read.sql). This function has no special
-// privilege of its own - it only ever returns rows the caller's own
-// ownership-based RLS policy admits (purchase_reports.user_id = auth.uid()),
-// so a customer can never read another customer's manual items through it.
-// created_by (which admin entered the data) is intentionally excluded, both
-// here and at the database column-grant level - never expose internal admin
-// identity to the customer. These are manually copied receipt lines, not a
-// confirmed match against the Golden Light product catalog - callers must
-// not relabel them as matched products.
-export async function getReceiptManualItems(purchaseReportId) {
+// Read-only: ONLY the confirmed Golden Light receipt lines that actually
+// contributed to this report's points - i.e. exactly the rows
+// public.award_purchase_points() itself sums (receipt_manual_items rows
+// with match_status = 'matched' for this report), never every saved manual
+// item regardless of match state. Reads through the SECURITY DEFINER
+// public.get_my_eligible_receipt_items() RPC (026_customer_eligible_receipt_items.sql)
+// rather than a plain table select, because match_status/product_id/
+// match_type/match_confidence/is_golden_light are deliberately NOT part of
+// the customer's direct receipt_manual_items column grant (migration 025) -
+// the RPC performs the match_status = 'matched' filter server-side and
+// returns only the same safe display columns the customer already had
+// access to. Ownership is enforced inside the RPC itself (joins to
+// purchase_reports, requires user_id = auth.uid()), so - exactly like
+// before - a customer can never read another customer's items through it;
+// a report that isn't theirs (or doesn't exist) simply resolves to zero
+// rows. created_by (which admin entered the data) was never exposed here
+// and still isn't - the RPC doesn't return it.
+export async function getEligibleReceiptItems(purchaseReportId) {
   if (!supabase || !purchaseReportId) {
     return [];
   }
 
-  const { data, error } = await supabase
-    .from('receipt_manual_items')
-    .select('id, description, sku, quantity, unit_price, line_total')
-    .eq('purchase_report_id', purchaseReportId)
-    .order('line_index', { ascending: true });
+  const { data, error } = await supabase.rpc('get_my_eligible_receipt_items', {
+    p_report_id: purchaseReportId,
+  });
 
   if (error) {
     throw error;

@@ -44,3 +44,8 @@ example
 /android
 
 supabase/scripts/data/
+
+# Supabase CLI local metadata (project ref, pooler URL shape, cached
+# versions) - no credentials, but regenerated per-machine and not meant to
+# be committed, matching Supabase CLI's own recommended .gitignore entry.
+supabase/.temp/

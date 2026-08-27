@@ -15,14 +15,18 @@ import { supabase } from './supabase';
 // Read-only: nothing here inserts, updates, or deletes any row. Approval/
 // rejection/points/admin-note writes are a later, separate stage.
 
-// Reports currently waiting for admin attention. At this stage of the
-// project there is no automated OCR/processing pipeline moving a report
-// from submitted -> processing -> approved/needs_review, so a freshly
-// submitted receipt has no other way to ever be looked at - it must stay in
-// the admin workflow exactly like a needs_review one, not just the reports
-// a (not-yet-existing) automated pass has specifically flagged. Once that
-// pipeline exists, 'submitted' may naturally drain into 'processing' on its
-// own and this list can be revisited - not before.
+// Reports currently waiting for admin attention, used by
+// getAdminReviewQueue() (AdminHomeScreen's own compact list) only.
+// Deliberately NOT extended to include 'processing' here - unlike the
+// admin-facing PRESENTATION grouping (see src/utils/adminReportStatus.js/
+// AdminReportsHistoryScreen's STATUS_FILTERS, both updated in Stage 13 to
+// treat submitted/processing/needs_review as one "דורשות בדיקה" bucket for
+// labels/filters/counts), this specific list's own row-selection behavior
+// was intentionally left unchanged when that update was made - a
+//'processing' report is actively mid-pipeline (Storage download, Azure
+// call, persistence) and was never included in this particular query
+// before. Revisit together if this list's own behavior should change too;
+// not assumed here.
 const REVIEW_QUEUE_STATUSES = ['submitted', 'needs_review'];
 
 async function fetchProfileNamesByIds(userIds) {
@@ -78,42 +82,57 @@ async function fetchPurchaseRewardTransaction(reportId) {
 }
 
 // Real counts only - no revenue/points/user-growth metrics, since nothing in
-// the current schema supports those meaningfully yet. `processing` is a
-// real, unchanged backend status (see purchase_reports.status and the
-// process-receipt Edge Function foundation), but it isn't part of the
-// current admin-facing presentation - the dashboard only surfaces the three
-// operational categories an admin actually acts on: pending (submitted +
-// needs_review), approved, and rejected.
+// the current schema supports those meaningfully yet. Broken out per exact
+// status (submitted/needs_review/processing/approved/rejected) - five simple
+// head-count queries, same safe admin-RLS-gated pattern as before, no new
+// grant/RPC.
+//
+// STAGE 13 UPDATE: `processing` is no longer surfaced as its own distinct
+// admin-facing bucket anywhere in the UI (see src/utils/adminReportStatus.js
+// and AdminReportsHistoryScreen's STATUS_FILTERS) - submitted/processing/
+// needs_review are now ALL part of the single "דורשות בדיקה" pending-
+// attention group admin-side. `pendingCount` therefore now sums all three
+// (not just submitted + needs_review as before) - this is the number both
+// AdminHomeScreen's summary card and AdminReportsHistoryScreen's own
+// summary chip actually display for "דורשות בדיקה". `processingCount` is
+// still returned (the underlying query/data is harmless and cheap to keep),
+// it is simply not read by any screen's own "בעיבוד" UI any more - there is
+// none left. purchase_reports.status itself is completely unaffected by any
+// of this - see REVIEW_QUEUE_STATUSES above, still 'submitted'/'needs_review'
+// only, and REVIEWABLE_STATUSES below, the actual finalize/reject gate -
+// neither is touched by this presentation-only change.
 export async function getAdminDashboardSummary() {
   if (!supabase) {
     throw new Error('Admin data is not available.');
   }
 
-  const [pending, approved, rejected] = await Promise.all([
-    supabase
-      .from('purchase_reports')
-      .select('id', { count: 'exact', head: true })
-      .in('status', REVIEW_QUEUE_STATUSES),
+  const [submitted, needsReview, processing, approved, rejected] = await Promise.all([
+    supabase.from('purchase_reports').select('id', { count: 'exact', head: true }).eq('status', 'submitted'),
+    supabase.from('purchase_reports').select('id', { count: 'exact', head: true }).eq('status', 'needs_review'),
+    supabase.from('purchase_reports').select('id', { count: 'exact', head: true }).eq('status', 'processing'),
     supabase.from('purchase_reports').select('id', { count: 'exact', head: true }).eq('status', 'approved'),
     supabase.from('purchase_reports').select('id', { count: 'exact', head: true }).eq('status', 'rejected'),
   ]);
 
-  if (pending.error) {
-    throw pending.error;
-  }
-  if (approved.error) {
-    throw approved.error;
-  }
-  if (rejected.error) {
-    throw rejected.error;
+  for (const result of [submitted, needsReview, processing, approved, rejected]) {
+    if (result.error) {
+      throw result.error;
+    }
   }
 
+  const submittedCount = submitted.count ?? 0;
+  const needsReviewCount = needsReview.count ?? 0;
+  const processingCount = processing.count ?? 0;
+
   return {
-    // "ממתינות לבדיקה" - everything currently waiting for admin attention
-    // (submitted + needs_review), see REVIEW_QUEUE_STATUSES above.
-    pendingCount: pending.count ?? 0,
+    submittedCount,
+    needsReviewCount,
+    processingCount,
     approvedCount: approved.count ?? 0,
     rejectedCount: rejected.count ?? 0,
+    // "דורשות בדיקה" - everything currently waiting for admin attention:
+    // submitted + processing + needs_review combined (Stage 13 update).
+    pendingCount: submittedCount + needsReviewCount + processingCount,
   };
 }
 
@@ -213,14 +232,36 @@ export async function getAdminReportDetail(reportId) {
 
   const nameById = await fetchProfileNamesByIds([report.user_id]);
 
-  const { data: ocrResult, error: ocrError } = await supabase
-    .from('receipt_ocr_results')
-    .select('id, status, provider, raw_text, processed_at')
-    .eq('purchase_report_id', reportId)
-    .maybeSingle();
+  // Isolated in its own try/catch - same reasoning as ocrLines/lineMatches/
+  // manualItems/pointsAward below, and CRITICALLY (unlike before) not left
+  // as an unguarded call any more: this was the one remaining read in this
+  // function that could take down the ENTIRE report-detail load on any
+  // transient failure, instead of degrading to the same neutral "no OCR
+  // data yet" state a genuinely OCR-less report already produces. receipt_
+  // ocr_results now has zero direct SELECT grant for `authenticated` (see
+  // 025_customer_column_grant_hardening.sql) - read through the existing
+  // SECURITY DEFINER get_admin_ocr_result() RPC instead (it has existed,
+  // is_admin()-gated and already granted, since
+  // 021_ocr_azure_document_intelligence.sql; this is simply its first real
+  // caller). Returns at most one row (purchase_report_id is unique on
+  // receipt_ocr_results), so take the first element the same way
+  // get_admin_ocr_lines/get_admin_manual_items' array results are already
+  // handled below.
+  let ocrResult = null;
+  try {
+    const { data: ocrResultRows, error: ocrError } = await supabase.rpc('get_admin_ocr_result', {
+      p_report_id: reportId,
+    });
 
-  if (ocrError) {
-    throw ocrError;
+    if (ocrError) {
+      throw ocrError;
+    }
+
+    ocrResult = (ocrResultRows && ocrResultRows[0]) || null;
+  } catch (err) {
+    if (__DEV__) {
+      console.warn('[Admin] Failed to load OCR result', { code: err?.code, message: err?.message });
+    }
   }
 
   // Deliberately isolated in its own try/catch, same reasoning as
@@ -258,52 +299,25 @@ export async function getAdminReportDetail(reportId) {
       ocrLines = lines || [];
 
       if (ocrLines.length > 0) {
-        // product_id is included here (unlike before) - it's already part
-        // of receipt_line_matches' existing column-level grant
-        // (007_create_product_matching.sql), just not previously selected
-        // by this query. Needed so a 'matched' OCR line can be prefilled
-        // with an authoritative product, not just its status label.
-        const { data: matches, error: matchesError } = await supabase
-          .from('receipt_line_matches')
-          .select('id, ocr_line_id, product_id, match_status, match_method, confidence, matched_text')
-          .in('ocr_line_id', ocrLines.map((line) => line.id));
+        // receipt_line_matches now has zero direct SELECT grant for
+        // `authenticated` (see 025_customer_column_grant_hardening.sql) -
+        // read through the new SECURITY DEFINER get_admin_receipt_line_matches()
+        // RPC instead, same is_admin() gate as get_admin_ocr_lines/
+        // get_admin_manual_items above. It is report-scoped (not filtered
+        // by the ocrLines id list client-side any more - the RPC itself
+        // joins receipt_ocr_lines/receipt_ocr_results to scope by
+        // p_report_id) and now also performs the matched-product sku/name
+        // lookup server-side, so the separate `products` round trip below
+        // is no longer needed.
+        const { data: matches, error: matchesError } = await supabase.rpc('get_admin_receipt_line_matches', {
+          p_report_id: reportId,
+        });
 
         if (matchesError) {
           throw matchesError;
         }
 
         lineMatches = matches || [];
-
-        // One small, targeted lookup for the matched products' own
-        // sku/name - never the full ~211-row catalog, never a per-row
-        // query. Enriches each matched row in place so the admin review
-        // form can show/prefill the official product identity (Stage 4's
-        // "green matched state + official SKU/product identity")
-        // directly, without a separate round trip per row.
-        const matchedProductIds = [
-          ...new Set(lineMatches.filter((match) => match.product_id).map((match) => match.product_id)),
-        ];
-
-        if (matchedProductIds.length > 0) {
-          const { data: matchedProducts, error: productsError } = await supabase
-            .from('products')
-            .select('id, sku, name')
-            .in('id', matchedProductIds);
-
-          if (productsError) {
-            throw productsError;
-          }
-
-          const productById = new Map((matchedProducts || []).map((product) => [product.id, product]));
-          lineMatches = lineMatches.map((match) => {
-            const product = match.product_id ? productById.get(match.product_id) : null;
-            return {
-              ...match,
-              matched_product_sku: product?.sku || null,
-              matched_product_name: product?.name || null,
-            };
-          });
-        }
       }
     }
   } catch (err) {

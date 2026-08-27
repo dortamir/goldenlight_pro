@@ -6,6 +6,7 @@ import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'rea
 import AdminShell from '../components/admin/AdminShell';
 import { getAdminDashboardSummary, getAdminReceiptSignedUrl, getAdminReviewQueue } from '../services/adminReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
+import { getAdminReportStatusMeta } from '../utils/adminReportStatus';
 import { isolateLTR } from '../utils/bidiText';
 
 const THUMB_WIDTH = 52;
@@ -26,33 +27,6 @@ function formatReportDate(value) {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const year = date.getFullYear();
   return `${day}.${month}.${year}`;
-}
-
-// Admin-specific status wording - deliberately distinguishes submitted
-// ("נשלחה לבדיקה" - successfully submitted, waiting for the system/admin)
-// from needs_review ("דורשת בדיקה" - specifically flagged for manual
-// review), since these are real, different internal states even though
-// both currently belong in the same admin attention queue (see
-// adminReportService.js). Colors reuse the same status-pill tokens as the
-// customer app's own getStatusMeta; only the needs_review/processing label
-// text differs, to read unambiguously in an admin context. 'processing'
-// keeps its own real chip here (an individual receipt can genuinely be in
-// that state) - only the dashboard SUMMARY/filter presentation drops it as
-// its own category, per the current admin-facing status groups.
-function getStatusMeta(status) {
-  switch (status) {
-    case 'processing':
-      return { label: 'בטיפול', backgroundColor: colors.primarySoft, textColor: colors.primary };
-    case 'needs_review':
-      return { label: 'דורשת בדיקה', backgroundColor: colors.surfaceMuted, textColor: colors.textMuted };
-    case 'approved':
-      return { label: 'אושרה', backgroundColor: colors.successSoft, textColor: colors.success };
-    case 'rejected':
-      return { label: 'נדחתה', backgroundColor: colors.errorSoft, textColor: colors.error };
-    case 'submitted':
-    default:
-      return { label: 'נשלחה לבדיקה', backgroundColor: colors.primarySoft, textColor: colors.primaryPressed };
-  }
 }
 
 export default function AdminHomeScreen() {
@@ -137,8 +111,21 @@ export default function AdminHomeScreen() {
   // represents - status-specific colors (green/red) stay confined to the
   // individual status chips on receipt rows, never the summary cards
   // themselves.
+  //
+  // STAGE 13 UPDATE: the first card links to the 'needs_review' filter key
+  // (unchanged key, so the deep link into AdminReportsHistoryScreen keeps
+  // working), but its VALUE is now summary.pendingCount - submitted +
+  // processing + needs_review combined - matching that screen's own
+  // "דורשות בדיקה" filter/summary chip, which now groups all three the
+  // same way (processing is no longer its own distinct admin-facing
+  // category anywhere - see src/utils/adminReportStatus.js). The queue
+  // list just below still shows submitted + needs_review together
+  // (getAdminReviewQueue(), unchanged, REVIEW_QUEUE_STATUSES) - that
+  // list's own row-selection was deliberately left as-is; only labels/
+  // counts/filters changed in this update, see that constant's own
+  // comment in adminReportService.js.
   const summaryCards = [
-    { key: 'pending', label: 'ממתינות לבדיקה', value: summary?.pendingCount, icon: 'time-outline' },
+    { key: 'needs_review', label: 'דורשות בדיקה', value: summary?.pendingCount, icon: 'time-outline' },
     { key: 'approved', label: 'אושרו', value: summary?.approvedCount, icon: 'checkmark-circle-outline' },
     { key: 'rejected', label: 'נדחו', value: summary?.rejectedCount, icon: 'close-circle-outline' },
   ];
@@ -211,7 +198,7 @@ export default function AdminHomeScreen() {
         ) : (
           <View style={styles.queueList}>
             {queue.map((report) => {
-              const statusMeta = getStatusMeta(report.status);
+              const statusMeta = getAdminReportStatusMeta(report.status);
               const isPdf = isPdfFile(report.original_filename);
               const thumb = thumbnails[report.id];
 

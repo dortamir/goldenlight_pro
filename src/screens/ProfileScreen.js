@@ -79,7 +79,9 @@ export default function ProfileScreen() {
       await signOut();
       router.replace('/(auth)/login');
     } catch (error) {
-      console.warn('[Auth] Logout failed', error);
+      if (__DEV__) {
+        console.warn('[Auth] Logout failed', { code: error?.code, message: error?.message });
+      }
     }
   };
 
@@ -307,7 +309,7 @@ export default function ProfileScreen() {
               ) : (
                 <View style={styles.summaryGrid}>
                   <View style={styles.summaryItem}>
-                    <Text style={styles.summaryValue} numberOfLines={1}>
+                    <Text style={styles.summaryValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>
                       {formatNumber(profile?.points_balance ?? 0)}
                     </Text>
                     <Text style={styles.summaryLabel}>נקודות</Text>
@@ -321,7 +323,7 @@ export default function ProfileScreen() {
                   </View>
                   <View style={styles.summaryDivider} />
                   <View style={styles.summaryItem}>
-                    <Text style={styles.summaryValue} numberOfLines={1}>
+                    <Text style={styles.summaryValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>
                       {formatNumber(profile?.approved_purchases_count ?? 0)}
                     </Text>
                     <Text style={styles.summaryLabel}>רכישות מאושרות</Text>

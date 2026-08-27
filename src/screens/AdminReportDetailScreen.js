@@ -30,6 +30,7 @@ import {
 } from '../services/adminReportService';
 import { getProductSuggestions } from '../services/productMatching';
 import { colors, radius, shadows, spacing, typography } from '../theme';
+import { getAdminReportStatusMeta } from '../utils/adminReportStatus';
 import { isolateLTR } from '../utils/bidiText';
 
 // Below this content width, the manual-entry table collapses to stacked
@@ -460,26 +461,6 @@ function formatReportDate(value) {
   return `${day}.${month}.${year} ${hours}:${minutes}`;
 }
 
-// Same admin-specific status vocabulary as AdminHomeScreen - see that
-// file's own copy for why submitted/needs_review are labeled distinctly
-// (not extracted into a shared helper, matching the existing per-screen
-// convention already used throughout the customer app).
-function getStatusMeta(status) {
-  switch (status) {
-    case 'processing':
-      return { label: 'בטיפול', backgroundColor: colors.primarySoft, textColor: colors.primary };
-    case 'needs_review':
-      return { label: 'דורשת בדיקה', backgroundColor: colors.surfaceMuted, textColor: colors.textMuted };
-    case 'approved':
-      return { label: 'אושרה', backgroundColor: colors.successSoft, textColor: colors.success };
-    case 'rejected':
-      return { label: 'נדחתה', backgroundColor: colors.errorSoft, textColor: colors.error };
-    case 'submitted':
-    default:
-      return { label: 'נשלחה לבדיקה', backgroundColor: colors.primarySoft, textColor: colors.primaryPressed };
-  }
-}
-
 // Three-state status for a receipt_manual_items row (019_product_matching_
 // manual_items.sql). 'unresolved' (the default - nothing decided yet) must
 // never be visually confused with 'not_golden_light' (an explicit admin
@@ -843,7 +824,12 @@ export default function AdminReportDetailScreen() {
             .catch(() => setImageState({ status: 'error', url: null }));
         }
       })
-      .catch(() => setError('לא הצלחנו לטעון את פרטי החשבונית'))
+      .catch((err) => {
+        if (__DEV__) {
+          console.error('[Admin] Failed to load report detail', { code: err?.code, message: err?.message });
+        }
+        setError('לא הצלחנו לטעון את פרטי החשבונית');
+      })
       .finally(() => setLoading(false));
   }, [id]);
 
@@ -1357,7 +1343,7 @@ export default function AdminReportDetailScreen() {
   // cropped, never stretched) regardless of aspect ratio or screen size.
   const fullscreenPreviewWidth = Math.max(windowWidth - spacing.xl * 2, 0);
   const fullscreenPreviewHeight = Math.max(windowHeight - spacing.xxl * 2, 0);
-  const statusMeta = report ? getStatusMeta(report.status) : null;
+  const statusMeta = report ? getAdminReportStatusMeta(report.status) : null;
   const isReviewable = report ? REVIEWABLE_STATUSES.includes(report.status) : false;
   const isApproved = report?.status === 'approved';
   const isRejected = report?.status === 'rejected';

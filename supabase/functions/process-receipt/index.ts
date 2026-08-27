@@ -179,6 +179,26 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // --- Reject a finalized report outright -------------------------------
+  // A report already 'approved' or 'rejected' is a terminal state - OCR
+  // must never re-run against it, even via forceRetry, even for an admin.
+  // Without this, an approved/rejected report that happens to have no
+  // receipt_ocr_results row yet (e.g. one approved manually, before OCR
+  // ever completed for it) would otherwise pass claim_ocr_processing()'s
+  // own "no existing row -> may proceed" rule and trigger a real, costed
+  // Azure re-analysis for a report that is already done - wasteful, and a
+  // real (if narrow) violation of "retry must never alter an approved/
+  // rejected report" even though it wouldn't touch points_awarded/status
+  // itself (the later status-transition updates below are already guarded
+  // by `.eq('status', ...)` and would no-op for a non-'submitted'/
+  // 'processing' report). Checked here, before claim_ocr_processing is
+  // ever called, so no Azure cost and no OCR-table writes happen at all
+  // for a finalized report.
+  if (report.status === 'approved' || report.status === 'rejected') {
+    console.log('[process-receipt] Rejected: report already finalized', purchaseReportId, report.status);
+    return jsonResponse({ ok: false, error: 'Report has already been reviewed' }, 409);
+  }
+
   console.log('[process-receipt] Processing started', purchaseReportId, { forceRetry });
 
   // --- Claim processing (concurrency-safe, cost/duplicate-call guard) ------

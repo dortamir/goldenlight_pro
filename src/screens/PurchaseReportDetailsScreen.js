@@ -9,9 +9,10 @@ import AppBackButton from '../components/common/AppBackButton';
 import AppScreen from '../components/common/AppScreen';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
-import { getPurchaseReportById, getReceiptManualItems, getReceiptSignedUrl } from '../services/purchaseReportService';
+import { getEligibleReceiptItems, getPurchaseReportById, getReceiptSignedUrl } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { isolateLTR } from '../utils/bidiText';
+import { getCustomerReceiptStatusMeta } from '../utils/purchaseReportStatus';
 
 function formatReportDate(value) {
   const date = new Date(value);
@@ -33,24 +34,6 @@ function formatNumber(value) {
 
 function isPdfFile(name) {
   return /\.pdf$/i.test(String(name || ''));
-}
-
-// STAGE 9: matches PurchaseHistoryScreen.js's own getStatusMeta() exactly -
-// see that file's comment for why submitted/processing/needs_review are
-// deliberately one customer-facing label/state, never distinguished. Only
-// approved/rejected are real, final, distinct outcomes.
-function getStatusMeta(status) {
-  switch (status) {
-    case 'approved':
-      return { label: 'אושרה', backgroundColor: colors.successSoft, textColor: colors.success };
-    case 'rejected':
-      return { label: 'נדחתה', backgroundColor: colors.errorSoft, textColor: colors.error };
-    case 'submitted':
-    case 'processing':
-    case 'needs_review':
-    default:
-      return { label: 'בבדיקה', backgroundColor: colors.primarySoft, textColor: colors.primaryPressed };
-  }
 }
 
 // Reserved for future OCR/product-matching integration. Intentionally not
@@ -76,19 +59,15 @@ function DetectedProductRow({ product }) {
   );
 }
 
-// Renders one admin-entered manual receipt line. Deliberately separate from
-// DetectedProductRow above (reserved for future confirmed Golden Light
-// catalog matches, which this is NOT) - these are simply the line items an
-// admin copied from the real receipt image while reviewing it. Only fields
-// that actually have a value are shown; nothing is invented for a missing
-// sku/quantity/unit_price/line_total.
-// Visual only - same four optional fields as before (sku/quantity/
-// unit_price/line_total), still each shown only when actually present, and
-// no value is ever computed/invented (a missing line_total stays hidden,
-// never derived from quantity × unit_price). The ₪ prefix on unit_price/
-// line_total is display-only formatting for this customer screen - the
-// underlying stored numeric value is unchanged.
-function ManualItemRow({ item }) {
+// Renders one CONFIRMED Golden Light receipt line - a receipt_manual_items
+// row the admin matched to a real catalog product (match_status =
+// 'matched'), returned only by get_my_eligible_receipt_items() (see
+// purchaseReportService.js's getEligibleReceiptItems()). Only fields that
+// actually have a value are shown; nothing is invented for a missing
+// sku/quantity/unit_price/line_total. The ₪ prefix on unit_price/line_total
+// is display-only formatting for this customer screen - the underlying
+// stored numeric value is unchanged.
+function EligibleItemRow({ item }) {
   const details = [];
 
   if (item.quantity != null) {
@@ -148,7 +127,7 @@ export default function PurchaseReportDetailsScreen() {
   const [error, setError] = useState('');
   const [notFound, setNotFound] = useState(false);
   const [imageState, setImageState] = useState({ status: 'idle', url: null });
-  const [manualItems, setManualItems] = useState([]);
+  const [eligibleItems, setEligibleItems] = useState([]);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [rootHeight, setRootHeight] = useState(0);
   const [heroHeight, setHeroHeight] = useState(0);
@@ -190,18 +169,19 @@ export default function PurchaseReportDetailsScreen() {
 
   // Isolated from the main report load on purpose - if this fails for any
   // reason, the receipt image/status/points sections must keep working
-  // regardless. An empty result (no manual items) is the normal case for
-  // every report an admin hasn't manually entered data for, not an error.
-  const loadManualItems = useCallback((purchaseReportId, isActiveRef) => {
-    getReceiptManualItems(purchaseReportId)
+  // regardless. An empty result is the normal case for every report with no
+  // confirmed Golden Light items yet (still pending review, or genuinely
+  // zero eligible items), not an error.
+  const loadEligibleItems = useCallback((purchaseReportId, isActiveRef) => {
+    getEligibleReceiptItems(purchaseReportId)
       .then((items) => {
         if (isActiveRef.current) {
-          setManualItems(items);
+          setEligibleItems(items);
         }
       })
       .catch(() => {
         if (isActiveRef.current) {
-          setManualItems([]);
+          setEligibleItems([]);
         }
       });
   }, []);
@@ -237,8 +217,8 @@ export default function PurchaseReportDetailsScreen() {
 
           setReport(data);
           loadImage(data, isActiveRef);
-          setManualItems([]);
-          loadManualItems(data.id, isActiveRef);
+          setEligibleItems([]);
+          loadEligibleItems(data.id, isActiveRef);
         } catch (err) {
           if (isActiveRef.current) {
             setReport(null);
@@ -256,7 +236,7 @@ export default function PurchaseReportDetailsScreen() {
       return () => {
         isActiveRef.current = false;
       };
-    }, [id, user?.id, loadImage, loadManualItems]),
+    }, [id, user?.id, loadImage, loadEligibleItems]),
   );
 
   const retryLoad = () => {
@@ -278,15 +258,15 @@ export default function PurchaseReportDetailsScreen() {
 
         setReport(data);
         loadImage(data, isActiveRef);
-        setManualItems([]);
-        loadManualItems(data.id, isActiveRef);
+        setEligibleItems([]);
+        loadEligibleItems(data.id, isActiveRef);
       })
       .catch(() => setError('לא הצלחנו לטעון את פרטי החשבונית'))
       .finally(() => setLoading(false));
   };
 
   const isPdf = report ? isPdfFile(report.original_filename) : false;
-  const statusMeta = report ? getStatusMeta(report.status) : null;
+  const statusMeta = report ? getCustomerReceiptStatusMeta(report.status) : null;
   const showPoints = report?.status === 'approved' && report?.points_awarded > 0;
   const canOpenPreview = !isPdf && imageState.status === 'ready' && Boolean(imageState.url);
 
@@ -407,47 +387,43 @@ export default function PurchaseReportDetailsScreen() {
                   </View>
                 </View>
 
-                {/* Manual items are real, already-saved receipt data, so
-                    they remain visible once approved. They are hidden only
-                    when rejected - the rejected state is final and only
-                    needs to show the rejection itself (see spec: "HIDE:
-                    פריטים בחשבונית" for rejected). */}
-                {!isRejected && manualItems.length > 0 ? (
-                  <View style={styles.sectionCard}>
-                    <View style={styles.sectionHeaderRow}>
-                      <View style={styles.sectionIconChip}>
-                        <Ionicons name="list-outline" size={18} color={colors.primary} />
-                      </View>
-                      <Text style={styles.sectionCardTitle}>פריטים בחשבונית</Text>
-                    </View>
-                    <Text style={styles.manualItemsNote}>הפרטים עודכנו לאחר בדיקת החשבונית</Text>
-                    <View style={styles.manualItemsList}>
-                      {manualItems.map((item) => (
-                        <ManualItemRow key={item.id} item={item} />
-                      ))}
-                    </View>
-                  </View>
-                ) : null}
-
-                {/* Real Golden Light catalog matching does not exist yet -
-                    for a FINALIZED report (approved or rejected) there is
-                    no future scan that could ever populate this, so the
-                    "pending" card would be misleading and is hidden
-                    entirely rather than shown. Only genuinely non-final
-                    reports keep the existing pending state. */}
-                {isPending ? (
+                {/* Shows ONLY confirmed Golden Light items (receipt_manual_
+                    items rows with match_status = 'matched' - see
+                    getEligibleReceiptItems()/get_my_eligible_receipt_items()),
+                    exactly the rows that contributed to points_awarded.
+                    Unresolved/not-Golden-Light rows never appear here - the
+                    RPC itself never returns them, so there is nothing to
+                    filter client-side. Hidden entirely once rejected (final
+                    state, only the rejection itself needs showing) or once
+                    finalized with zero eligible items (a clean empty state,
+                    not a misleading placeholder). While still pending
+                    review, an empty result shows the "awaiting review"
+                    message instead of hiding the section outright. */}
+                {!isRejected && eligibleItems.length > 0 ? (
                   <View style={styles.sectionCard}>
                     <View style={styles.sectionHeaderRow}>
                       <View style={styles.sectionIconChip}>
                         <Ionicons name="cube-outline" size={18} color={colors.primary} />
                       </View>
-                      <Text style={styles.sectionCardTitle}>{`מוצרי ${isolateLTR('Golden Light')} שזוהו`}</Text>
+                      <Text style={styles.sectionCardTitle}>{`מוצרי ${isolateLTR('Golden Light')}`}</Text>
+                    </View>
+                    <View style={styles.manualItemsList}>
+                      {eligibleItems.map((item) => (
+                        <EligibleItemRow key={item.id} item={item} />
+                      ))}
+                    </View>
+                  </View>
+                ) : isPending ? (
+                  <View style={styles.sectionCard}>
+                    <View style={styles.sectionHeaderRow}>
+                      <View style={styles.sectionIconChip}>
+                        <Ionicons name="cube-outline" size={18} color={colors.primary} />
+                      </View>
+                      <Text style={styles.sectionCardTitle}>{`מוצרי ${isolateLTR('Golden Light')}`}</Text>
                     </View>
                     <View style={styles.pendingBox}>
-                      <Text style={styles.pendingBoxTitle}>ממתינים לזיהוי המוצרים בחשבונית</Text>
-                      <Text style={styles.pendingBoxSubtitle}>
-                        {`לאחר סריקת החשבונית יוצגו כאן מוצרי ${isolateLTR('Golden Light')} שזוהו.`}
-                      </Text>
+                      <Text style={styles.pendingBoxTitle}>ממתינים לסיום הבדיקה</Text>
+                      <Text style={styles.pendingBoxSubtitle}>המוצרים המזכים בנקודות יוצגו לאחר סיום הבדיקה.</Text>
                     </View>
                   </View>
                 ) : null}
@@ -929,18 +905,8 @@ const styles = StyleSheet.create({
     color: colors.success,
     textAlign: 'right',
   },
-  // Manually-entered receipt items (public.receipt_manual_items) - a
-  // separate row family from DetectedProductRow/productRow above, which are
-  // reserved for future confirmed Golden Light catalog matches. These are
-  // simply what an admin copied from the real receipt image; never labeled
-  // as matched products.
-  manualItemsNote: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '500',
-    color: colors.textMuted,
-    textAlign: 'right',
-    marginBottom: spacing.xs,
-  },
+  // Confirmed Golden Light receipt items (EligibleItemRow) - the only rows
+  // returned by get_my_eligible_receipt_items() (match_status = 'matched').
   manualItemsList: {
     width: '100%',
     gap: spacing.sm,

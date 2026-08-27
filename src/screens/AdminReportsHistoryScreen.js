@@ -1,29 +1,31 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Image, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import AdminShell from '../components/admin/AdminShell';
-import { getAdminReceiptSignedUrl, getAdminReports } from '../services/adminReportService';
+import { getAdminDashboardSummary, getAdminReceiptSignedUrl, getAdminReports } from '../services/adminReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
+import { getAdminReportStatusMeta } from '../utils/adminReportStatus';
 import { isolateLTR } from '../utils/bidiText';
 
 const THUMB_WIDTH = 52;
 const THUMB_HEIGHT = 68;
 
-// Client-side filters over the single full getAdminReports() list - no
-// separate query per filter. Mapped strictly to existing purchase_reports
-// statuses, never an invented one. 'pending' intentionally groups submitted
-// + needs_review, mirroring REVIEW_QUEUE_STATUSES in adminReportService.js,
-// since there is still no automated pipeline distinguishing them from an
-// admin's point of view. 'processing' is deliberately NOT one of these -
-// it isn't part of the current admin-facing workflow (a 'processing' report
-// still appears under "הכל", just isn't isolated by its own pill). These
-// same keys are what AdminHomeScreen's dashboard cards link to via
-// `/admin/reports?filter=<key>` - see the `filter` param handling below.
+// STAGE 13 UPDATE: client-side filters over the single full
+// getAdminReports() list - no separate query per filter, unchanged from
+// before. Mapped strictly to existing purchase_reports statuses, never an
+// invented one. `processing` is a real, unchanged backend status (the OCR
+// pipeline itself is untouched by this) but is deliberately NOT exposed as
+// its own admin-facing filter/category any more - submitted, processing,
+// and needs_review all collapse into the single 'needs_review' filter key
+// (kept as that key so AdminHomeScreen's existing deep link keeps working
+// unchanged), labeled "דורשות בדיקה". This key is what AdminHomeScreen's
+// dashboard card links to via `/admin/reports?filter=needs_review` - see
+// the `filter` param handling below.
 const STATUS_FILTERS = [
   { key: 'all', label: 'הכל', statuses: null },
-  { key: 'pending', label: 'ממתינות לבדיקה', statuses: ['submitted', 'needs_review'] },
+  { key: 'needs_review', label: 'דורשות בדיקה', statuses: ['submitted', 'processing', 'needs_review'] },
   { key: 'approved', label: 'אושרו', statuses: ['approved'] },
   { key: 'rejected', label: 'נדחו', statuses: ['rejected'] },
 ];
@@ -46,25 +48,6 @@ function formatReportDate(value) {
   return `${day}.${month}.${year}`;
 }
 
-// Same admin-specific status vocabulary as AdminHomeScreen/
-// AdminReportDetailScreen - not extracted into a shared helper, matching
-// the existing per-screen convention already used throughout this app.
-function getStatusMeta(status) {
-  switch (status) {
-    case 'processing':
-      return { label: 'בטיפול', backgroundColor: colors.primarySoft, textColor: colors.primary };
-    case 'needs_review':
-      return { label: 'דורשת בדיקה', backgroundColor: colors.surfaceMuted, textColor: colors.textMuted };
-    case 'approved':
-      return { label: 'אושרה', backgroundColor: colors.successSoft, textColor: colors.success };
-    case 'rejected':
-      return { label: 'נדחתה', backgroundColor: colors.errorSoft, textColor: colors.error };
-    case 'submitted':
-    default:
-      return { label: 'נשלחה לבדיקה', backgroundColor: colors.primarySoft, textColor: colors.primaryPressed };
-  }
-}
-
 // Normalizes useLocalSearchParams()'s `filter` value (a plain string for a
 // single `?filter=x`, but expo-router types it as string | string[] since a
 // repeated query key is technically possible) down to one of
@@ -84,6 +67,21 @@ export default function AdminReportsHistoryScreen() {
   const [error, setError] = useState('');
   const [thumbnails, setThumbnails] = useState({});
   const [activeFilter, setActiveFilter] = useState(() => resolveFilterParam(filterParam));
+  // STAGE 13: free-text search over the same already-loaded getAdminReports()
+  // list - no separate query, matching this screen's existing client-side
+  // filter approach (Section 5's own explicit allowance for a queue this
+  // size). Matches customerName/original_filename only - both already
+  // safely returned by getAdminReports() today; no new field/grant.
+  const [searchQuery, setSearchQuery] = useState('');
+  // STAGE 13: compact per-status counts shown above the filter row - reuses
+  // getAdminDashboardSummary() (adminReportService.js), the same safe,
+  // admin-RLS-gated count queries AdminHomeScreen's own summary cards
+  // already use. Loaded independently of the full report list/thumbnails
+  // below (a summary failure must never block the list from rendering, and
+  // vice versa).
+  const [summary, setSummary] = useState(null);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [summaryError, setSummaryError] = useState('');
 
   // Reacts to navigating here again with a different `?filter=` (e.g. a
   // second dashboard-card click while this screen is already mounted) -
@@ -122,33 +120,139 @@ export default function AdminReportsHistoryScreen() {
       .finally(() => setLoading(false));
   }, []);
 
+  const loadSummary = useCallback(() => {
+    setSummaryLoading(true);
+    setSummaryError('');
+
+    getAdminDashboardSummary()
+      .then(setSummary)
+      .catch((err) => {
+        if (__DEV__) {
+          console.error('[Admin reports] Failed to load summary counts', err);
+        }
+        setSummaryError('לא הצלחנו לטעון את נתוני הסיכום');
+      })
+      .finally(() => setSummaryLoading(false));
+  }, []);
+
   // useFocusEffect (not a plain mount-only useEffect) - refetches whenever
   // this screen regains focus, e.g. returning from a decision made on the
   // detail screen, matching AdminHomeScreen's own refresh behavior. This
-  // never resets activeFilter - only loadReports() runs here - so returning
-  // from a receipt's detail screen via real back-navigation lands back on
-  // this same still-mounted instance with whichever filter was active
-  // before, refreshed with current data.
+  // never resets activeFilter/searchQuery - only loadReports()/loadSummary()
+  // run here - so returning from a receipt's detail screen via real
+  // back-navigation lands back on this same still-mounted instance with
+  // whichever filter/search was active before, refreshed with current data
+  // (Stage 13's own "return from detail after approval/rejection -> queue
+  // refreshes and report moves to correct status/count" requirement).
   useFocusEffect(
     useCallback(() => {
       loadReports();
-    }, [loadReports]),
+      loadSummary();
+    }, [loadReports, loadSummary]),
   );
 
   const visibleReports = useMemo(() => {
     const filter = STATUS_FILTERS.find((item) => item.key === activeFilter) || STATUS_FILTERS[0];
-    if (!filter.statuses) {
-      return reports;
+    const filtered = filter.statuses ? reports.filter((report) => filter.statuses.includes(report.status)) : reports;
+
+    const trimmedQuery = searchQuery.trim().toLowerCase();
+    if (!trimmedQuery) {
+      return filtered;
     }
-    return reports.filter((report) => filter.statuses.includes(report.status));
-  }, [reports, activeFilter]);
+
+    return filtered.filter((report) => {
+      const customerName = String(report.customerName || '').toLowerCase();
+      const filename = String(report.original_filename || '').toLowerCase();
+      return customerName.includes(trimmedQuery) || filename.includes(trimmedQuery);
+    });
+  }, [reports, activeFilter, searchQuery]);
 
   const isFiltered = activeFilter !== 'all';
+  const isSearching = searchQuery.trim().length > 0;
+
+  // Three distinct empty states (Stage 13, Section 9) - never the same
+  // generic message regardless of why the list is empty.
+  const emptyStateMessage = isSearching
+    ? 'לא נמצאו חשבוניות התואמות לחיפוש'
+    : isFiltered
+      ? 'אין חשבוניות בסטטוס זה'
+      : 'אין חשבוניות להצגה';
+
+  // STAGE 13 UPDATE: the compact summary area - exactly three counts now
+  // (no separate "בעיבוד" chip - `processing` is no longer its own
+  // admin-facing category anywhere in this screen, see STATUS_FILTERS
+  // above). "דורשות בדיקה" uses summary.pendingCount (submitted +
+  // processing + needs_review combined, adminReportService.js) and gets
+  // the `attention` treatment (stand out slightly, never the red/error
+  // tokens reserved for rejection). Each chip is itself a shortcut into
+  // the matching filter, the same click-to-filter pattern AdminHomeScreen's
+  // own summary cards already use - no separate, disconnected "analytics"
+  // widget.
+  const summaryItems = [
+    { key: 'needs_review', label: 'דורשות בדיקה', value: summary?.pendingCount, attention: true },
+    { key: 'approved', label: 'אושרו', value: summary?.approvedCount },
+    { key: 'rejected', label: 'נדחו', value: summary?.rejectedCount },
+  ];
 
   return (
     <AdminShell activeKey="history">
       <View style={styles.section}>
         <Text style={styles.pageTitle}>כל החשבוניות</Text>
+
+        {summaryError ? (
+          <View style={styles.summaryErrorRow}>
+            <Text style={styles.errorText}>{summaryError}</Text>
+            <Pressable onPress={loadSummary} accessibilityRole="button">
+              <Text style={styles.retryText}>נסו שוב</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <View style={styles.summaryRow}>
+            {summaryLoading
+              ? [0, 1, 2].map((key) => (
+                  <View key={key} style={styles.summaryChip}>
+                    <ActivityIndicator color={colors.primary} size="small" />
+                  </View>
+                ))
+              : summaryItems.map((item) => (
+                  <Pressable
+                    key={item.key}
+                    onPress={() => setActiveFilter(item.key)}
+                    style={({ pressed, hovered }) => [
+                      styles.summaryChip,
+                      item.attention && styles.summaryChipAttention,
+                      hovered && styles.summaryChipHovered,
+                      pressed && styles.summaryChipPressed,
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${item.value ?? 0} חשבוניות ${item.label}, מעבר לסינון לפי סטטוס זה`}>
+                    <Text style={[styles.summaryValue, item.attention && styles.summaryValueAttention]}>
+                      {item.value ?? 0}
+                    </Text>
+                    <Text style={styles.summaryLabel}>{item.label}</Text>
+                  </Pressable>
+                ))}
+          </View>
+        )}
+
+        <View style={styles.searchRow}>
+          <Ionicons name="search-outline" size={16} color={colors.textMuted} />
+          <TextInput
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="חיפוש לפי שם לקוח או שם קובץ"
+            placeholderTextColor={colors.textMuted}
+            style={styles.searchInput}
+            accessibilityLabel="חיפוש חשבוניות לפי שם לקוח או שם קובץ"
+            autoCorrect={false}
+            autoCapitalize="none"
+          />
+          {searchQuery ? (
+            <Pressable onPress={() => setSearchQuery('')} accessibilityRole="button" accessibilityLabel="ניקוי חיפוש" hitSlop={8}>
+              <Ionicons name="close-circle" size={18} color={colors.textMuted} />
+            </Pressable>
+          ) : null}
+        </View>
 
         <View style={styles.filterRow}>
           {STATUS_FILTERS.map((filter) => {
@@ -164,6 +268,7 @@ export default function AdminReportsHistoryScreen() {
                   pressed && styles.filterChipPressed,
                 ]}
                 accessibilityRole="button"
+                accessibilityLabel={`סינון לפי ${filter.label}`}
                 accessibilityState={{ selected: isActive }}>
                 <Text style={[styles.filterChipText, isActive && styles.filterChipTextActive]}>{filter.label}</Text>
               </Pressable>
@@ -184,26 +289,31 @@ export default function AdminReportsHistoryScreen() {
           </View>
         ) : visibleReports.length === 0 ? (
           <View style={styles.stateCard}>
-            <Text style={styles.emptyText}>{isFiltered ? 'אין חשבוניות בסטטוס זה' : 'אין חשבוניות להצגה'}</Text>
+            <Text style={styles.emptyText}>{emptyStateMessage}</Text>
           </View>
         ) : (
           <View style={styles.list}>
             {visibleReports.map((report) => {
-              const statusMeta = getStatusMeta(report.status);
+              const statusMeta = getAdminReportStatusMeta(report.status);
               const isPdf = isPdfFile(report.original_filename);
               const thumb = thumbnails[report.id];
+              // STAGE 13, Section 8: a needs_review report stands out with a
+              // subtle warm accent border - never the red/error tokens,
+              // which stay reserved for a genuine rejection.
+              const needsAttention = report.status === 'needs_review';
 
               return (
                 <Pressable
                   key={report.id}
                   style={({ pressed, hovered }) => [
                     styles.row,
+                    needsAttention && styles.rowAttention,
                     hovered && styles.rowHovered,
                     pressed && styles.rowPressed,
                   ]}
                   onPress={() => router.push(`/admin/reports/${report.id}`)}
                   accessibilityRole="button"
-                  accessibilityLabel="פתיחת פרטי חשבונית">
+                  accessibilityLabel={`חשבונית של ${report.customerName || 'משתמש ללא שם'}, סטטוס ${statusMeta.label}`}>
                   <View style={styles.thumbWrap}>
                     {isPdf ? (
                       <View style={styles.thumbPlaceholder}>
@@ -265,6 +375,85 @@ const styles = StyleSheet.create({
     lineHeight: 28,
     color: colors.text,
     textAlign: 'right',
+  },
+  // STAGE 13: the compact summary strip - small stat chips, deliberately
+  // lighter-weight than AdminHomeScreen's own larger summaryCard (this
+  // screen already has a filter row + search input competing for vertical
+  // space right below it, so these stay compact rather than duplicating
+  // that heavier card treatment).
+  summaryRow: {
+    flexDirection: 'row-reverse',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  summaryErrorRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  summaryChip: {
+    flexGrow: 1,
+    flexBasis: 84,
+    minHeight: 56,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+    gap: 2,
+    backgroundColor: colors.white,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    cursor: 'pointer',
+  },
+  // needs_review's own chip - a warm, attention-worthy tint (never the
+  // red/error tokens, reserved for genuine rejection - see
+  // src/utils/adminReportStatus.js's own comment on the same choice).
+  summaryChipAttention: {
+    backgroundColor: colors.warningSoft,
+    borderColor: colors.warning,
+  },
+  summaryChipHovered: {
+    borderColor: colors.primary,
+  },
+  summaryChipPressed: {
+    opacity: 0.85,
+  },
+  summaryValue: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: colors.text,
+    textAlign: 'right',
+  },
+  summaryValueAttention: {
+    color: colors.warning,
+  },
+  summaryLabel: {
+    ...typography.caption,
+    fontWeight: '600',
+    color: colors.textMuted,
+    textAlign: 'right',
+  },
+  searchRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.sm,
+    backgroundColor: colors.white,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    minHeight: 44,
+  },
+  searchInput: {
+    flex: 1,
+    ...typography.body,
+    color: colors.text,
+    textAlign: 'right',
+    // Same web-only focus-ring removal already used by AppInput.js/
+    // RegisterScreen.js - scoped via Platform.select so it's a genuine
+    // no-op on native, not just an unrecognized style key.
+    ...Platform.select({ web: { outlineStyle: 'none' } }),
   },
   filterRow: {
     flexDirection: 'row-reverse',
@@ -349,6 +538,14 @@ const styles = StyleSheet.create({
   },
   rowPressed: {
     opacity: 0.85,
+  },
+  // STAGE 13, Section 8: a subtle warm accent stripe on the RTL leading
+  // (right) edge for a needs_review report - stands out just enough to
+  // catch the eye while scanning the list, without the weight of a full
+  // colored card or the red/error tokens reserved for rejection.
+  rowAttention: {
+    borderRightWidth: 3,
+    borderRightColor: colors.warning,
   },
   thumbWrap: {
     width: THUMB_WIDTH,

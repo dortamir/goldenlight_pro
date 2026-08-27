@@ -94,15 +94,15 @@ export function AuthProvider({ children }) {
           return;
         }
 
-        if (error) {
+        if (error && __DEV__) {
           console.warn('[Auth] Failed to restore session', error.message);
         }
 
         setSession(currentSession);
         setUser(currentSession?.user ?? null);
       } catch (error) {
-        if (isMounted) {
-          console.warn('[Auth] Session restoration failed', error);
+        if (isMounted && __DEV__) {
+          console.warn('[Auth] Session restoration failed', { code: error?.code, message: error?.message });
         }
       }
 

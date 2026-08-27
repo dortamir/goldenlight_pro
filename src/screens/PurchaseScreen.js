@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
@@ -54,6 +54,16 @@ export default function PurchaseScreen() {
   const [isUploading, setIsUploading] = useState(false);
   const [rootHeight, setRootHeight] = useState(0);
   const [heroHeight, setHeroHeight] = useState(0);
+
+  // Synchronous re-entrancy guard for handleSubmit, separate from the
+  // isUploading STATE above. State updates are batched/async - two rapid
+  // taps on the submit button can both read isUploading as still `false`
+  // before the first tap's setIsUploading(true) has actually re-rendered
+  // the button into its disabled state, which would let both taps start a
+  // real upload + purchase_reports insert + OCR dispatch. A ref is read
+  // and written synchronously, with no render in between, so the second
+  // near-simultaneous call sees the first call's guard immediately.
+  const isSubmittingRef = useRef(false);
 
   // Same measured-minHeight approach as HomeScreen/ProfileScreen's dark
   // hero + light sheet (see HomeScreen for the full explanation) -
@@ -141,15 +151,19 @@ export default function PurchaseScreen() {
       });
       setStatus('מוכן לשליחה');
     } catch (err) {
-      console.warn('[Purchase] Failed to pick receipt', err);
+      if (__DEV__) {
+        console.warn('[Purchase] Failed to pick receipt', err);
+      }
       setError('לא הצלחנו לבחור את החשבונית');
     }
   };
 
   const handleSubmit = async () => {
-    if (!selectedReceipt || !user?.id || isUploading) {
+    if (!selectedReceipt || !user?.id || isSubmittingRef.current) {
       return;
     }
+
+    isSubmittingRef.current = true;
 
     try {
       setIsUploading(true);
@@ -158,10 +172,13 @@ export default function PurchaseScreen() {
       await submitPurchaseReceipt({ file: selectedReceipt, userId: user.id });
       setStatus('החשבונית נשלחה לבדיקה');
     } catch (err) {
-      console.warn('[Purchase] Failed to submit receipt', err);
+      if (__DEV__) {
+        console.warn('[Purchase] Failed to submit receipt', err);
+      }
       setStatus('מוכן לשליחה');
       setError('לא הצלחנו לשלוח את החשבונית. נסו שוב.');
     } finally {
+      isSubmittingRef.current = false;
       setIsUploading(false);
     }
   };
