@@ -9,6 +9,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import AppBackButton from '../components/common/AppBackButton';
 import AppScreen from '../components/common/AppScreen';
 import PrimaryButton from '../components/common/PrimaryButton';
+import ZoomableImage from '../components/common/ZoomableImage';
 import { useAuth } from '../context/AuthContext';
 import {
   getCachedReceiptUrl,
@@ -528,16 +529,18 @@ export default function PurchaseReportDetailsScreen() {
             {report ? <Text style={styles.previewDate}>{isolateLTR(formatReportDate(report.created_at))}</Text> : null}
           </View>
 
+          {/* STAGE 16.1: ZoomableImage reuses this already-resolved,
+              already-cached imageState.url directly - opening/closing the
+              viewer never triggers a fresh signed-URL request. Only
+              rendered while previewOpen (not just while the image itself is
+              ready) - Modal doesn't unmount its children when hidden, so
+              this is what makes ZoomableImage genuinely mount fresh (zoom
+              reset to fit) every time the viewer is reopened, rather than
+              silently keeping whatever zoom/pan state was left over from
+              the last time it was open. */}
           <View style={styles.previewBody}>
-            {imageState.status === 'ready' && imageState.url ? (
-              <Image
-                source={{ uri: imageState.url }}
-                style={styles.previewImage}
-                contentFit="contain"
-                cachePolicy="memory-disk"
-                recyclingKey={report?.id}
-                transition={100}
-              />
+            {previewOpen && imageState.status === 'ready' && imageState.url ? (
+              <ZoomableImage uri={imageState.url} recyclingKey={report?.id} />
             ) : null}
           </View>
 
@@ -1044,10 +1047,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.lg,
-  },
-  previewImage: {
-    width: '100%',
-    height: '100%',
   },
   closeButton: {
     marginHorizontal: spacing.xl,

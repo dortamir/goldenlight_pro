@@ -561,6 +561,20 @@ export default function HomeScreen() {
                       </Pressable>
                     );
                   })}
+                  {/* STAGE 16.1: when there's only one recent report,
+                      activityRow's own flex:1 (needed so two real cards
+                      split the row evenly, matching actionsRow's 2-column
+                      grid above) has nothing to share the row with - a
+                      lone flex:1 child fills the whole row by itself. This
+                      invisible spacer keeps the same flex:1 sizing math
+                      active with two children again, so the one real card
+                      gets EXACTLY the same width/height as either card in
+                      the two-report layout, leaving the second slot empty
+                      instead of stretching into it - never a second visual
+                      design for the one-item case. */}
+                  {recentReports.length === 1 ? (
+                    <View style={styles.activityRowEmpty} pointerEvents="none" />
+                  ) : null}
                 </View>
               )}
             </View>
@@ -828,6 +842,13 @@ root: {
   },
   activityRowPressed: {
     opacity: 0.85,
+  },
+  // STAGE 16.1: invisible spacer for the one-recent-report case - see the
+  // render comment above. flex:1 only, matching activityRow's own flex:1,
+  // no background/border/content, so it takes up the second slot's space
+  // without ever being visible or interactive.
+  activityRowEmpty: {
+    flex: 1,
   },
   // Fixed-size container (not tied to the image's real aspect ratio) - the
   // CONTAINER dictates the box, and the image (resizeMode="contain" below)

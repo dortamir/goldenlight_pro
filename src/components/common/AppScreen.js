@@ -1,10 +1,8 @@
 import {
-    Keyboard,
     KeyboardAvoidingView,
     Platform,
     ScrollView,
     StyleSheet,
-    TouchableWithoutFeedback,
     View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -34,6 +32,24 @@ export default function AppScreen({
     </View>
   );
 
+  // STAGE 16.1: keyboard-dismiss-on-tap used to be a TouchableWithoutFeedback
+  // wrapping the entire ScrollView. That's a well-known source of unreliable
+  // scroll-gesture recognition on iOS: TouchableWithoutFeedback claims the
+  // JS touch responder on every touch-start and only releases it once a
+  // scroll is detected, via the same responder-negotiation path that made
+  // scrolling feel inconsistent on the physical device - a real touch has
+  // latency a simulator/web preview doesn't reproduce the same way.
+  // `keyboardDismissMode="on-drag"` is ScrollView's own native prop (no JS
+  // responder involved at all) and dismisses the keyboard as soon as a
+  // scroll drag starts - the same practical behavior, without ever
+  // competing with the ScrollView's own gesture recognizer.
+  const scrollViewProps = {
+    keyboardShouldPersistTaps: 'handled',
+    keyboardDismissMode: 'on-drag',
+    contentContainerStyle: [styles.contentContainer, contentContainerStyle],
+    showsVerticalScrollIndicator: false,
+  };
+
   return (
     <SafeAreaView edges={edges} style={[styles.safeArea, { backgroundColor: resolvedBackground }]}>
       {keyboardAware ? (
@@ -41,28 +57,10 @@ export default function AppScreen({
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={styles.flex}
           keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}>
-          <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
-            <View style={styles.flex}>
-              {scrollable ? (
-                <ScrollView
-                  keyboardShouldPersistTaps="handled"
-                  contentContainerStyle={[styles.contentContainer, contentContainerStyle]}
-                  showsVerticalScrollIndicator={false}>
-                  {content}
-                </ScrollView>
-              ) : (
-                content
-              )}
-            </View>
-          </TouchableWithoutFeedback>
+          {scrollable ? <ScrollView {...scrollViewProps}>{content}</ScrollView> : content}
         </KeyboardAvoidingView>
       ) : scrollable ? (
-        <ScrollView
-          keyboardShouldPersistTaps="handled"
-          contentContainerStyle={[styles.contentContainer, contentContainerStyle]}
-          showsVerticalScrollIndicator={false}>
-          {content}
-        </ScrollView>
+        <ScrollView {...scrollViewProps}>{content}</ScrollView>
       ) : (
         content
       )}

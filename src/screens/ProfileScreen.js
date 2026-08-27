@@ -7,7 +7,12 @@ import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, useWindowDimensi
 
 import AppScreen from '../components/common/AppScreen';
 import { useAuth } from '../context/AuthContext';
-import { getCachedAvatarUrl, getProfile, getProfileAvatarSignedUrl } from '../services/profileService';
+import {
+  getCachedAvatarUrl,
+  getCachedProfile,
+  getProfile,
+  getProfileAvatarSignedUrl,
+} from '../services/profileService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { isolateLTR } from '../utils/bidiText';
 
@@ -34,14 +39,44 @@ const accountActions = [
 export default function ProfileScreen() {
   const router = useRouter();
   const { signOut, user } = useAuth();
-  const [profile, setProfile] = useState(null);
-  const [loading, setLoading] = useState(true);
+  // STAGE 16.1: initializes from the shared profileService cache
+  // (getCachedProfile - synchronous, service-level, already populated by
+  // Home/Rewards if either was visited in the last few seconds) instead of
+  // always starting at `null`/`loading:true`. Home and Rewards already call
+  // getProfile() on their own focus, and that call transparently populates
+  // this SAME cache (see profileService.js) - but ProfileScreen previously
+  // never checked it for its OWN initial render, so even a guaranteed
+  // cache-hit still showed a full-screen spinner for at least one render
+  // cycle (an async function's `.then` continuation always resolves on a
+  // later microtask, never synchronously, even when the value was already
+  // known). Reading the cache directly into useState's lazy initializer
+  // (runs once, on mount) means a revisit within the cache's TTL renders
+  // the real name/points/tier on the very first paint - genuinely
+  // immediate, not just fast. A true cold Profile-first-visit (no cache
+  // entry yet) still starts at null/loading, unchanged from before.
+  const initialCachedProfile = getCachedProfile(user?.id);
+  const [profile, setProfile] = useState(initialCachedProfile);
+  const [loading, setLoading] = useState(!initialCachedProfile);
   const [error, setError] = useState('');
-  // status: 'loading' | 'none' | 'ready' | 'error'. Starts as 'loading' so the
-  // avatar circle never falls back to the initial-letter placeholder while we
-  // don't yet know whether this profile has an avatar_path — that fallback
-  // is reserved for the 'none'/'error' states once we actually know.
-  const [avatarState, setAvatarState] = useState({ status: 'loading', url: null });
+  // STAGE 16.1: same cache-first initialization as profile/loading above,
+  // one level deeper - if the cached profile ALSO already has a cached
+  // avatar signed URL (getCachedAvatarUrl, Stage 15.1's own cache), the
+  // avatar can start 'ready' immediately too. status: 'loading' | 'none' |
+  // 'ready' | 'error'. Falls back to 'loading' (avatar_path not yet known)
+  // or 'none' (profile known, no avatar_path) exactly as loadProfile()
+  // itself would resolve them - this mirrors that logic for the one-time
+  // initial render only, never duplicates it as a second source of truth.
+  const initialAvatarPath = initialCachedProfile?.avatar_path || null;
+  const initialCachedAvatarUrl = initialAvatarPath ? getCachedAvatarUrl(initialAvatarPath) : null;
+  const [avatarState, setAvatarState] = useState(() => {
+    if (!initialCachedProfile) {
+      return { status: 'loading', url: null };
+    }
+    if (!initialAvatarPath) {
+      return { status: 'none', url: null };
+    }
+    return initialCachedAvatarUrl ? { status: 'ready', url: initialCachedAvatarUrl } : { status: 'loading', url: null };
+  });
   // Mirrors the URL currently shown on screen (only while status === 'ready').
   // Avatar uploads reuse the same storage path (upsert), so avatar_path
   // staying the same string does NOT mean the underlying image is
@@ -49,13 +84,18 @@ export default function ProfileScreen() {
   // does. Using a ref (not state) avoids a stale closure inside the
   // useFocusEffect callback below, which is only recreated when user?.id
   // changes.
-  const currentAvatarUrlRef = useRef(null);
+  const currentAvatarUrlRef = useRef(initialCachedAvatarUrl);
   // STAGE 15.3: see HomeScreen.js's own hasLoadedProfileRef for the full
   // explanation - distinguishes the true first load (full-screen spinner)
   // from a background refresh-on-focus (last-good name/points/membership
   // text stays visible). The avatar itself already has its own equivalent
   // stale-while-refresh handling above (currentAvatarUrlRef) - unchanged.
-  const hasLoadedProfileRef = useRef(false);
+  // STAGE 16.1: starts true when initialCachedProfile already had a value -
+  // otherwise the very first useFocusEffect firing right after a
+  // cache-hit-initialized mount would treat itself as the "initial load"
+  // anyway and flash setLoading(true) once more, undoing the immediate
+  // first paint above.
+  const hasLoadedProfileRef = useRef(Boolean(initialCachedProfile));
   const [rootHeight, setRootHeight] = useState(0);
   const [heroHeight, setHeroHeight] = useState(0);
   // View-only full-size preview - never opened for the loading/none/error
