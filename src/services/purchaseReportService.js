@@ -1,5 +1,3 @@
-import { Platform } from 'react-native';
-
 import { supabase } from './supabase';
 
 // STAGE 15.1: receipt-image signed-URL cache, mirroring profileService.js's
@@ -53,21 +51,39 @@ function sanitizeFilename(fileName) {
   return `${trimmed || 'receipt'}${extension}`;
 }
 
+// STAGE 15.2: reads the local file's REAL bytes into a genuine Blob/File on
+// every platform, instead of handing native's `{uri, name, type}` descriptor
+// object straight to `@supabase/storage-js`'s `upload()`. That object shape
+// is the conventional React Native FormData-file convention (only meaningful
+// when appended to a FormData via `formData.append('file', {uri,name,type})`)
+// - `@supabase/storage-js` does NOT do that internally. Its `uploadOrUpdate()`
+// only builds a proper multipart FormData body when the value passed in is
+// already `instanceof Blob` or `instanceof FormData`; anything else (this
+// object included) falls through to a branch that sends the value directly
+// as the fetch body, with headers built from `options.contentType`. A plain
+// JS object passed as a fetch `body` is not file content - live Storage
+// inspection (`storage.objects.metadata.size`) confirmed every camera
+// upload was landing at 251 bytes regardless of the real photo's size,
+// consistent with some serialized form of this descriptor object being
+// uploaded instead of the photo. Fetching the local `file://` URI and
+// reading its real bytes via `.blob()` - already used here for web, now
+// used unconditionally - produces a genuine `Blob`, which IS handled by
+// that Blob-specific branch and uploads correctly on every platform.
 async function createUploadPayload(file) {
   const mimeType = file?.type || 'image/jpeg';
   const safeName = sanitizeFilename(file?.name || file?.fileName || 'receipt.jpg');
 
-  if (Platform.OS === 'web') {
-    const response = await fetch(file.uri);
-    const blob = await response.blob();
-    return new File([blob], safeName, { type: mimeType });
+  const response = await fetch(file.uri);
+  const blob = await response.blob();
+
+  if (__DEV__) {
+    console.log('[Purchase] Receipt read into upload Blob', {
+      byteSize: typeof blob.size === 'number' ? blob.size : null,
+      contentType: mimeType,
+    });
   }
 
-  return {
-    uri: file.uri,
-    name: safeName,
-    type: mimeType,
-  };
+  return new File([blob], safeName, { type: mimeType });
 }
 
 export async function uploadReceipt({ file, userId, purchaseReportId }) {
@@ -217,6 +233,8 @@ export async function getMyPurchaseReports(userId) {
     return [];
   }
 
+  const startedAt = __DEV__ ? Date.now() : 0;
+
   const { data, error } = await supabase
     .from('purchase_reports')
     .select(
@@ -226,7 +244,21 @@ export async function getMyPurchaseReports(userId) {
     .order('created_at', { ascending: false });
 
   if (error) {
+    if (__DEV__) {
+      console.warn('[Purchase] getMyPurchaseReports failed', {
+        code: error.code,
+        message: error.message,
+        elapsedMs: Date.now() - startedAt,
+      });
+    }
     throw error;
+  }
+
+  if (__DEV__) {
+    console.log('[Purchase] getMyPurchaseReports succeeded', {
+      count: data?.length ?? 0,
+      elapsedMs: Date.now() - startedAt,
+    });
   }
 
   return data || [];
@@ -316,6 +348,11 @@ export async function getReceiptSignedUrl(receiptPath, expiresInSeconds = RECEIP
     return inflight;
   }
 
+  if (__DEV__) {
+    console.log('[Purchase] Receipt signed URL request start (cache miss)', receiptPath);
+  }
+  const startedAt = __DEV__ ? Date.now() : 0;
+
   const requestPromise = (async () => {
     const { data, error } = await supabase.storage
       .from('receipts')
@@ -325,7 +362,9 @@ export async function getReceiptSignedUrl(receiptPath, expiresInSeconds = RECEIP
       // Never log the receiptPath's actual signed URL - only success/failure
       // and the storage path (already known to belong to this user).
       if (__DEV__) {
-        console.warn('[Purchase] Failed to create receipt signed URL', receiptPath, error.message);
+        console.warn('[Purchase] Failed to create receipt signed URL', receiptPath, error.message, {
+          elapsedMs: Date.now() - startedAt,
+        });
       }
       throw error;
     }
@@ -333,7 +372,9 @@ export async function getReceiptSignedUrl(receiptPath, expiresInSeconds = RECEIP
     const url = data?.signedUrl || null;
 
     if (__DEV__) {
-      console.log('[Purchase] Receipt signed URL created', receiptPath, url ? 'ok' : 'empty');
+      console.log('[Purchase] Receipt signed URL created', receiptPath, url ? 'ok' : 'empty', {
+        elapsedMs: Date.now() - startedAt,
+      });
     }
 
     if (url) {

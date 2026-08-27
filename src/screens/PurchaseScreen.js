@@ -73,40 +73,52 @@ function isSupportedReceiptAsset(asset) {
 // the original HEIC bytes correctly otherwise. When the real format can't
 // be determined (e.g. running on web, or a native read failure), this falls
 // back to the original metadata-based check unchanged, exactly as before.
-async function resolveReceiptAsset(asset) {
+// STAGE 15.2: `sourceLabel` ('camera' | 'library') is only used for the
+// DEV-only diagnostic log below - side-by-side timing/metadata for both
+// picker paths, to compare a working library pick against a camera capture
+// without ever logging image bytes/contents or secrets.
+async function resolveReceiptAsset(asset, sourceLabel) {
   const detectedFormat = await detectImageFormat(asset.uri);
+  let result;
+  let converted = null;
 
   if (detectedFormat === 'heic') {
-    if (__DEV__) {
-      console.log('[Purchase] HEIC/HEIF receipt detected - converting to JPEG before upload', {
-        claimedMimeType: asset.mimeType || null,
-        claimedFileName: asset.fileName || null,
-      });
-    }
-
     const rendered = await ImageManipulator.manipulate(asset.uri).renderAsync();
-    const converted = await rendered.saveAsync({ format: SaveFormat.JPEG, compress: 1 });
-
-    return { uri: converted.uri, name: 'receipt.jpg', type: 'image/jpeg' };
-  }
-
-  if (detectedFormat === 'jpeg' || detectedFormat === 'png' || detectedFormat === 'webp') {
-    return {
+    converted = await rendered.saveAsync({ format: SaveFormat.JPEG, compress: 1 });
+    result = { uri: converted.uri, name: 'receipt.jpg', type: 'image/jpeg' };
+  } else if (detectedFormat === 'jpeg' || detectedFormat === 'png' || detectedFormat === 'webp') {
+    result = {
       uri: asset.uri,
       name: asset.fileName || 'receipt.jpg',
       type: DETECTED_FORMAT_MIME_TYPES[detectedFormat],
     };
+  } else if (isSupportedReceiptAsset(asset)) {
+    result = {
+      uri: asset.uri,
+      name: asset.fileName || 'receipt.jpg',
+      type: asset.mimeType || 'image/jpeg',
+    };
+  } else {
+    result = null;
   }
 
-  if (!isSupportedReceiptAsset(asset)) {
-    return null;
+  if (__DEV__) {
+    console.log('[Purchase] Receipt asset resolved', {
+      source: sourceLabel,
+      uriScheme: String(asset.uri || '').split(':')[0] || null,
+      claimedFileName: asset.fileName || null,
+      claimedMimeType: asset.mimeType || null,
+      detectedFormat,
+      convertedToJpeg: Boolean(converted),
+      convertedWidth: converted?.width ?? null,
+      convertedHeight: converted?.height ?? null,
+      resolvedUriScheme: result ? String(result.uri || '').split(':')[0] || null : null,
+      resolvedType: result?.type || null,
+      supported: Boolean(result),
+    });
   }
 
-  return {
-    uri: asset.uri,
-    name: asset.fileName || 'receipt.jpg',
-    type: asset.mimeType || 'image/jpeg',
-  };
+  return result;
 }
 
 export default function PurchaseScreen() {
@@ -167,16 +179,7 @@ export default function PurchaseScreen() {
           return;
         }
 
-        if (__DEV__) {
-          console.log('[Purchase] Receipt picked', {
-            source: 'camera',
-            fileName: asset.fileName || null,
-            mimeType: asset.mimeType || null,
-            uriScheme: String(asset.uri || '').split(':')[0] || null,
-          });
-        }
-
-        const resolvedCamera = await resolveReceiptAsset(asset);
+        const resolvedCamera = await resolveReceiptAsset(asset, 'camera');
         if (!resolvedCamera) {
           setError(UNSUPPORTED_IMAGE_FORMAT_MESSAGE);
           return;
@@ -208,16 +211,7 @@ export default function PurchaseScreen() {
         return;
       }
 
-      if (__DEV__) {
-        console.log('[Purchase] Receipt picked', {
-          source: 'library',
-          fileName: asset.fileName || null,
-          mimeType: asset.mimeType || null,
-          uriScheme: String(asset.uri || '').split(':')[0] || null,
-        });
-      }
-
-      const resolvedLibrary = await resolveReceiptAsset(asset);
+      const resolvedLibrary = await resolveReceiptAsset(asset, 'library');
       if (!resolvedLibrary) {
         setError(UNSUPPORTED_IMAGE_FORMAT_MESSAGE);
         return;

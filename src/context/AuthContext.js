@@ -82,6 +82,10 @@ export function AuthProvider({ children }) {
     let isMounted = true;
 
     async function initializeSession() {
+      if (__DEV__) {
+        console.log('[Auth] Initialization started');
+      }
+
       if (!supabase) {
         if (isMounted) {
           setLoading(false);
@@ -100,6 +104,10 @@ export function AuthProvider({ children }) {
           console.warn('[Auth] Failed to restore session', error.message);
         }
 
+        if (__DEV__) {
+          console.log('[Auth] getSession resolved', { hasSession: Boolean(currentSession) });
+        }
+
         setSession(currentSession);
         setUser(currentSession?.user ?? null);
       } catch (error) {
@@ -108,9 +116,32 @@ export function AuthProvider({ children }) {
         }
       }
 
+      // STAGE 15.2: `loading` only flips to `false` from inside this
+      // subscription callback now - never from a separate, earlier
+      // synchronous call right after `getSession()` above resolves (the
+      // previous behavior). `getSession()`'s own snapshot and this
+      // subscription are two different signals from the same underlying
+      // auth client; supabase-js guarantees this callback fires at least
+      // once on startup (the documented `INITIAL_SESSION` event, "emitted
+      // right after the Supabase client is constructed and the initial
+      // session from storage is loaded"), so waiting for it - rather than
+      // for `getSession()`'s own resolution - is a strictly more
+      // conservative readiness signal for "this app's authenticated
+      // requests are now safe to fire," without any arbitrary delay: it
+      // still resolves as soon as the underlying client is actually ready,
+      // never later than that. HomeScreen/ProfileScreen/PurchaseHistoryScreen
+      // never fire their own first authenticated request until `loading`
+      // (from this same AuthContext) is false, via the routing guards in
+      // app/index.js and app/(tabs)/_layout.js - so this directly narrows
+      // the cold-start window in which a data fetch could race ahead of the
+      // auth client's own confirmed-ready state.
       const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
         if (!isMounted) {
           return;
+        }
+
+        if (__DEV__) {
+          console.log('[Auth] onAuthStateChange fired', { event, hasSession: Boolean(nextSession) });
         }
 
         // Supabase's own PASSWORD_RECOVERY event only fires from its
@@ -131,11 +162,11 @@ export function AuthProvider({ children }) {
         setSession(nextSession);
         setUser(nextSession?.user ?? null);
         setLoading(false);
-      });
 
-      if (isMounted) {
-        setLoading(false);
-      }
+        if (__DEV__) {
+          console.log('[Auth] Initialization complete - loading=false');
+        }
+      });
 
       return () => subscription.unsubscribe();
     }

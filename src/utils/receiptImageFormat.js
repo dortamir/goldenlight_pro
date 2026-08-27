@@ -19,6 +19,15 @@ import { File } from 'expo-file-system';
 // implements the standard `Blob` interface) and only the first 16 bytes of
 // the resulting buffer are inspected - a single one-time read at
 // picker-selection time, not per-render.
+//
+// SDK-54 PORTABILITY: `detectImageFormat(uri)` is this module's only export
+// and the only thing any caller (PurchaseScreen.js) touches - the SDK-57
+// `expo-file-system` `File` class used internally is fully contained here.
+// If the SDK-54 iPhone test shell ends up on an older `expo-file-system`
+// without this `File` class, only the body of this one function needs an
+// SDK-54-specific byte-reading implementation (e.g. the older
+// `readAsStringAsync(uri, {encoding: 'base64', length, position})`
+// function-based API) - no call site anywhere else in the app changes.
 
 // HEIC/HEIF files use the same ISO-BMFF container as MP4: a 4-byte size,
 // then `ftyp`, then a 4-byte "brand" identifying the specific format. These

@@ -10,7 +10,12 @@ import AppBackButton from '../components/common/AppBackButton';
 import AppScreen from '../components/common/AppScreen';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
-import { getEligibleReceiptItems, getPurchaseReportById, getReceiptSignedUrl } from '../services/purchaseReportService';
+import {
+  getCachedReceiptUrl,
+  getEligibleReceiptItems,
+  getPurchaseReportById,
+  getReceiptSignedUrl,
+} from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { isolateLTR } from '../utils/bidiText';
 import { getCustomerReceiptStatusMeta } from '../utils/purchaseReportStatus';
@@ -147,9 +152,19 @@ export default function PurchaseReportDetailsScreen() {
   const sheetMinHeight =
     rootHeight > 0 && heroHeight > 0 ? rootHeight - heroHeight + radius.xl : undefined;
 
+  // STAGE 15.2: shows a cached signed URL immediately as 'ready' instead of
+  // resetting to 'loading' first - same fix/reasoning as HomeScreen.js's own
+  // loadThumbnails - so revisiting a report already viewed this session
+  // never flashes its receipt image back to a placeholder.
   const loadImage = useCallback((currentReport, isActiveRef) => {
     if (isPdfFile(currentReport.original_filename) || !currentReport.receipt_path) {
       setImageState({ status: 'idle', url: null });
+      return;
+    }
+
+    const cachedUrl = getCachedReceiptUrl(currentReport.receipt_path);
+    if (cachedUrl) {
+      setImageState({ status: 'ready', url: cachedUrl });
       return;
     }
 

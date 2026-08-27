@@ -66,13 +66,20 @@ export default function TabsLayout() {
         // <Text> ourselves). That takes a different, far less-exercised
         // internal render path than a plain string label - it renders fine
         // on web but was found to render no visible label at all on a
-        // physical iPhone. Passing plain strings (each screen's own
-        // `title`, already identical to what those custom labels rendered)
-        // uses the library's own standard label element instead, which
-        // already reads `tabBarActiveTintColor`/`tabBarInactiveTintColor`
-        // above to color itself per focus state - no custom function
-        // needed. `tabBarLabelStyle` only carries this app's RTL/sizing
-        // tweaks, not color.
+        // physical iPhone. `tabBarLabelStyle` only carries this app's
+        // RTL/sizing tweaks, not color - color comes from
+        // tabBarActiveTintColor/tabBarInactiveTintColor above, applied
+        // automatically by the library's own label element for a plain
+        // string label (STAGE 15.2: each Tabs.Screen below now sets its own
+        // explicit `tabBarLabel` string rather than only relying on `title`
+        // - traced this exact rendering path in both this project's SDK 57
+        // expo-router (vendors @react-navigation/bottom-tabs internally)
+        // and, read-only, the SDK 54 iPhone test shell's standalone
+        // @react-navigation/bottom-tabs@7 package: both resolve a string
+        // `tabBarLabel` (or `title` as fallback) through the identical
+        // standard <Label> element, so `title`-only should already have
+        // worked - this makes the label source fully explicit as well,
+        // removing any dependency on that fallback resolution).
         tabBarLabelStyle: styles.tabBarLabel,
         tabBarHideOnKeyboard: true,
         tabBarShowLabel: true,
@@ -81,6 +88,7 @@ export default function TabsLayout() {
         name="profile"
         options={{
           title: 'אזור אישי',
+          tabBarLabel: 'אזור אישי',
           tabBarIcon: renderTabIcon('person-outline', 'person'),
         }}
       />
@@ -88,6 +96,7 @@ export default function TabsLayout() {
         name="rewards"
         options={{
           title: 'מתנות',
+          tabBarLabel: 'מתנות',
           tabBarIcon: renderTabIcon('gift-outline', 'gift'),
         }}
       />
@@ -95,6 +104,7 @@ export default function TabsLayout() {
         name="purchase"
         options={{
           title: 'דיווח רכישה',
+          tabBarLabel: 'דיווח רכישה',
           tabBarIcon: renderTabIcon('receipt-outline', 'receipt'),
         }}
       />
@@ -102,6 +112,7 @@ export default function TabsLayout() {
         name="index"
         options={{
           title: 'בית',
+          tabBarLabel: 'בית',
           tabBarIcon: renderTabIcon('home-outline', 'home'),
         }}
       />

@@ -10,7 +10,7 @@ import PointsBalanceCard from '../components/common/PointsBalanceCard';
 import { getMembershipLevelInfo } from '../constants/membershipLevels';
 import { useAuth } from '../context/AuthContext';
 import { getProfile } from '../services/profileService';
-import { getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
+import { getCachedReceiptUrl, getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { isolateLTR } from '../utils/bidiText';
 import { getCustomerReceiptStatusMeta } from '../utils/purchaseReportStatus';
@@ -88,6 +88,10 @@ export default function HomeScreen() {
       let isMounted = true;
 
       async function loadProfile() {
+        if (__DEV__) {
+          console.log('[Home] Focus - loadProfile start', { hasUserId: Boolean(user?.id) });
+        }
+
         if (!user?.id) {
           setProfile(null);
           setLoading(false);
@@ -104,10 +108,18 @@ export default function HomeScreen() {
             return;
           }
 
+          if (__DEV__) {
+            console.log('[Home] loadProfile succeeded');
+          }
+
           setProfile(data);
         } catch (err) {
           if (!isMounted) {
             return;
+          }
+
+          if (__DEV__) {
+            console.warn('[Home] loadProfile failed', { code: err?.code, message: err?.message });
           }
 
           setProfile(null);
@@ -132,11 +144,23 @@ export default function HomeScreen() {
   // list - keeps this bounded to at most 2 signed-URL requests per focus,
   // the same private-Storage pattern already used by PurchaseHistoryScreen
   // (never getPublicUrl, never a public bucket).
+  // STAGE 15.2: no longer resets every entry to 'loading' up front - a
+  // cached signed URL (getCachedReceiptUrl, synchronous) is shown
+  // immediately as 'ready', so a report whose thumbnail was already loaded
+  // earlier this session never flashes back to a placeholder just because
+  // the user switched tabs and came back. Only genuinely uncached reports
+  // go through the 'loading' -> fetch -> 'ready'/'error' sequence.
   const loadThumbnails = useCallback((items, isActiveRef) => {
     items
       .filter((report) => !isPdfFile(report.original_filename) && report.receipt_path)
       .forEach((report) => {
-        setPreviewUrls((prev) => ({ ...prev, [report.id]: { status: 'loading', url: null } }));
+        const cachedUrl = getCachedReceiptUrl(report.receipt_path);
+        if (cachedUrl) {
+          setPreviewUrls((prev) => ({ ...prev, [report.id]: { status: 'ready', url: cachedUrl } }));
+          return;
+        }
+
+        setPreviewUrls((prev) => ({ ...prev, [report.id]: prev[report.id] ?? { status: 'loading', url: null } }));
 
         getReceiptSignedUrl(report.receipt_path)
           .then((url) => {
@@ -157,9 +181,12 @@ export default function HomeScreen() {
   useFocusEffect(
     useCallback(() => {
       const isActiveRef = { current: true };
-      setPreviewUrls({});
 
       async function loadReports() {
+        if (__DEV__) {
+          console.log('[Home] Focus - loadReports start', { hasUserId: Boolean(user?.id) });
+        }
+
         if (!user?.id) {
           setReports([]);
           setReportsLoading(false);
@@ -173,11 +200,17 @@ export default function HomeScreen() {
           const data = await getMyPurchaseReports(user.id);
 
           if (isActiveRef.current) {
+            if (__DEV__) {
+              console.log('[Home] loadReports succeeded', { count: data.length });
+            }
             setReports(data);
             loadThumbnails(data.slice(0, 2), isActiveRef);
           }
         } catch (err) {
           if (isActiveRef.current) {
+            if (__DEV__) {
+              console.warn('[Home] loadReports failed', { code: err?.code, message: err?.message });
+            }
             setReports([]);
             setReportsError('לא הצלחנו לטעון את הפעילות האחרונה');
           }

@@ -1,5 +1,3 @@
-import { Platform } from 'react-native';
-
 import { supabase } from './supabase';
 
 const PROFILE_COLUMNS =
@@ -68,6 +66,8 @@ export async function getProfile(userId) {
     throw new Error('Profile not available');
   }
 
+  const startedAt = __DEV__ ? Date.now() : 0;
+
   const { data, error } = await supabase
     .from('profiles')
     .select(PROFILE_COLUMNS)
@@ -75,7 +75,14 @@ export async function getProfile(userId) {
     .maybeSingle();
 
   if (error) {
+    if (__DEV__) {
+      console.warn('[Profile] getProfile failed', { code: error.code, message: error.message, elapsedMs: Date.now() - startedAt });
+    }
     throw error;
+  }
+
+  if (__DEV__) {
+    console.log('[Profile] getProfile succeeded', { elapsedMs: Date.now() - startedAt });
   }
 
   return data;
@@ -131,18 +138,17 @@ function getAvatarExtension(mimeType) {
   }
 }
 
+// STAGE 15.2: same fix as purchaseReportService.js's createUploadPayload()
+// (see its comment for the full explanation) - `{uri,name,type}` passed
+// directly to `@supabase/storage-js`'s `upload()` is not a Blob/FormData, so
+// it falls through to a branch that sends the object itself as the fetch
+// body rather than the file's real bytes. Fetching the local `file://` URI
+// and reading its actual bytes via `.blob()` (already used here for web, now
+// unconditional) produces a genuine Blob on every platform.
 async function createAvatarUploadPayload(asset, mimeType, fileName) {
-  if (Platform.OS === 'web') {
-    const response = await fetch(asset.uri);
-    const blob = await response.blob();
-    return new File([blob], fileName, { type: mimeType });
-  }
-
-  return {
-    uri: asset.uri,
-    name: fileName,
-    type: mimeType,
-  };
+  const response = await fetch(asset.uri);
+  const blob = await response.blob();
+  return new File([blob], fileName, { type: mimeType });
 }
 
 export async function uploadProfileAvatar(userId, asset) {
@@ -217,16 +223,34 @@ export async function getProfileAvatarSignedUrl(avatarPath, options = {}) {
     }
   }
 
+  if (__DEV__) {
+    console.log('[Profile] Avatar signed URL request start (cache miss)', avatarPath);
+  }
+  const startedAt = __DEV__ ? Date.now() : 0;
+
   const requestPromise = (async () => {
     const { data, error } = await supabase.storage
       .from(AVATAR_BUCKET)
       .createSignedUrl(avatarPath, AVATAR_SIGNED_URL_TTL_SECONDS);
 
     if (error) {
+      // Never log the actual signed URL - only success/failure and the
+      // storage path (already known to belong to this user).
+      if (__DEV__) {
+        console.warn('[Profile] Failed to create avatar signed URL', avatarPath, error.message, {
+          elapsedMs: Date.now() - startedAt,
+        });
+      }
       throw error;
     }
 
     const url = data?.signedUrl || null;
+
+    if (__DEV__) {
+      console.log('[Profile] Avatar signed URL created', avatarPath, url ? 'ok' : 'empty', {
+        elapsedMs: Date.now() - startedAt,
+      });
+    }
 
     if (url) {
       avatarUrlCache.set(avatarPath, {

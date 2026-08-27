@@ -8,7 +8,7 @@ import AppBackButton from '../components/common/AppBackButton';
 import AppScreen from '../components/common/AppScreen';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
-import { getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
+import { getCachedReceiptUrl, getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { isolateLTR } from '../utils/bidiText';
 import { getCustomerReceiptStatusMeta } from '../utils/purchaseReportStatus';
@@ -76,11 +76,20 @@ export default function PurchaseHistoryScreen() {
   const sheetMinHeight =
     rootHeight > 0 && heroHeight > 0 ? rootHeight - heroHeight + radius.xl : undefined;
 
+  // STAGE 15.2: cached signed URLs render immediately as 'ready' instead of
+  // every entry resetting to 'loading' first - see HomeScreen.js's own
+  // loadThumbnails for the full explanation (same fix, same reasoning).
   const loadThumbnails = useCallback((items, isActiveRef) => {
     items
       .filter((report) => !isPdfFile(report.original_filename) && report.receipt_path)
       .forEach((report) => {
-        setPreviewUrls((prev) => ({ ...prev, [report.id]: { status: 'loading', url: null } }));
+        const cachedUrl = getCachedReceiptUrl(report.receipt_path);
+        if (cachedUrl) {
+          setPreviewUrls((prev) => ({ ...prev, [report.id]: { status: 'ready', url: cachedUrl } }));
+          return;
+        }
+
+        setPreviewUrls((prev) => ({ ...prev, [report.id]: prev[report.id] ?? { status: 'loading', url: null } }));
 
         getReceiptSignedUrl(report.receipt_path)
           .then((url) => {
@@ -101,7 +110,6 @@ export default function PurchaseHistoryScreen() {
   useFocusEffect(
     useCallback(() => {
       const isActiveRef = { current: true };
-      setPreviewUrls({});
 
       async function loadReports() {
         if (!user?.id) {
