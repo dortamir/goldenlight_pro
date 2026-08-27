@@ -1,9 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
+import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
+import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppBackButton from '../components/common/AppBackButton';
 import AppCard from '../components/common/AppCard';
@@ -321,8 +322,10 @@ export default function EditProfileScreen() {
                         <Image
                           source={{ uri: avatarPreviewUri }}
                           style={styles.avatarImage}
-                          resizeMode="cover"
-                          fadeDuration={200}
+                          contentFit="cover"
+                          cachePolicy="memory-disk"
+                          recyclingKey={avatarPreviewUri}
+                          transition={200}
                         />
                       ) : !localAvatarUri && avatarState.status === 'loading' ? (
                         <View style={styles.avatarLoadingWrap}>

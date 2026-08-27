@@ -1,7 +1,8 @@
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppBackButton from '../components/common/AppBackButton';
 import AppScreen from '../components/common/AppScreen';
@@ -284,7 +285,14 @@ export default function PurchaseHistoryScreen() {
                             <Text style={styles.thumbnailPlaceholderText}>{isolateLTR('PDF')}</Text>
                           </View>
                         ) : preview?.status === 'ready' && preview.url ? (
-                          <Image source={{ uri: preview.url }} style={styles.thumbnailImage} resizeMode="contain" />
+                          <Image
+                            source={{ uri: preview.url }}
+                            style={styles.thumbnailImage}
+                            contentFit="contain"
+                            cachePolicy="memory-disk"
+                            recyclingKey={report.id}
+                            transition={100}
+                          />
                         ) : preview?.status === 'loading' ? (
                           <View style={styles.thumbnailPlaceholder}>
                             <ActivityIndicator color={colors.primary} size="small" />

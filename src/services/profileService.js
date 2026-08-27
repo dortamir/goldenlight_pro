@@ -55,6 +55,14 @@ export function invalidateAvatarUrlCache(avatarPath) {
   avatarUrlInflight.delete(avatarPath);
 }
 
+// STAGE 15.1: drops every cached/in-flight avatar URL, regardless of path -
+// called on sign-out (AuthContext.js), unlike invalidateAvatarUrlCache()
+// above (one specific path, called after a successful re-upload).
+export function clearAvatarUrlCache() {
+  avatarUrlCache.clear();
+  avatarUrlInflight.clear();
+}
+
 export async function getProfile(userId) {
   if (!supabase || !userId) {
     throw new Error('Profile not available');

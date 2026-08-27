@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
 import PointsBalanceCard from '../components/common/PointsBalanceCard';
@@ -403,7 +404,14 @@ export default function HomeScreen() {
                               <Text style={styles.activityRowPlaceholderText}>{isolateLTR('PDF')}</Text>
                             </View>
                           ) : preview?.status === 'ready' && preview.url ? (
-                            <Image source={{ uri: preview.url }} style={styles.activityRowThumbnailImage} resizeMode="contain" />
+                            <Image
+                              source={{ uri: preview.url }}
+                              style={styles.activityRowThumbnailImage}
+                              contentFit="contain"
+                              cachePolicy="memory-disk"
+                              recyclingKey={report.id}
+                              transition={100}
+                            />
                           ) : preview?.status === 'loading' ? (
                             <View style={styles.activityRowPlaceholder}>
                               <ActivityIndicator color={colors.primary} size="small" />

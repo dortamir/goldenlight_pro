@@ -2,6 +2,37 @@ import { Platform } from 'react-native';
 
 import { supabase } from './supabase';
 
+// STAGE 15.1: receipt-image signed-URL cache, mirroring profileService.js's
+// own avatarUrlCache/avatarUrlInflight pattern exactly (same shape, same
+// reasoning) - before this, getReceiptSignedUrl() requested a brand-new
+// signed URL from Storage on every single call, including every time
+// HomeScreen/PurchaseHistoryScreen re-fetched thumbnails on focus (Home <->
+// Rewards <-> Profile <-> History, or simply returning to a tab) even
+// though the previous URL was still perfectly valid - a real, measured
+// source of redundant network round-trips and part of why images felt slow
+// to (re)load on a physical device. Keyed by storagePath
+// (purchase_reports.receipt_path), which is already globally unique per
+// report (namespaced under `${userId}/${purchaseReportId}/...` - see
+// uploadReceipt() below), so this can never serve one report's cached URL
+// for another. Process memory only, never persisted - see
+// clearReceiptUrlCache() below, called on sign-out (AuthContext) so a
+// different user signing in on the same device never has a stale cached
+// URL served for a storage path they don't currently own (paths are
+// per-user-namespaced anyway, so this is defense in depth, not the only
+// thing preventing cross-user leakage - RLS/Storage policies remain
+// authoritative).
+const RECEIPT_SIGNED_URL_TTL_SECONDS = 300;
+const RECEIPT_SIGNED_URL_REFRESH_MARGIN_MS = 30 * 1000;
+const receiptUrlCache = new Map();
+const receiptUrlInflight = new Map();
+
+// Drops every cached/in-flight receipt signed URL. Called on sign-out - see
+// clearReceiptUrlCache()'s own call site in AuthContext.js.
+export function clearReceiptUrlCache() {
+  receiptUrlCache.clear();
+  receiptUrlInflight.clear();
+}
+
 function generatePurchaseReportId() {
   if (typeof globalThis !== 'undefined' && globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
     return globalThis.crypto.randomUUID();
@@ -236,18 +267,64 @@ export async function getEligibleReceiptItems(purchaseReportId) {
   return data || [];
 }
 
-export async function getReceiptSignedUrl(receiptPath, expiresInSeconds = 300) {
+// Returns a still-valid cached signed URL for this receipt path, or null if
+// there is none/it's expired - synchronous, so a caller can skip straight
+// to rendering on a cache hit instead of showing a loading placeholder
+// first. Mirrors profileService.js's getCachedAvatarUrl() exactly.
+export function getCachedReceiptUrl(receiptPath) {
+  if (!receiptPath) {
+    return null;
+  }
+
+  const entry = receiptUrlCache.get(receiptPath);
+  if (!entry || Date.now() >= entry.expiresAt) {
+    return null;
+  }
+
+  return entry.url;
+}
+
+export async function getReceiptSignedUrl(receiptPath, expiresInSeconds = RECEIPT_SIGNED_URL_TTL_SECONDS) {
   if (!supabase || !receiptPath) {
     return null;
   }
 
-  const { data, error } = await supabase.storage
-    .from('receipts')
-    .createSignedUrl(receiptPath, expiresInSeconds);
-
-  if (error) {
-    throw error;
+  const cached = getCachedReceiptUrl(receiptPath);
+  if (cached) {
+    return cached;
   }
 
-  return data?.signedUrl || null;
+  const inflight = receiptUrlInflight.get(receiptPath);
+  if (inflight) {
+    return inflight;
+  }
+
+  const requestPromise = (async () => {
+    const { data, error } = await supabase.storage
+      .from('receipts')
+      .createSignedUrl(receiptPath, expiresInSeconds);
+
+    if (error) {
+      throw error;
+    }
+
+    const url = data?.signedUrl || null;
+
+    if (url) {
+      receiptUrlCache.set(receiptPath, {
+        url,
+        expiresAt: Date.now() + expiresInSeconds * 1000 - RECEIPT_SIGNED_URL_REFRESH_MARGIN_MS,
+      });
+    }
+
+    return url;
+  })();
+
+  receiptUrlInflight.set(receiptPath, requestPromise);
+
+  try {
+    return await requestPromise;
+  } finally {
+    receiptUrlInflight.delete(receiptPath);
+  }
 }

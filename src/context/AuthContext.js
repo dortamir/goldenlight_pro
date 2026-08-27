@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import * as Linking from 'expo-linking';
 
+import { clearAvatarUrlCache } from '../services/profileService';
+import { clearReceiptUrlCache } from '../services/purchaseReportService';
 import { supabase } from '../services/supabase';
 
 const AuthContext = createContext(null);
@@ -303,6 +305,17 @@ export function AuthProvider({ children }) {
     if (error) {
       throw error;
     }
+
+    // STAGE 15.1: drop every cached receipt/avatar signed URL - both caches
+    // are already namespaced per-user by storage path (see
+    // purchaseReportService.js's receiptUrlCache / profileService.js's
+    // avatarUrlCache), so this isn't the only thing preventing one user's
+    // cached image from being served under another - but a different user
+    // signing in on the same device afterward should still start with a
+    // clean slate rather than carrying process-memory state from the
+    // previous session indefinitely.
+    clearReceiptUrlCache();
+    clearAvatarUrlCache();
 
     setSession(null);
     setUser(null);

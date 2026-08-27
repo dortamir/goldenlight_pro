@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, Image, Modal, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
 import { useAuth } from '../context/AuthContext';
@@ -250,8 +251,10 @@ export default function ProfileScreen() {
                   <Image
                     source={{ uri: avatarState.url }}
                     style={styles.avatarImage}
-                    resizeMode="cover"
-                    fadeDuration={200}
+                    contentFit="cover"
+                    cachePolicy="memory-disk"
+                    recyclingKey={profile?.avatar_path}
+                    transition={200}
                   />
                 ) : avatarState.status === 'loading' ? (
                   <View style={styles.avatarLoadingWrap}>
@@ -404,7 +407,14 @@ export default function ProfileScreen() {
             onPress={() => {}}>
             <View style={[styles.previewCircle, { width: avatarPreviewSize, height: avatarPreviewSize }]}>
               {avatarState.url ? (
-                <Image source={{ uri: avatarState.url }} style={styles.previewImage} resizeMode="cover" />
+                <Image
+                  source={{ uri: avatarState.url }}
+                  style={styles.previewImage}
+                  contentFit="cover"
+                  cachePolicy="memory-disk"
+                  recyclingKey={profile?.avatar_path}
+                  transition={200}
+                />
               ) : null}
             </View>
           </Pressable>

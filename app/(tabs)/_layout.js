@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Redirect, Tabs } from 'expo-router';
-import { Platform, StyleSheet, Text } from 'react-native';
+import { StyleSheet, Text } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAuth } from '../../src/context/AuthContext';
 import { colors } from '../../src/theme';
@@ -27,6 +28,17 @@ function renderTabIcon(outlineName, filledName) {
 
 export default function TabsLayout() {
   const { session, loading } = useAuth();
+  // STAGE 15.1: real-device fix - the tab bar's own paddingBottom was a
+  // hardcoded `10` for both iOS and Android (the `Platform.OS === 'ios' ?
+  // 10 : 10` ternary always evaluated to the same literal either way - a
+  // stale leftover, not an actual platform split), so it never accounted
+  // for the iPhone home-indicator safe area (~34px on any notched/Dynamic-
+  // Island iPhone, i.e. effectively every current iPhone) and clipped the
+  // tab bar's icons/labels underneath it. `insets.bottom` is 0 on devices
+  // that don't need extra clearance (older iPhones, most Android phones,
+  // web), so adding it unconditionally never adds unwanted blank space
+  // there - no Platform branch or magic number needed.
+  const insets = useSafeAreaInsets();
 
   if (loading) {
     return null;
@@ -53,7 +65,7 @@ export default function TabsLayout() {
         headerShown: false,
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.grayDark,
-        tabBarStyle: styles.tabBar,
+        tabBarStyle: [styles.tabBar, { height: 68 + insets.bottom, paddingBottom: 10 + insets.bottom }],
         tabBarItemStyle: styles.tabBarItem,
         tabBarHideOnKeyboard: true,
         tabBarShowLabel: true,
@@ -101,13 +113,15 @@ export default function TabsLayout() {
 }
 
 const styles = StyleSheet.create({
+  // height/paddingBottom are intentionally NOT set here any more - both are
+  // computed per-render from useSafeAreaInsets() above (base 68/10 plus the
+  // real device inset) and applied via the inline tabBarStyle array, so
+  // this base style only carries what never needs to vary by device.
   tabBar: {
     backgroundColor: colors.white,
     borderTopWidth: 1,
     borderTopColor: colors.border,
-    height: 68,
     paddingTop: 8,
-    paddingBottom: Platform.OS === 'ios' ? 10 : 10,
     paddingHorizontal: 6,
     flexDirection: 'row',
     alignItems: 'center',

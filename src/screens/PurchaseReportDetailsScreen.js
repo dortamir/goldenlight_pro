@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useState } from 'react';
-import { ActivityIndicator, Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import AppBackButton from '../components/common/AppBackButton';
@@ -351,7 +352,14 @@ export default function PurchaseReportDetailsScreen() {
                       <Text style={styles.imagePlaceholderText}>{`קובץ ${isolateLTR('PDF')}`}</Text>
                     </View>
                   ) : imageState.status === 'ready' && imageState.url ? (
-                    <Image source={{ uri: imageState.url }} style={styles.receiptImage} resizeMode="contain" />
+                    <Image
+                      source={{ uri: imageState.url }}
+                      style={styles.receiptImage}
+                      contentFit="contain"
+                      cachePolicy="memory-disk"
+                      recyclingKey={report?.id}
+                      transition={100}
+                    />
                   ) : imageState.status === 'loading' ? (
                     <View style={styles.imagePlaceholder}>
                       <ActivityIndicator color={colors.primary} size="small" />
@@ -507,7 +515,14 @@ export default function PurchaseReportDetailsScreen() {
 
           <View style={styles.previewBody}>
             {imageState.status === 'ready' && imageState.url ? (
-              <Image source={{ uri: imageState.url }} style={styles.previewImage} resizeMode="contain" />
+              <Image
+                source={{ uri: imageState.url }}
+                style={styles.previewImage}
+                contentFit="contain"
+                cachePolicy="memory-disk"
+                recyclingKey={report?.id}
+                transition={100}
+              />
             ) : null}
           </View>
 
