@@ -14,7 +14,7 @@ import { isolateLTR } from '../utils/bidiText';
 
 export default function RegisterScreen() {
   const router = useRouter();
-  const { signUp, session, loading: authLoading } = useAuth();
+  const { signUp, session, loading: authLoading, isAdmin, adminLoading } = useAuth();
   const [showPassword, setShowPassword] = useState(false);
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
@@ -25,11 +25,18 @@ export default function RegisterScreen() {
   const [successMessage, setSuccessMessage] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // STAGE 17: same reasoning as LoginScreen.js's own effect - waits for
+  // adminLoading before redirecting, so a brand-new session is routed to
+  // its real destination directly instead of always landing on /(tabs)
+  // first. A fresh signup is realistically never an existing admin (see
+  // AuthContext's admin_users check), but this keeps both auth screens on
+  // the exact same, single navigation rule rather than one screen assuming
+  // it can never apply.
   useEffect(() => {
-    if (session) {
-      router.replace('/(tabs)');
+    if (session && !adminLoading) {
+      router.replace(isAdmin ? '/admin' : '/(tabs)');
     }
-  }, [router, session]);
+  }, [router, session, isAdmin, adminLoading]);
 
   const handleRegister = async () => {
     setErrorMessage('');

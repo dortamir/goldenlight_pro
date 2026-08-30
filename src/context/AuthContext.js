@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import * as Linking from 'expo-linking';
 
+import { isCurrentUserAdmin } from '../services/adminService';
 import { clearAvatarUrlCache, clearProfileCache } from '../services/profileService';
 import { clearReceiptUrlCache } from '../services/purchaseReportService';
 import { supabase } from '../services/supabase';
@@ -71,6 +72,18 @@ export function AuthProvider({ children }) {
   // already used) rather than valid tokens - lets ResetPasswordScreen show
   // a safe message instead of a broken form.
   const [recoveryError, setRecoveryError] = useState(false);
+  // STAGE 17: the app's ONE resolved admin_users check, shared by
+  // app/index.js's routing decision and app/admin/_layout.js's own route
+  // guard - see the effect below. `isAdmin` defaults false (fail closed);
+  // `adminLoading` defaults true so a route decision never assumes
+  // "not admin" before this has actually resolved at least once. This is
+  // still a UI-only convenience, exactly like the existing
+  // isCurrentUserAdmin() it wraps - it decides where the app NAVIGATES a
+  // user, never what a database write is allowed to do. Every privileged
+  // admin mutation remains independently enforced by its own RLS policy/
+  // SECURITY DEFINER RPC (is_admin()), regardless of this value.
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminLoading, setAdminLoading] = useState(true);
   // Idempotency guard for the recovery deep-link effect below: remembers
   // the exact callback URL already processed during this AuthProvider's
   // lifetime, so the same URL is never handled twice (React dev-mode
@@ -178,6 +191,46 @@ export function AuthProvider({ children }) {
       cleanupPromise?.then((cleanup) => cleanup?.());
     };
   }, []);
+
+  // STAGE 17: resolves the admin_users check exactly ONCE per user/session,
+  // replacing the separate isCurrentUserAdmin() call that used to live only
+  // inside app/admin/_layout.js - that screen now reads isAdmin/adminLoading
+  // from context instead of re-fetching the same row itself (see that
+  // file). Waits for `loading` (auth) to settle first, so this never fires
+  // against a not-yet-confirmed session. Keyed on `user?.id` (not the whole
+  // user/session object) for the same reason the main auth effect's own
+  // comment gives elsewhere in this file - a token refresh must not
+  // re-trigger this. isCurrentUserAdmin() already fails closed internally
+  // (any error, including no Supabase client, resolves to `false`, never
+  // throws) - see adminService.js - so there is no separate error branch
+  // to handle here; a lookup failure simply resolves isAdmin to `false`,
+  // same as a genuine non-admin.
+  useEffect(() => {
+    let isActive = true;
+
+    if (loading) {
+      return undefined;
+    }
+
+    if (!user) {
+      setIsAdmin(false);
+      setAdminLoading(false);
+      return undefined;
+    }
+
+    setAdminLoading(true);
+
+    isCurrentUserAdmin().then((admin) => {
+      if (isActive) {
+        setIsAdmin(admin);
+        setAdminLoading(false);
+      }
+    });
+
+    return () => {
+      isActive = false;
+    };
+  }, [loading, user?.id]);
 
   // Password-recovery deep-link handling. Works identically on web (the
   // recovery link opens a normal page load, whose full URL - including the
@@ -353,6 +406,14 @@ export function AuthProvider({ children }) {
     setUser(null);
     setPasswordRecovery(false);
     setRecoveryError(false);
+    // STAGE 17: explicit reset (defense in depth - the admin-resolution
+    // effect above would also reset these once `user` becomes null, since
+    // it's keyed on user?.id, but setting them directly here removes any
+    // dependency on effect-scheduling timing for "no cross-user role
+    // leakage"). false/false, not false/true - "no user" is a resolved,
+    // definite "not admin", not a still-loading state.
+    setIsAdmin(false);
+    setAdminLoading(false);
   };
 
   const value = useMemo(
@@ -360,6 +421,8 @@ export function AuthProvider({ children }) {
       session,
       user,
       loading,
+      isAdmin,
+      adminLoading,
       passwordRecovery,
       recoveryError,
       signIn,
@@ -367,7 +430,7 @@ export function AuthProvider({ children }) {
       signOut,
       clearPasswordRecovery,
     }),
-    [loading, passwordRecovery, recoveryError, session, user],
+    [loading, isAdmin, adminLoading, passwordRecovery, recoveryError, session, user],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

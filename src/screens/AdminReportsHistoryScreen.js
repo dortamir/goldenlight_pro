@@ -1,10 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Image, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import AdminShell from '../components/admin/AdminShell';
 import { getAdminDashboardSummary, getAdminReceiptSignedUrl, getAdminReports } from '../services/adminReportService';
+import { getCachedReceiptUrl } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { getAdminReportStatusMeta } from '../utils/adminReportStatus';
 import { isolateLTR } from '../utils/bidiText';
@@ -82,6 +84,11 @@ export default function AdminReportsHistoryScreen() {
   const [summary, setSummary] = useState(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [summaryError, setSummaryError] = useState('');
+  // STAGE 17: same hasLoaded-ref stale-while-refresh pattern as
+  // AdminHomeScreen.js/the customer screens - only the true first load
+  // blocks with the full loading state.
+  const hasLoadedReportsRef = useRef(false);
+  const hasLoadedSummaryRef = useRef(false);
 
   // Reacts to navigating here again with a different `?filter=` (e.g. a
   // second dashboard-card click while this screen is already mounted) -
@@ -94,18 +101,30 @@ export default function AdminReportsHistoryScreen() {
   }, [filterParam]);
 
   const loadReports = useCallback(() => {
-    setLoading(true);
+    const isInitialLoad = !hasLoadedReportsRef.current;
+    if (isInitialLoad) {
+      setLoading(true);
+    }
     setError('');
-    setThumbnails({});
 
     getAdminReports()
       .then((rows) => {
         setReports(rows);
+        hasLoadedReportsRef.current = true;
 
         rows
           .filter((row) => !isPdfFile(row.original_filename) && row.receipt_path)
           .forEach((row) => {
-            setThumbnails((prev) => ({ ...prev, [row.id]: { status: 'loading', url: null } }));
+            // STAGE 17: cached signed URL (shared with the customer receipt
+            // cache) renders immediately - see AdminHomeScreen.js's own
+            // identical comment.
+            const cachedUrl = getCachedReceiptUrl(row.receipt_path);
+            if (cachedUrl) {
+              setThumbnails((prev) => ({ ...prev, [row.id]: { status: 'ready', url: cachedUrl } }));
+              return;
+            }
+
+            setThumbnails((prev) => ({ ...prev, [row.id]: prev[row.id] ?? { status: 'loading', url: null } }));
 
             getAdminReceiptSignedUrl(row.receipt_path)
               .then((url) => {
@@ -116,21 +135,33 @@ export default function AdminReportsHistoryScreen() {
               });
           });
       })
-      .catch(() => setError('לא הצלחנו לטעון את רשימת החשבוניות'))
+      .catch(() => {
+        if (isInitialLoad) {
+          setError('לא הצלחנו לטעון את רשימת החשבוניות');
+        }
+      })
       .finally(() => setLoading(false));
   }, []);
 
   const loadSummary = useCallback(() => {
-    setSummaryLoading(true);
+    const isInitialLoad = !hasLoadedSummaryRef.current;
+    if (isInitialLoad) {
+      setSummaryLoading(true);
+    }
     setSummaryError('');
 
     getAdminDashboardSummary()
-      .then(setSummary)
+      .then((data) => {
+        setSummary(data);
+        hasLoadedSummaryRef.current = true;
+      })
       .catch((err) => {
         if (__DEV__) {
           console.error('[Admin reports] Failed to load summary counts', err);
         }
-        setSummaryError('לא הצלחנו לטעון את נתוני הסיכום');
+        if (isInitialLoad) {
+          setSummaryError('לא הצלחנו לטעון את נתוני הסיכום');
+        }
       })
       .finally(() => setSummaryLoading(false));
   }, []);
@@ -320,7 +351,14 @@ export default function AdminReportsHistoryScreen() {
                         <Text style={styles.thumbPlaceholderText}>{isolateLTR('PDF')}</Text>
                       </View>
                     ) : thumb?.status === 'ready' && thumb.url ? (
-                      <Image source={{ uri: thumb.url }} style={styles.thumbImage} resizeMode="contain" />
+                      <Image
+                        source={{ uri: thumb.url }}
+                        style={styles.thumbImage}
+                        contentFit="contain"
+                        cachePolicy="memory-disk"
+                        recyclingKey={report.id}
+                        transition={100}
+                      />
                     ) : thumb?.status === 'loading' ? (
                       <View style={styles.thumbPlaceholder}>
                         <ActivityIndicator color={colors.primary} size="small" />

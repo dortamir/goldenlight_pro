@@ -1,4 +1,14 @@
+import { getCachedReceiptUrl, setCachedReceiptUrl } from './purchaseReportService';
 import { supabase } from './supabase';
+
+// STAGE 17: admin-local in-flight de-duplication for getAdminReceiptSignedUrl
+// below - a separate, small map (not exported/shared) purely to collapse
+// near-simultaneous admin-side requests for the same path into one Storage
+// call. The CACHED RESULT itself is shared with purchaseReportService.js
+// (see getCachedReceiptUrl/setCachedReceiptUrl there) - only this transient
+// in-flight bookkeeping stays local, since it's meaningless once the
+// request settles either way.
+const adminReceiptUrlInflight = new Map();
 
 // Admin-only read services for purchase reports. Deliberately separate from
 // purchaseReportService.js: that module's queries are written for the
@@ -596,25 +606,62 @@ export async function awardPurchasePoints(reportId) {
   return data;
 }
 
-// Mirrors purchaseReportService.getReceiptSignedUrl's shape exactly, but
-// kept as its own function here rather than imported/shared: admin access to
+// STAGE 17: the actual Storage `createSignedUrl` call stays admin-owned and
+// separate from purchaseReportService.getReceiptSignedUrl - admin access to
 // an arbitrary user's receipt file only succeeds because of the dedicated
 // "Admins can view any receipt in storage" Storage policy (see migration
-// 009) - keeping this call admin-owned makes that dependency explicit rather
-// than borrowing a customer-service function that happens to work for an
-// unrelated reason.
+// 009), a genuinely different access path than a customer signing a URL for
+// their own report, so keeping the call itself admin-owned makes that
+// dependency explicit rather than borrowing a customer-service function
+// that happens to work for an unrelated reason.
+//
+// The CACHE is now shared with purchaseReportService.js, though - a signed
+// URL is a bearer token for a specific Storage object, valid regardless of
+// which authorized session generated it, and receipt_path is already
+// globally unique per report - so if this exact report's URL was already
+// resolved (by a customer viewing their own report, or a previous admin
+// visit), this returns it directly instead of making another Storage call,
+// and a freshly-generated admin URL is written into that same cache for
+// later reuse either way (see getCachedReceiptUrl/setCachedReceiptUrl in
+// purchaseReportService.js).
 export async function getAdminReceiptSignedUrl(receiptPath, expiresInSeconds = 300) {
   if (!supabase || !receiptPath) {
     return null;
   }
 
-  const { data, error } = await supabase.storage
-    .from('receipts')
-    .createSignedUrl(receiptPath, expiresInSeconds);
-
-  if (error) {
-    throw error;
+  const cached = getCachedReceiptUrl(receiptPath);
+  if (cached) {
+    return cached;
   }
 
-  return data?.signedUrl || null;
+  const inflight = adminReceiptUrlInflight.get(receiptPath);
+  if (inflight) {
+    return inflight;
+  }
+
+  const requestPromise = (async () => {
+    const { data, error } = await supabase.storage
+      .from('receipts')
+      .createSignedUrl(receiptPath, expiresInSeconds);
+
+    if (error) {
+      throw error;
+    }
+
+    const url = data?.signedUrl || null;
+
+    if (url) {
+      setCachedReceiptUrl(receiptPath, url, expiresInSeconds);
+    }
+
+    return url;
+  })();
+
+  adminReceiptUrlInflight.set(receiptPath, requestPromise);
+
+  try {
+    return await requestPromise;
+  } finally {
+    adminReceiptUrlInflight.delete(receiptPath);
+  }
 }

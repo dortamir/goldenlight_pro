@@ -6,11 +6,17 @@ import { useAuth } from '../../src/context/AuthContext';
 import { colors } from '../../src/theme';
 
 export default function AuthLayout() {
-  const { session, loading, passwordRecovery } = useAuth();
+  const { session, loading, isAdmin, adminLoading, passwordRecovery } = useAuth();
   const pathname = usePathname();
   const isResetPasswordRoute = Boolean(pathname && pathname.includes('reset-password'));
 
-  if (loading) {
+  // STAGE 17: also waits for adminLoading (once there's a real, non-recovery
+  // session to route) before the "already signed in" redirect below fires -
+  // same reasoning as app/index.js/LoginScreen.js/RegisterScreen.js's own
+  // gating, so an admin who lands back on an auth route while already
+  // signed in (e.g. browser back navigation, a stale deep link) is still
+  // routed straight to /admin rather than through /(tabs) first.
+  if (loading || (session && !passwordRecovery && adminLoading)) {
     // Same reasoning as app/index.js: a themed placeholder instead of
     // `null`, so there is never an unstyled blank/light flash before
     // LoginScreen/RegisterScreen (or the redirect below) render - the exact
@@ -21,17 +27,17 @@ export default function AuthLayout() {
 
   // A password-recovery session is a real, authenticated Supabase session
   // (see AuthContext's deep-link handling), so without this check the
-  // ordinary "already signed in -> tabs" redirect below would immediately
-  // bounce a recovering user away from reset-password before they could set
-  // a new password. If they somehow land on a different auth screen while
-  // recovering (e.g. login), send them to reset-password instead of tabs -
-  // never leave a recovery session sitting on login/register.
+  // ordinary "already signed in -> tabs/admin" redirect below would
+  // immediately bounce a recovering user away from reset-password before
+  // they could set a new password. If they somehow land on a different auth
+  // screen while recovering (e.g. login), send them to reset-password
+  // instead - never leave a recovery session sitting on login/register.
   if (session && passwordRecovery && !isResetPasswordRoute) {
     return <Redirect href="/(auth)/reset-password" />;
   }
 
   if (session && !passwordRecovery) {
-    return <Redirect href="/(tabs)" />;
+    return <Redirect href={isAdmin ? '/admin' : '/(tabs)'} />;
   }
 
   // Login/Register/ForgotPassword/ResetPassword's dark gradient background

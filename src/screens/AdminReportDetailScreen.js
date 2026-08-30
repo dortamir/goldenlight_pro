@@ -1,9 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Modal,
   Platform,
   Pressable,
@@ -29,6 +29,7 @@ import {
   saveAdminManualItems,
 } from '../services/adminReportService';
 import { getProductSuggestions } from '../services/productMatching';
+import { getCachedReceiptUrl } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { getAdminReportStatusMeta } from '../utils/adminReportStatus';
 import { isolateLTR } from '../utils/bidiText';
@@ -818,10 +819,21 @@ export default function AdminReportDetailScreen() {
         }
 
         if (!isPdfFile(data.original_filename) && data.receipt_path) {
-          setImageState({ status: 'loading', url: null });
-          getAdminReceiptSignedUrl(data.receipt_path)
-            .then((url) => setImageState({ status: url ? 'ready' : 'error', url }))
-            .catch(() => setImageState({ status: 'error', url: null }));
+          // STAGE 17: a cached signed URL (shared with the customer receipt
+          // cache) is shown immediately instead of always flashing to
+          // 'loading' first, even though getAdminReceiptSignedUrl() itself
+          // would also resolve it near-instantly from that same cache -
+          // this skips the placeholder render entirely on a cache hit
+          // (returning to a report already viewed this session).
+          const cachedUrl = getCachedReceiptUrl(data.receipt_path);
+          if (cachedUrl) {
+            setImageState({ status: 'ready', url: cachedUrl });
+          } else {
+            setImageState({ status: 'loading', url: null });
+            getAdminReceiptSignedUrl(data.receipt_path)
+              .then((url) => setImageState({ status: url ? 'ready' : 'error', url }))
+              .catch(() => setImageState({ status: 'error', url: null }));
+          }
         }
       })
       .catch((err) => {
@@ -837,34 +849,25 @@ export default function AdminReportDetailScreen() {
     loadDetail();
   }, [loadDetail]);
 
-  // Fetches the receipt's real natural pixel size once its signed URL is
-  // ready, so the preview box can be sized to the image's true aspect
-  // ratio via the aspectRatio style instead of a guessed/fixed ratio. A
-  // failure here just leaves imageNaturalSize null - the preview box still
-  // renders (as a neutral box) and resizeMode="contain" still displays the
-  // image correctly, this only affects how tightly the box fits it.
-  useEffect(() => {
-    if (imageState.status !== 'ready' || !imageState.url) {
-      return;
+  // STAGE 17: the receipt's real natural pixel size (so the preview box can
+  // be sized to the image's true aspect ratio via the aspectRatio style
+  // instead of a guessed/fixed ratio) used to come from a separate
+  // react-native Image.getSize() probe call, made obsolete by migrating
+  // this screen's actual <Image> rendering to expo-image (see the render
+  // below) - expo-image's own onLoad callback already reports the source's
+  // real width/height once the image has loaded, so a second, separate
+  // network probe for the same information is no longer needed. See
+  // handleReceiptImageLoad below, wired to the main inline receipt image's
+  // onLoad. A load failure (or simply not yet loaded) leaves
+  // imageNaturalSize null - the preview box still renders (as a neutral
+  // box) and contentFit="contain" still displays the image correctly, this
+  // only affects how tightly the box fits it.
+  const handleReceiptImageLoad = useCallback((event) => {
+    const { width, height } = event?.source || {};
+    if (width && height) {
+      setImageNaturalSize({ width, height });
     }
-    let isActive = true;
-    Image.getSize(
-      imageState.url,
-      (width, height) => {
-        if (isActive) {
-          setImageNaturalSize({ width, height });
-        }
-      },
-      () => {
-        if (isActive) {
-          setImageNaturalSize(null);
-        }
-      },
-    );
-    return () => {
-      isActive = false;
-    };
-  }, [imageState.status, imageState.url]);
+  }, []);
 
   const addManualRow = () => {
     setManualRows((rows) => [...rows, createEmptyManualRow()]);
@@ -1508,7 +1511,11 @@ export default function AdminReportDetailScreen() {
                       ? { width: receiptDisplaySize.width, height: receiptDisplaySize.height }
                       : null,
                   ]}
-                  resizeMode="contain"
+                  contentFit="contain"
+                  cachePolicy="memory-disk"
+                  recyclingKey={report?.id}
+                  transition={100}
+                  onLoad={handleReceiptImageLoad}
                 />
                 <View style={styles.enlargeHint} pointerEvents="none">
                   <Ionicons name="expand-outline" size={13} color={colors.white} />
@@ -2220,7 +2227,10 @@ export default function AdminReportDetailScreen() {
             <Image
               source={{ uri: imageState.url }}
               style={[styles.previewImage, { width: fullscreenPreviewWidth, height: fullscreenPreviewHeight }]}
-              resizeMode="contain"
+              contentFit="contain"
+              cachePolicy="memory-disk"
+              recyclingKey={report?.id}
+              transition={100}
             />
           ) : null}
 

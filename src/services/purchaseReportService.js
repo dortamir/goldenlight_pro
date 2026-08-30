@@ -34,6 +34,27 @@ export function clearReceiptUrlCache() {
   receiptUrlInflight.clear();
 }
 
+// STAGE 17: writes a signed URL into this SAME shared cache directly - used
+// by adminReportService.js's getAdminReceiptSignedUrl() after ITS OWN
+// (admin-authorized) Storage call succeeds. A signed URL is a bearer token
+// for a specific Storage object, valid regardless of which authorized
+// session generated it - a customer's own receipt request and an admin's
+// review of that same report both key on the identical, globally-unique
+// receipt_path, so sharing the cache (not the underlying generation call,
+// which genuinely does need to stay admin-owned - see
+// adminReportService.js's own comment) avoids a redundant Storage signing
+// call whichever side already resolved it first.
+export function setCachedReceiptUrl(receiptPath, url, expiresInSeconds = RECEIPT_SIGNED_URL_TTL_SECONDS) {
+  if (!receiptPath || !url) {
+    return;
+  }
+
+  receiptUrlCache.set(receiptPath, {
+    url,
+    expiresAt: Date.now() + expiresInSeconds * 1000 - RECEIPT_SIGNED_URL_REFRESH_MARGIN_MS,
+  });
+}
+
 function generatePurchaseReportId() {
   if (typeof globalThis !== 'undefined' && globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
     return globalThis.crypto.randomUUID();

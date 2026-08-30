@@ -13,18 +13,26 @@ import { isolateLTR } from '../utils/bidiText';
 
 export default function LoginScreen() {
   const router = useRouter();
-  const { signIn, session, loading: authLoading } = useAuth();
+  const { signIn, session, loading: authLoading, isAdmin, adminLoading } = useAuth();
   const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // STAGE 17: waits for adminLoading too, not just `session` - navigating
+  // the instant `session` becomes truthy (the previous behavior) sent every
+  // login to /(tabs) first, since the admin_users check hadn't resolved
+  // yet; app/admin/_layout.js would then redirect an admin away from the
+  // customer Home it had just shown, a visible flash of the wrong app. This
+  // makes the redirect itself wait for the same role resolution app/
+  // index.js's own cold-start routing already waits for, landing an admin
+  // on /admin directly.
   useEffect(() => {
-    if (session) {
-      router.replace('/(tabs)');
+    if (session && !adminLoading) {
+      router.replace(isAdmin ? '/admin' : '/(tabs)');
     }
-  }, [router, session]);
+  }, [router, session, isAdmin, adminLoading]);
 
   const handleLogin = async () => {
     setErrorMessage('');

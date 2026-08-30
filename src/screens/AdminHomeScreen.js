@@ -1,10 +1,16 @@
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useRef, useState } from 'react';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AdminShell from '../components/admin/AdminShell';
-import { getAdminDashboardSummary, getAdminReceiptSignedUrl, getAdminReviewQueue } from '../services/adminReportService';
+import {
+  getAdminDashboardSummary,
+  getAdminReceiptSignedUrl,
+  getAdminReviewQueue,
+} from '../services/adminReportService';
+import { getCachedReceiptUrl } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { getAdminReportStatusMeta } from '../utils/adminReportStatus';
 import { isolateLTR } from '../utils/bidiText';
@@ -38,37 +44,71 @@ export default function AdminHomeScreen() {
   const [queueLoading, setQueueLoading] = useState(true);
   const [queueError, setQueueError] = useState('');
   const [thumbnails, setThumbnails] = useState({});
+  // STAGE 17: same hasLoaded-ref stale-while-refresh pattern already proven
+  // on the customer screens (HomeScreen.js etc., Stage 15.3) - only the
+  // true first load blocks with the full loading state; a background
+  // refresh-on-focus (e.g. returning from the detail screen after an
+  // approve/reject) keeps the last-good summary/queue visible while it
+  // re-confirms them, instead of blanking the dashboard every time.
+  const hasLoadedSummaryRef = useRef(false);
+  const hasLoadedQueueRef = useRef(false);
 
   const loadSummary = useCallback(() => {
-    setSummaryLoading(true);
+    const isInitialLoad = !hasLoadedSummaryRef.current;
+    if (isInitialLoad) {
+      setSummaryLoading(true);
+    }
     setSummaryError('');
 
     getAdminDashboardSummary()
-      .then(setSummary)
+      .then((data) => {
+        setSummary(data);
+        hasLoadedSummaryRef.current = true;
+      })
       .catch((err) => {
         // Dev-only: the real Supabase/Postgres error - never shown to the
         // admin, who only ever sees the safe Hebrew message below.
         if (__DEV__) {
           console.error('[Admin dashboard] Failed to load summary', err);
         }
-        setSummaryError('לא הצלחנו לטעון את נתוני הסיכום');
+        // Background-refresh failure keeps the last-good summary visible
+        // (stale-while-refresh) - only the true first load, with nothing to
+        // fall back to, shows the error state.
+        if (isInitialLoad) {
+          setSummaryError('לא הצלחנו לטעון את נתוני הסיכום');
+        }
       })
       .finally(() => setSummaryLoading(false));
   }, []);
 
   const loadQueue = useCallback(() => {
-    setQueueLoading(true);
+    const isInitialLoad = !hasLoadedQueueRef.current;
+    if (isInitialLoad) {
+      setQueueLoading(true);
+    }
     setQueueError('');
-    setThumbnails({});
 
     getAdminReviewQueue()
       .then((rows) => {
         setQueue(rows);
+        hasLoadedQueueRef.current = true;
 
         rows
           .filter((row) => !isPdfFile(row.original_filename) && row.receipt_path)
           .forEach((row) => {
-            setThumbnails((prev) => ({ ...prev, [row.id]: { status: 'loading', url: null } }));
+            // STAGE 17: a cached signed URL (shared with the customer
+            // receipt cache - see adminReportService.js's
+            // getAdminReceiptSignedUrl) renders immediately as 'ready'
+            // instead of every row resetting to 'loading' first, so a
+            // report already viewed this session never flashes its
+            // thumbnail back to a placeholder on a background refresh.
+            const cachedUrl = getCachedReceiptUrl(row.receipt_path);
+            if (cachedUrl) {
+              setThumbnails((prev) => ({ ...prev, [row.id]: { status: 'ready', url: cachedUrl } }));
+              return;
+            }
+
+            setThumbnails((prev) => ({ ...prev, [row.id]: prev[row.id] ?? { status: 'loading', url: null } }));
 
             getAdminReceiptSignedUrl(row.receipt_path)
               .then((url) => {
@@ -85,7 +125,9 @@ export default function AdminHomeScreen() {
         if (__DEV__) {
           console.error('[Admin dashboard] Failed to load review queue', err);
         }
-        setQueueError('לא הצלחנו לטעון את חשבוניות הבדיקה');
+        if (isInitialLoad) {
+          setQueueError('לא הצלחנו לטעון את חשבוניות הבדיקה');
+        }
       })
       .finally(() => setQueueLoading(false));
   }, []);
@@ -219,7 +261,14 @@ export default function AdminHomeScreen() {
                         <Text style={styles.thumbPlaceholderText}>{isolateLTR('PDF')}</Text>
                       </View>
                     ) : thumb?.status === 'ready' && thumb.url ? (
-                      <Image source={{ uri: thumb.url }} style={styles.thumbImage} resizeMode="contain" />
+                      <Image
+                        source={{ uri: thumb.url }}
+                        style={styles.thumbImage}
+                        contentFit="contain"
+                        cachePolicy="memory-disk"
+                        recyclingKey={report.id}
+                        transition={100}
+                      />
                     ) : thumb?.status === 'loading' ? (
                       <View style={styles.thumbPlaceholder}>
                         <ActivityIndicator color={colors.primary} size="small" />
