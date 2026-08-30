@@ -97,10 +97,6 @@ export default function AdminHomeScreen() {
           return;
         }
 
-        if (__DEV__) {
-          console.log('[Admin Home] resolving thumbnail batch', { count: imageRows.length });
-        }
-
         // STAGE 17.2: mark every row that doesn't already have a resolved
         // thumbnail as 'loading' in ONE atomic update (never per-row), then
         // resolve the whole batch (cache hits + fresh Storage calls) via
@@ -119,12 +115,6 @@ export default function AdminHomeScreen() {
         });
 
         loadAdminReceiptThumbnails(imageRows).then((resolvedMap) => {
-          if (__DEV__) {
-            console.log('[Admin Home] thumbnail batch resolved', {
-              count: imageRows.length,
-              readyCount: Object.values(resolvedMap).filter((entry) => entry.status === 'ready').length,
-            });
-          }
           setThumbnails((prev) => ({ ...prev, ...resolvedMap }));
         });
       })

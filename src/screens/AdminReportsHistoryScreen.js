@@ -116,10 +116,6 @@ export default function AdminReportsHistoryScreen() {
           return;
         }
 
-        if (__DEV__) {
-          console.log('[Admin History] resolving thumbnail batch', { count: imageRows.length });
-        }
-
         // STAGE 17.2: same Promise.all batch resolution as AdminHomeScreen -
         // see adminReportService.js's loadAdminReceiptThumbnails() and that
         // screen's own comment. Fire-and-forget on purpose: the report list
@@ -135,12 +131,6 @@ export default function AdminReportsHistoryScreen() {
         });
 
         loadAdminReceiptThumbnails(imageRows).then((resolvedMap) => {
-          if (__DEV__) {
-            console.log('[Admin History] thumbnail batch resolved', {
-              count: imageRows.length,
-              readyCount: Object.values(resolvedMap).filter((entry) => entry.status === 'ready').length,
-            });
-          }
           setThumbnails((prev) => ({ ...prev, ...resolvedMap }));
         });
       })

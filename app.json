@@ -33,12 +33,20 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#208AEF",
+          "backgroundColor": "#0A0E0E",
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
       ],
-      "expo-font"
+      "expo-font",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "האפליקציה זקוקה לגישה לתמונות כדי להעלות חשבונית או תמונת פרופיל.",
+          "cameraPermission": "האפליקציה זקוקה לגישה למצלמה כדי לצלם חשבונית.",
+          "microphonePermission": false
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

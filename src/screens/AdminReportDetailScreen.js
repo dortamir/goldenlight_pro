@@ -827,38 +827,20 @@ export default function AdminReportDetailScreen() {
           // (returning to a report already viewed this session).
           const cachedUrl = getCachedReceiptUrl(data.receipt_path);
           if (cachedUrl) {
-            if (__DEV__) {
-              console.log('[Admin Detail] receipt image cache hit', { reportId: data.id });
-            }
             setImageState({ status: 'ready', url: cachedUrl });
           } else {
-            if (__DEV__) {
-              console.log('[Admin Detail] receipt image cache miss, requesting signed URL', {
-                reportId: data.id,
-                hasReceiptPath: Boolean(data.receipt_path),
-              });
-            }
             setImageState({ status: 'loading', url: null });
             getAdminReceiptSignedUrl(data.receipt_path)
               .then((url) => {
-                if (__DEV__) {
-                  console.log('[Admin Detail] receipt signed URL resolved', { reportId: data.id, urlReceived: Boolean(url) });
-                }
                 setImageState({ status: url ? 'ready' : 'error', url });
               })
               .catch((err) => {
                 if (__DEV__) {
-                  console.warn('[Admin Detail] receipt signed URL failed', { reportId: data.id, message: err?.message });
+                  console.warn('[Admin] Failed to load receipt image', { reportId: data.id, message: err?.message });
                 }
                 setImageState({ status: 'error', url: null });
               });
           }
-        } else if (__DEV__) {
-          console.log('[Admin Detail] no receipt image expected', {
-            reportId: data.id,
-            isPdf: isPdfFile(data.original_filename),
-            hasReceiptPath: Boolean(data.receipt_path),
-          });
         }
       })
       .catch((err) => {
@@ -1542,15 +1524,11 @@ export default function AdminReportDetailScreen() {
                   transition={100}
                   onLoad={handleReceiptImageLoad}
                   onError={(event) => {
-                    // STAGE 17.1: a signed URL that resolved successfully but
-                    // then fails to actually load previously left this
-                    // permanently stuck on 'ready' with a blank/broken image
-                    // and no visible failure state at all.
+                    // A signed URL that resolved successfully but then fails
+                    // to actually load must not stay stuck on 'ready' with a
+                    // blank/broken image and no visible failure state.
                     if (__DEV__) {
-                      console.warn('[Admin Detail] receipt image onError', {
-                        reportId: report?.id,
-                        error: event?.error,
-                      });
+                      console.warn('[Admin] Receipt image failed to load', { reportId: report?.id, error: event?.error });
                     }
                     setImageState((prev) => ({ status: 'error', url: prev.url }));
                   }}

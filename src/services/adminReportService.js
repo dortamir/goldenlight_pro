@@ -624,35 +624,29 @@ export async function awardPurchasePoints(reportId) {
 // and a freshly-generated admin URL is written into that same cache for
 // later reuse either way (see getCachedReceiptUrl/setCachedReceiptUrl in
 // purchaseReportService.js).
+// STAGE 18: the verbose per-step [Admin image]/[AdminReceiptImage] tracing
+// added across Stages 17.1-17.4 (cache hit/miss, in-flight reuse,
+// createSignedUrl start/success/error, a tagged end-to-end trace keyed by
+// reportId) was temporary physical-device debugging instrumentation for a
+// since-confirmed-fixed image-loading issue. Removed now that it's no
+// longer needed, matching the logging density of
+// purchaseReportService.js's own getReceiptSignedUrl(): silent on the
+// normal/success path, one dev-only warning on actual failure. Never logs
+// the signed URL itself or any auth/token value - only the storage path
+// (already admin-visible elsewhere) and the error's safe code/message.
 export async function getAdminReceiptSignedUrl(receiptPath, expiresInSeconds = 300) {
   if (!supabase || !receiptPath) {
-    if (__DEV__) {
-      console.log('[Admin image] getAdminReceiptSignedUrl skipped', {
-        hasSupabase: Boolean(supabase),
-        hasReceiptPath: Boolean(receiptPath),
-      });
-    }
     return null;
   }
 
   const cached = getCachedReceiptUrl(receiptPath);
   if (cached) {
-    if (__DEV__) {
-      console.log('[Admin image] signed URL cache hit', { receiptPath });
-    }
     return cached;
   }
 
   const inflight = adminReceiptUrlInflight.get(receiptPath);
   if (inflight) {
-    if (__DEV__) {
-      console.log('[Admin image] signed URL request already in flight, reusing', { receiptPath });
-    }
     return inflight;
-  }
-
-  if (__DEV__) {
-    console.log('[Admin image] signed URL cache miss - calling createSignedUrl', { receiptPath, expiresInSeconds });
   }
 
   const requestPromise = (async () => {
@@ -661,17 +655,8 @@ export async function getAdminReceiptSignedUrl(receiptPath, expiresInSeconds = 3
       .createSignedUrl(receiptPath, expiresInSeconds);
 
     if (error) {
-      // STAGE 17.1: this branch previously had no diagnostics at all -
-      // unlike purchaseReportService.js's own getReceiptSignedUrl(), a
-      // failure here (e.g. a storage RLS/policy rejection, a network
-      // error) resolved to a rejected promise with zero visibility, so the
-      // admin UI simply fell back to its placeholder icon with no way to
-      // tell "never attempted" apart from "actually failed." Never logs
-      // the receiptPath's signed URL itself or any auth/token value - only
-      // the storage path (already admin-visible) and the error's safe
-      // code/message.
       if (__DEV__) {
-        console.warn('[Admin image] createSignedUrl failed', {
+        console.warn('[Admin] Failed to create receipt signed URL', {
           receiptPath,
           code: error?.code,
           message: error?.message,
@@ -681,10 +666,6 @@ export async function getAdminReceiptSignedUrl(receiptPath, expiresInSeconds = 3
     }
 
     const url = data?.signedUrl || null;
-
-    if (__DEV__) {
-      console.log('[Admin image] createSignedUrl succeeded', { receiptPath, urlReceived: Boolean(url) });
-    }
 
     if (url) {
       setCachedReceiptUrl(receiptPath, url, expiresInSeconds);

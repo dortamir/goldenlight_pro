@@ -39,23 +39,6 @@ async function openExternalLinkSafely(url) {
   }
 }
 
-// A clearly labeled placeholder "asset slot" for a Golden Light
-// promotional/product photo that doesn't exist in the repo yet - never
-// invented stock photography, never a remote placeholder-image service,
-// just a dashed box marking exactly where a real image belongs and which
-// file to add. Once that file exists at src/assets/images/<fileName>,
-// replace this component's contents with
-// `<Image source={require('../assets/images/<fileName>')} style={styles.imageSlotPhoto} resizeMode="cover" />`.
-function BrandImageSlot({ label, fileName, style }) {
-  return (
-    <View style={[styles.imageSlot, style]}>
-      <Ionicons name="image-outline" size={22} color={colors.textMuted} />
-      <Text style={styles.imageSlotLabel}>{label}</Text>
-      <Text style={styles.imageSlotFileName}>{isolateLTR(fileName)}</Text>
-    </View>
-  );
-}
-
 export default function RewardsScreen() {
   const { user } = useAuth();
   const [profile, setProfile] = useState(null);
@@ -163,13 +146,11 @@ export default function RewardsScreen() {
         <View style={styles.heroSection} onLayout={onHeroLayout}>
           <View style={styles.heroInner}>
             <Text style={styles.title}>מתנות</Text>
-            <Text style={styles.subtitle}>
-              {`ממשו את הנקודות שצברתם וגלו את העולם של ${isolateLTR('Golden Light')}`}
-            </Text>
+            <Text style={styles.subtitle}>{`עקבו אחרי הנקודות שצברתם כחברי ${isolateLTR('GOLDEN+')}`}</Text>
 
             <PointsBalanceCard
               pointsBalance={pointsBalance}
-              meta="זמינות למימוש"
+              meta="יתרת הנקודות שלך"
               loading={loading}
               error={error}
               onRetry={() =>
@@ -191,35 +172,39 @@ export default function RewardsScreen() {
             own sheet. */}
         <View style={[styles.sheet, sheetMinHeight ? { minHeight: sheetMinHeight } : null]}>
           <View style={styles.sheetInner}>
-            {/* Point redemption CTA - near the top of the sheet, directly
-                under the real points balance above. The destination URL
-                isn't available yet - see POINTS_REDEMPTION_URL in
-                constants/externalLinks.js, the one place to insert it once
-                it exists. openExternalLinkSafely no-ops on a missing URL,
-                so this never navigates anywhere fake in the meantime. No
-                internal points formula/calculation is shown or referenced
-                here - only the real balance already displayed above. */}
-            <Pressable
-              style={({ pressed }) => [styles.redeemCard, pressed && styles.redeemCardPressed]}
-              onPress={() => openExternalLinkSafely(POINTS_REDEMPTION_URL)}
-              accessibilityRole="button"
-              accessibilityLabel="למימוש הנקודות שלך לחץ כאן">
-              <View style={styles.redeemIconWrap}>
-                <Ionicons name="wallet-outline" size={20} color={colors.primary} />
-              </View>
-              <Text style={styles.redeemText}>למימוש הנקודות שלך לחץ כאן</Text>
-              <Ionicons name="chevron-back" size={18} color={colors.primary} />
-            </Pressable>
+            {/* STAGE 18.1: point redemption CTA - hidden entirely for V1
+                (POINTS_REDEMPTION_URL is not yet set - see
+                constants/externalLinks.js). Conditionally rendered rather
+                than deleted, so setting a real URL there is the ONLY change
+                needed to bring this row back - no screen-architecture
+                rebuild required. openExternalLinkSafely also no-ops on a
+                missing URL as defense in depth, but the row is kept out of
+                the tree entirely while null so nothing tappable-looking with
+                no real action is ever shown to a real customer. */}
+            {POINTS_REDEMPTION_URL ? (
+              <Pressable
+                style={({ pressed }) => [styles.redeemCard, pressed && styles.redeemCardPressed]}
+                onPress={() => openExternalLinkSafely(POINTS_REDEMPTION_URL)}
+                accessibilityRole="button"
+                accessibilityLabel="למימוש הנקודות שלך לחץ כאן">
+                <View style={styles.redeemIconWrap}>
+                  <Ionicons name="wallet-outline" size={20} color={colors.primary} />
+                </View>
+                <Text style={styles.redeemText}>למימוש הנקודות שלך לחץ כאן</Text>
+                <Ionicons name="chevron-back" size={18} color={colors.primary} />
+              </Pressable>
+            ) : null}
 
-            {/* Golden Light brand section - replaces the old per-benefit
-                progress list entirely (no more "X points remaining until
-                Y" cards). A premium branded landing block instead: a dark
-                hero-style card (logo + headline + supporting copy + website
-                CTA) followed by promotional-image slots. The CTA's
-                destination isn't available yet - see
-                GOLDEN_LIGHT_WEBSITE_URL in constants/externalLinks.js, the
-                one place to insert it once it exists; openExternalLinkSafely
-                no-ops until then. */}
+            {/* STAGE 18.1: V1 "coming soon" state, replacing the previous
+                "explore Golden Light's world" marketing card and its
+                dashed-placeholder promotional-image slots (dev-only asset
+                markers that must never reach a real customer). Reuses the
+                exact same dark gradient brand card/logo treatment as
+                before - same GOLDEN+ visual language, only the copy and the
+                (now-conditional) CTA changed. The website button only
+                renders once GOLDEN_LIGHT_WEBSITE_URL is set - see
+                constants/externalLinks.js - so this card upgrades itself
+                automatically the moment a real URL is added, no rebuild. */}
             <View style={styles.brandSection}>
               <LinearGradient
                 colors={[colors.gradientDarkStart, colors.gradientDarkEnd]}
@@ -231,37 +216,18 @@ export default function RewardsScreen() {
                   style={styles.brandLogo}
                   resizeMode="contain"
                 />
-                <Text style={styles.brandHeadline}>{`גלו את העולם של ${isolateLTR('Golden Light')}`}</Text>
+                <Text style={styles.brandHeadline}>המתנות בדרך</Text>
                 <Text style={styles.brandSubtext}>
-                  הכירו את המוצרים, הקולקציות והפתרונות שלנו — וקבלו השראה לפרויקט הבא שלכם.
+                  {`בקרוב תוכלו לממש את הנקודות שצברתם למגוון מתנות והטבות לחברי ${isolateLTR('GOLDEN+')}.`}
                 </Text>
-                <PrimaryButton
-                  title={`לעולם של ${isolateLTR('Golden Light')}`}
-                  onPress={() => openExternalLinkSafely(GOLDEN_LIGHT_WEBSITE_URL)}
-                  style={styles.brandButton}
-                />
+                {GOLDEN_LIGHT_WEBSITE_URL ? (
+                  <PrimaryButton
+                    title={`לעולם של ${isolateLTR('Golden Light')}`}
+                    onPress={() => openExternalLinkSafely(GOLDEN_LIGHT_WEBSITE_URL)}
+                    style={styles.brandButton}
+                  />
+                ) : null}
               </LinearGradient>
-
-              {/* Promotional-image slots - see BrandImageSlot above for
-                  exactly how/where to swap each one for a real asset. */}
-              <BrandImageSlot
-                label="באנר ראשי - קולקציה או פרויקט לדוגמה"
-                fileName="golden-light-hero-banner.jpg"
-                style={styles.imageSlotWide}
-              />
-
-              <View style={styles.imageSlotRow}>
-                <BrandImageSlot
-                  label="תמונת מוצר"
-                  fileName="golden-light-showcase-1.jpg"
-                  style={styles.imageSlotSquare}
-                />
-                <BrandImageSlot
-                  label="תמונת מוצר"
-                  fileName="golden-light-showcase-2.jpg"
-                  style={styles.imageSlotSquare}
-                />
-              </View>
             </View>
           </View>
         </View>
@@ -411,43 +377,5 @@ const styles = StyleSheet.create({
   },
   brandButton: {
     marginTop: spacing.xl,
-  },
-  // Dashed border + muted fill deliberately reads as "placeholder", never
-  // mistakeable for a finished design - see BrandImageSlot above.
-  imageSlot: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.xs,
-    borderRadius: radius.lg,
-    borderWidth: 1.5,
-    borderStyle: 'dashed',
-    borderColor: colors.border,
-    backgroundColor: colors.surfaceMuted,
-    padding: spacing.md,
-  },
-  imageSlotWide: {
-    width: '100%',
-    aspectRatio: 16 / 9,
-  },
-  imageSlotRow: {
-    flexDirection: 'row-reverse',
-    gap: spacing.md,
-  },
-  imageSlotSquare: {
-    flex: 1,
-    aspectRatio: 1,
-  },
-  imageSlotLabel: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '600',
-    color: colors.textMuted,
-    textAlign: 'center',
-  },
-  imageSlotFileName: {
-    fontSize: 10,
-    fontWeight: '500',
-    color: colors.textMuted,
-    textAlign: 'center',
-    opacity: 0.8,
   },
 });

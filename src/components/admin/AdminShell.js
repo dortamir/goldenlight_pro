@@ -3,7 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useAuth } from '../../context/AuthContext';
-import { colors, radius, spacing, typography } from '../../theme';
+import { colors, radius, spacing } from '../../theme';
 import { isolateLTR } from '../../utils/bidiText';
 
 // Deliberately just two real destinations. A third item ("חשבוניות לבדיקה")
@@ -13,9 +13,13 @@ import { isolateLTR } from '../../utils/bidiText';
 // choice with no actual difference. "כל החשבוניות" (AdminReportsHistoryScreen)
 // remains the one real second destination, covering every status including
 // approved/rejected reports the active queue intentionally drops.
+// STAGE 17.4: rendered in this exact array order (history before dashboard)
+// inside `nav`'s plain `flexDirection: 'row'` - see the mirrored headerRow
+// render below for why this order (not the array order alone) is what
+// actually determines the visual left-to-right result.
 const NAV_ITEMS = [
-  { key: 'dashboard', label: 'ראשי', route: '/admin' },
   { key: 'history', label: 'כל החשבוניות', route: '/admin/reports' },
+  { key: 'dashboard', label: 'ראשי', route: '/admin' },
 ];
 
 // Shared web-first admin chrome: a dark header (brand + minimal nav + sign
@@ -39,47 +43,33 @@ export default function AdminShell({ activeKey = 'dashboard', children }) {
 
   return (
     <View style={styles.root}>
-      {/* STAGE 17.2: Stage 17.1's fix (useSafeAreaInsets() + manual
-          paddingTop) did not clear the status bar/Dynamic Island on the
-          physical iPhone. Replaced with the SAME structural pattern this
-          codebase already proves works on that exact device -
-          AppScreen.js's own <SafeAreaView> (the COMPONENT, not the hook)
-          from react-native-safe-area-context, used by every customer
-          screen. The dark background lives on this OUTER plain View (so it
-          still paints all the way behind the status bar/island - no gap),
-          while <SafeAreaView edges={['top']}> is the ONE place that owns
-          top safe-area padding, pushing headerInner's actual content
-          (brand/nav/sign-out) below the inset. `edges={['top']}` only -
-          left/right/bottom are never padded here (this isn't a full-screen
-          safe area, only the header needs it), so there is no double
-          safe-area application anywhere in the admin tree. AdminShell is
-          still the ONE component every admin screen (Home, History,
-          Detail) gets its header from, so this remains the single owner
-          for the whole admin area.  */}
+      {/* STAGE 17.4: same single-row layout/safe-area handling as Stage 17.3
+          (dark background on this outer plain View, <SafeAreaView
+          edges={['top']}> as the one and only owner of top safe-area
+          padding) - only the horizontal ORDER of the three siblings
+          changed. headerRow is still plain `flexDirection: 'row'` (never
+          'row-reverse', never toggled by RTL/I18nManager) - the visual
+          left-to-right order is entirely determined by JSX source order,
+          explicitly reversed here: sign-out first (leftmost), then nav
+          (כל החשבוניות before ראשי - see NAV_ITEMS' own order above), then
+          brand last (rightmost). This is a pure mirror of Stage 17.3's
+          render order - no styling, sizing, or safe-area behavior changed. */}
       <View style={styles.headerBackground}>
         <SafeAreaView edges={['top']}>
-          <View style={styles.headerInner}>
-            <View style={styles.headerTopRow}>
-              <Text style={styles.brand}>{`${isolateLTR('GOLDEN+')} · מערכת ניהול`}</Text>
+          <View style={styles.headerRow}>
+            <Pressable
+              onPress={handleSignOut}
+              style={({ pressed, hovered }) => [
+                styles.signOutButton,
+                hovered && styles.signOutButtonHovered,
+                pressed && styles.navItemPressed,
+              ]}
+              accessibilityRole="button">
+              <Text style={styles.signOutText} numberOfLines={1}>
+                יציאה
+              </Text>
+            </Pressable>
 
-              <Pressable
-                onPress={handleSignOut}
-                style={({ pressed, hovered }) => [
-                  styles.signOutButton,
-                  hovered && styles.signOutButtonHovered,
-                  pressed && styles.navItemPressed,
-                ]}
-                accessibilityRole="button">
-                <Text style={styles.signOutText}>יציאה</Text>
-              </Pressable>
-            </View>
-
-            {/* STAGE 17.2: nav pills moved onto their own row (previously
-                shared one flex-wrap row with the brand text and sign-out
-                button, whose wrap order on a narrow physical iPhone width
-                was not reliably predictable). Two explicit rows - title+
-                sign-out, then nav - are always readable and never clip,
-                on every width, without relying on flex-wrap reflow. */}
             <View style={styles.nav}>
               {NAV_ITEMS.map((item) => {
                 const isActive = activeKey === item.key;
@@ -95,11 +85,15 @@ export default function AdminShell({ activeKey = 'dashboard', children }) {
                     ]}
                     accessibilityRole="link"
                     accessibilityState={{ selected: isActive }}>
-                    <Text style={[styles.navText, isActive && styles.navTextActive]}>{item.label}</Text>
+                    <Text style={[styles.navText, isActive && styles.navTextActive]} numberOfLines={1}>
+                      {item.label}
+                    </Text>
                   </Pressable>
                 );
               })}
             </View>
+
+            <Text style={styles.brand} numberOfLines={1}>{`${isolateLTR('GOLDEN+')} · מערכת ניהול`}</Text>
           </View>
         </SafeAreaView>
       </View>
@@ -124,35 +118,41 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: colors.charcoalBorder,
   },
-  headerInner: {
+  // STAGE 17.3: one row, no flexWrap anywhere - width budget is tight on a
+  // narrow physical iPhone, so every piece below is deliberately more
+  // compact than the old two-row layout (smaller gaps/padding/font sizes),
+  // and the brand title is allowed to shrink/truncate (flexShrink +
+  // numberOfLines on the Text itself) before nav/sign-out ever would - see
+  // the render above's own comment for why 'row' (not 'row-reverse').
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     width: '100%',
     maxWidth: 1100,
     alignSelf: 'center',
-    paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
     gap: spacing.sm,
   },
-  headerTopRow: {
-    flexDirection: 'row-reverse',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.md,
-  },
   brand: {
-    ...typography.body,
+    fontSize: 14,
+    lineHeight: 18,
     fontWeight: '700',
     color: colors.textOnDark,
-    textAlign: 'right',
+    textAlign: 'left',
+    flexShrink: 1,
+    minWidth: 0,
   },
   nav: {
-    flexDirection: 'row-reverse',
-    flexWrap: 'wrap',
-    gap: spacing.xs,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    flexShrink: 0,
   },
   navItem: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: 9,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
     borderRadius: radius.pill,
     borderWidth: 1,
     borderColor: 'transparent',
@@ -169,7 +169,8 @@ const styles = StyleSheet.create({
     borderColor: colors.primary,
   },
   navText: {
-    ...typography.caption,
+    fontSize: 11,
+    lineHeight: 14,
     fontWeight: '600',
     color: colors.mutedOnDark,
     textAlign: 'center',
@@ -179,18 +180,20 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   signOutButton: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: 9,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
     borderRadius: radius.pill,
     borderWidth: 1,
     borderColor: colors.charcoalBorder,
     cursor: 'pointer',
+    flexShrink: 0,
   },
   signOutButtonHovered: {
     borderColor: colors.mutedOnDark,
   },
   signOutText: {
-    ...typography.caption,
+    fontSize: 11,
+    lineHeight: 14,
     fontWeight: '600',
     color: colors.mutedOnDark,
     textAlign: 'center',
