@@ -5,8 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import AdminShell from '../components/admin/AdminShell';
-import { getAdminDashboardSummary, getAdminReceiptSignedUrl, getAdminReports } from '../services/adminReportService';
-import { getCachedReceiptUrl } from '../services/purchaseReportService';
+import { getAdminDashboardSummary, getAdminReports, loadAdminReceiptThumbnails } from '../services/adminReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { getAdminReportStatusMeta } from '../utils/adminReportStatus';
 import { isolateLTR } from '../utils/bidiText';
@@ -112,28 +111,38 @@ export default function AdminReportsHistoryScreen() {
         setReports(rows);
         hasLoadedReportsRef.current = true;
 
-        rows
-          .filter((row) => !isPdfFile(row.original_filename) && row.receipt_path)
-          .forEach((row) => {
-            // STAGE 17: cached signed URL (shared with the customer receipt
-            // cache) renders immediately - see AdminHomeScreen.js's own
-            // identical comment.
-            const cachedUrl = getCachedReceiptUrl(row.receipt_path);
-            if (cachedUrl) {
-              setThumbnails((prev) => ({ ...prev, [row.id]: { status: 'ready', url: cachedUrl } }));
-              return;
-            }
+        const imageRows = rows.filter((row) => !isPdfFile(row.original_filename) && row.receipt_path);
+        if (imageRows.length === 0) {
+          return;
+        }
 
-            setThumbnails((prev) => ({ ...prev, [row.id]: prev[row.id] ?? { status: 'loading', url: null } }));
+        if (__DEV__) {
+          console.log('[Admin History] resolving thumbnail batch', { count: imageRows.length });
+        }
 
-            getAdminReceiptSignedUrl(row.receipt_path)
-              .then((url) => {
-                setThumbnails((prev) => ({ ...prev, [row.id]: { status: url ? 'ready' : 'error', url } }));
-              })
-              .catch(() => {
-                setThumbnails((prev) => ({ ...prev, [row.id]: { status: 'error', url: null } }));
-              });
+        // STAGE 17.2: same Promise.all batch resolution as AdminHomeScreen -
+        // see adminReportService.js's loadAdminReceiptThumbnails() and that
+        // screen's own comment. Fire-and-forget on purpose: the report list
+        // itself must render immediately (`.finally(() => setLoading(false))`
+        // below), with thumbnails filling in progressively as the batch
+        // resolves.
+        setThumbnails((prev) => {
+          const next = { ...prev };
+          imageRows.forEach((row) => {
+            next[row.id] = next[row.id] ?? { status: 'loading', url: null };
           });
+          return next;
+        });
+
+        loadAdminReceiptThumbnails(imageRows).then((resolvedMap) => {
+          if (__DEV__) {
+            console.log('[Admin History] thumbnail batch resolved', {
+              count: imageRows.length,
+              readyCount: Object.values(resolvedMap).filter((entry) => entry.status === 'ready').length,
+            });
+          }
+          setThumbnails((prev) => ({ ...prev, ...resolvedMap }));
+        });
       })
       .catch(() => {
         if (isInitialLoad) {
@@ -212,17 +221,42 @@ export default function AdminReportsHistoryScreen() {
   // STAGE 13 UPDATE: the compact summary area - exactly three counts now
   // (no separate "בעיבוד" chip - `processing` is no longer its own
   // admin-facing category anywhere in this screen, see STATUS_FILTERS
-  // above). "דורשות בדיקה" uses summary.pendingCount (submitted +
-  // processing + needs_review combined, adminReportService.js) and gets
-  // the `attention` treatment (stand out slightly, never the red/error
-  // tokens reserved for rejection). Each chip is itself a shortcut into
-  // the matching filter, the same click-to-filter pattern AdminHomeScreen's
-  // own summary cards already use - no separate, disconnected "analytics"
-  // widget.
+  // above). Each chip is itself a shortcut into the matching filter, the
+  // same click-to-filter pattern AdminHomeScreen's own summary cards
+  // already use - no separate, disconnected "analytics" widget.
+  //
+  // STAGE 17.1 FIX: each item's active visual style is now looked up from
+  // `activeFilter` (`STATUS_FILTERS`'s own single source of truth for
+  // selection - the SAME state the filter pills below already read) rather
+  // than a static `attention: true` flag that used to paint the
+  // "דורשות בדיקה" chip amber unconditionally, regardless of which filter
+  // was actually selected - that mismatch (e.g. "אושרו" active as a
+  // turquoise pill while "דורשות בדיקה" stayed amber underneath) was
+  // exactly the reported bug. There is still only one state variable
+  // driving both controls; only the RENDER of the summary chips was ever
+  // disconnected from it.
   const summaryItems = [
-    { key: 'needs_review', label: 'דורשות בדיקה', value: summary?.pendingCount, attention: true },
-    { key: 'approved', label: 'אושרו', value: summary?.approvedCount },
-    { key: 'rejected', label: 'נדחו', value: summary?.rejectedCount },
+    {
+      key: 'needs_review',
+      label: 'דורשות בדיקה',
+      value: summary?.pendingCount,
+      activeChipStyle: styles.summaryChipActiveNeedsReview,
+      activeValueStyle: styles.summaryValueActiveNeedsReview,
+    },
+    {
+      key: 'approved',
+      label: 'אושרו',
+      value: summary?.approvedCount,
+      activeChipStyle: styles.summaryChipActiveApproved,
+      activeValueStyle: styles.summaryValueActiveApproved,
+    },
+    {
+      key: 'rejected',
+      label: 'נדחו',
+      value: summary?.rejectedCount,
+      activeChipStyle: styles.summaryChipActiveRejected,
+      activeValueStyle: styles.summaryValueActiveRejected,
+    },
   ];
 
   return (
@@ -245,24 +279,26 @@ export default function AdminReportsHistoryScreen() {
                     <ActivityIndicator color={colors.primary} size="small" />
                   </View>
                 ))
-              : summaryItems.map((item) => (
-                  <Pressable
-                    key={item.key}
-                    onPress={() => setActiveFilter(item.key)}
-                    style={({ pressed, hovered }) => [
-                      styles.summaryChip,
-                      item.attention && styles.summaryChipAttention,
-                      hovered && styles.summaryChipHovered,
-                      pressed && styles.summaryChipPressed,
-                    ]}
-                    accessibilityRole="button"
-                    accessibilityLabel={`${item.value ?? 0} חשבוניות ${item.label}, מעבר לסינון לפי סטטוס זה`}>
-                    <Text style={[styles.summaryValue, item.attention && styles.summaryValueAttention]}>
-                      {item.value ?? 0}
-                    </Text>
-                    <Text style={styles.summaryLabel}>{item.label}</Text>
-                  </Pressable>
-                ))}
+              : summaryItems.map((item) => {
+                  const isActive = activeFilter === item.key;
+                  return (
+                    <Pressable
+                      key={item.key}
+                      onPress={() => setActiveFilter(item.key)}
+                      style={({ pressed, hovered }) => [
+                        styles.summaryChip,
+                        isActive && item.activeChipStyle,
+                        hovered && styles.summaryChipHovered,
+                        pressed && styles.summaryChipPressed,
+                      ]}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected: isActive }}
+                      accessibilityLabel={`${item.value ?? 0} חשבוניות ${item.label}, מעבר לסינון לפי סטטוס זה`}>
+                      <Text style={[styles.summaryValue, isActive && item.activeValueStyle]}>{item.value ?? 0}</Text>
+                      <Text style={styles.summaryLabel}>{item.label}</Text>
+                    </Pressable>
+                  );
+                })}
           </View>
         )}
 
@@ -358,6 +394,15 @@ export default function AdminReportsHistoryScreen() {
                         cachePolicy="memory-disk"
                         recyclingKey={report.id}
                         transition={100}
+                        onError={(event) => {
+                          if (__DEV__) {
+                            console.warn('[Admin History] thumbnail image onError', {
+                              reportId: report.id,
+                              error: event?.error,
+                            });
+                          }
+                          setThumbnails((prev) => ({ ...prev, [report.id]: { status: 'error', url: null } }));
+                        }}
                       />
                     ) : thumb?.status === 'loading' ? (
                       <View style={styles.thumbPlaceholder}>
@@ -444,12 +489,24 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     cursor: 'pointer',
   },
-  // needs_review's own chip - a warm, attention-worthy tint (never the
-  // red/error tokens, reserved for genuine rejection - see
-  // src/utils/adminReportStatus.js's own comment on the same choice).
-  summaryChipAttention: {
+  // STAGE 17.1: each summary card's ACTIVE (selected) look, applied only
+  // when `activeFilter` actually equals that card's own key - see
+  // summaryItems above. Reuses the exact same status colors as
+  // src/utils/adminReportStatus.js/the row status badges below (amber for
+  // "דורשות בדיקה", never the red/error tokens reserved for rejection;
+  // green for "אושרו"; red for "נדחו"), so a card's selected color always
+  // matches what that status already means everywhere else in this screen.
+  summaryChipActiveNeedsReview: {
     backgroundColor: colors.warningSoft,
     borderColor: colors.warning,
+  },
+  summaryChipActiveApproved: {
+    backgroundColor: colors.successSoft,
+    borderColor: colors.success,
+  },
+  summaryChipActiveRejected: {
+    backgroundColor: colors.errorSoft,
+    borderColor: colors.error,
   },
   summaryChipHovered: {
     borderColor: colors.primary,
@@ -463,8 +520,14 @@ const styles = StyleSheet.create({
     color: colors.text,
     textAlign: 'right',
   },
-  summaryValueAttention: {
+  summaryValueActiveNeedsReview: {
     color: colors.warning,
+  },
+  summaryValueActiveApproved: {
+    color: colors.success,
+  },
+  summaryValueActiveRejected: {
+    color: colors.error,
   },
   summaryLabel: {
     ...typography.caption,

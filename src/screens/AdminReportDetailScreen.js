@@ -827,13 +827,38 @@ export default function AdminReportDetailScreen() {
           // (returning to a report already viewed this session).
           const cachedUrl = getCachedReceiptUrl(data.receipt_path);
           if (cachedUrl) {
+            if (__DEV__) {
+              console.log('[Admin Detail] receipt image cache hit', { reportId: data.id });
+            }
             setImageState({ status: 'ready', url: cachedUrl });
           } else {
+            if (__DEV__) {
+              console.log('[Admin Detail] receipt image cache miss, requesting signed URL', {
+                reportId: data.id,
+                hasReceiptPath: Boolean(data.receipt_path),
+              });
+            }
             setImageState({ status: 'loading', url: null });
             getAdminReceiptSignedUrl(data.receipt_path)
-              .then((url) => setImageState({ status: url ? 'ready' : 'error', url }))
-              .catch(() => setImageState({ status: 'error', url: null }));
+              .then((url) => {
+                if (__DEV__) {
+                  console.log('[Admin Detail] receipt signed URL resolved', { reportId: data.id, urlReceived: Boolean(url) });
+                }
+                setImageState({ status: url ? 'ready' : 'error', url });
+              })
+              .catch((err) => {
+                if (__DEV__) {
+                  console.warn('[Admin Detail] receipt signed URL failed', { reportId: data.id, message: err?.message });
+                }
+                setImageState({ status: 'error', url: null });
+              });
           }
+        } else if (__DEV__) {
+          console.log('[Admin Detail] no receipt image expected', {
+            reportId: data.id,
+            isPdf: isPdfFile(data.original_filename),
+            hasReceiptPath: Boolean(data.receipt_path),
+          });
         }
       })
       .catch((err) => {
@@ -1516,6 +1541,19 @@ export default function AdminReportDetailScreen() {
                   recyclingKey={report?.id}
                   transition={100}
                   onLoad={handleReceiptImageLoad}
+                  onError={(event) => {
+                    // STAGE 17.1: a signed URL that resolved successfully but
+                    // then fails to actually load previously left this
+                    // permanently stuck on 'ready' with a blank/broken image
+                    // and no visible failure state at all.
+                    if (__DEV__) {
+                      console.warn('[Admin Detail] receipt image onError', {
+                        reportId: report?.id,
+                        error: event?.error,
+                      });
+                    }
+                    setImageState((prev) => ({ status: 'error', url: prev.url }));
+                  }}
                 />
                 <View style={styles.enlargeHint} pointerEvents="none">
                   <Ionicons name="expand-outline" size={13} color={colors.white} />
@@ -2231,6 +2269,15 @@ export default function AdminReportDetailScreen() {
               cachePolicy="memory-disk"
               recyclingKey={report?.id}
               transition={100}
+              onError={(event) => {
+                if (__DEV__) {
+                  console.warn('[Admin Detail] fullscreen preview image onError', {
+                    reportId: report?.id,
+                    error: event?.error,
+                  });
+                }
+                setImageState((prev) => ({ status: 'error', url: prev.url }));
+              }}
             />
           ) : null}
 

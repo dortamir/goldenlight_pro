@@ -626,17 +626,33 @@ export async function awardPurchasePoints(reportId) {
 // purchaseReportService.js).
 export async function getAdminReceiptSignedUrl(receiptPath, expiresInSeconds = 300) {
   if (!supabase || !receiptPath) {
+    if (__DEV__) {
+      console.log('[Admin image] getAdminReceiptSignedUrl skipped', {
+        hasSupabase: Boolean(supabase),
+        hasReceiptPath: Boolean(receiptPath),
+      });
+    }
     return null;
   }
 
   const cached = getCachedReceiptUrl(receiptPath);
   if (cached) {
+    if (__DEV__) {
+      console.log('[Admin image] signed URL cache hit', { receiptPath });
+    }
     return cached;
   }
 
   const inflight = adminReceiptUrlInflight.get(receiptPath);
   if (inflight) {
+    if (__DEV__) {
+      console.log('[Admin image] signed URL request already in flight, reusing', { receiptPath });
+    }
     return inflight;
+  }
+
+  if (__DEV__) {
+    console.log('[Admin image] signed URL cache miss - calling createSignedUrl', { receiptPath, expiresInSeconds });
   }
 
   const requestPromise = (async () => {
@@ -645,10 +661,30 @@ export async function getAdminReceiptSignedUrl(receiptPath, expiresInSeconds = 3
       .createSignedUrl(receiptPath, expiresInSeconds);
 
     if (error) {
+      // STAGE 17.1: this branch previously had no diagnostics at all -
+      // unlike purchaseReportService.js's own getReceiptSignedUrl(), a
+      // failure here (e.g. a storage RLS/policy rejection, a network
+      // error) resolved to a rejected promise with zero visibility, so the
+      // admin UI simply fell back to its placeholder icon with no way to
+      // tell "never attempted" apart from "actually failed." Never logs
+      // the receiptPath's signed URL itself or any auth/token value - only
+      // the storage path (already admin-visible) and the error's safe
+      // code/message.
+      if (__DEV__) {
+        console.warn('[Admin image] createSignedUrl failed', {
+          receiptPath,
+          code: error?.code,
+          message: error?.message,
+        });
+      }
       throw error;
     }
 
     const url = data?.signedUrl || null;
+
+    if (__DEV__) {
+      console.log('[Admin image] createSignedUrl succeeded', { receiptPath, urlReceived: Boolean(url) });
+    }
 
     if (url) {
       setCachedReceiptUrl(receiptPath, url, expiresInSeconds);
@@ -664,4 +700,58 @@ export async function getAdminReceiptSignedUrl(receiptPath, expiresInSeconds = 3
   } finally {
     adminReceiptUrlInflight.delete(receiptPath);
   }
+}
+
+// STAGE 17.2: shared batch thumbnail-URL resolver for AdminHomeScreen and
+// AdminReportsHistoryScreen - both screens previously duplicated an
+// identical per-row `.forEach(...).then(...)` loop, committing one
+// `setThumbnails` state update per row as each row's signed URL resolved
+// independently. Centralizing it here means there is exactly one place
+// this logic can diverge or go wrong, and lets both callers commit their
+// entire batch's result in a SINGLE state update via Promise.all instead
+// of N separate ones. `rows` must already be pre-filtered by the caller to
+// the rows that actually need an image (non-PDF, receipt_path present) -
+// this function does not re-derive that filter, since isPdfFile() is a
+// screen-local concern, not a shared one. Returns a plain
+// { [reportId]: { status: 'ready'|'error', url } } map covering every row
+// passed in - cache hits are resolved synchronously (no network call) and
+// included in the same returned map alongside freshly-fetched ones, so the
+// caller only ever needs one merge into its own state.
+export async function loadAdminReceiptThumbnails(rows) {
+  const result = {};
+  const toFetch = [];
+
+  for (const row of rows) {
+    const cachedUrl = getCachedReceiptUrl(row.receipt_path);
+    if (cachedUrl) {
+      result[row.id] = { status: 'ready', url: cachedUrl };
+    } else {
+      toFetch.push(row);
+    }
+  }
+
+  if (toFetch.length > 0) {
+    const resolved = await Promise.all(
+      toFetch.map(async (row) => {
+        try {
+          const url = await getAdminReceiptSignedUrl(row.receipt_path);
+          return { id: row.id, status: url ? 'ready' : 'error', url };
+        } catch (err) {
+          if (__DEV__) {
+            console.warn('[Admin image] thumbnail batch resolve failed', {
+              reportId: row.id,
+              message: err?.message,
+            });
+          }
+          return { id: row.id, status: 'error', url: null };
+        }
+      }),
+    );
+
+    resolved.forEach(({ id, status, url }) => {
+      result[id] = { status, url };
+    });
+  }
+
+  return result;
 }

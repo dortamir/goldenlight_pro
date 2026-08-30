@@ -7,10 +7,9 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-nati
 import AdminShell from '../components/admin/AdminShell';
 import {
   getAdminDashboardSummary,
-  getAdminReceiptSignedUrl,
   getAdminReviewQueue,
+  loadAdminReceiptThumbnails,
 } from '../services/adminReportService';
-import { getCachedReceiptUrl } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { getAdminReportStatusMeta } from '../utils/adminReportStatus';
 import { isolateLTR } from '../utils/bidiText';
@@ -93,31 +92,41 @@ export default function AdminHomeScreen() {
         setQueue(rows);
         hasLoadedQueueRef.current = true;
 
-        rows
-          .filter((row) => !isPdfFile(row.original_filename) && row.receipt_path)
-          .forEach((row) => {
-            // STAGE 17: a cached signed URL (shared with the customer
-            // receipt cache - see adminReportService.js's
-            // getAdminReceiptSignedUrl) renders immediately as 'ready'
-            // instead of every row resetting to 'loading' first, so a
-            // report already viewed this session never flashes its
-            // thumbnail back to a placeholder on a background refresh.
-            const cachedUrl = getCachedReceiptUrl(row.receipt_path);
-            if (cachedUrl) {
-              setThumbnails((prev) => ({ ...prev, [row.id]: { status: 'ready', url: cachedUrl } }));
-              return;
-            }
+        const imageRows = rows.filter((row) => !isPdfFile(row.original_filename) && row.receipt_path);
+        if (imageRows.length === 0) {
+          return;
+        }
 
-            setThumbnails((prev) => ({ ...prev, [row.id]: prev[row.id] ?? { status: 'loading', url: null } }));
+        if (__DEV__) {
+          console.log('[Admin Home] resolving thumbnail batch', { count: imageRows.length });
+        }
 
-            getAdminReceiptSignedUrl(row.receipt_path)
-              .then((url) => {
-                setThumbnails((prev) => ({ ...prev, [row.id]: { status: url ? 'ready' : 'error', url } }));
-              })
-              .catch(() => {
-                setThumbnails((prev) => ({ ...prev, [row.id]: { status: 'error', url: null } }));
-              });
+        // STAGE 17.2: mark every row that doesn't already have a resolved
+        // thumbnail as 'loading' in ONE atomic update (never per-row), then
+        // resolve the whole batch (cache hits + fresh Storage calls) via
+        // loadAdminReceiptThumbnails()'s own Promise.all and commit the
+        // result in a SECOND atomic update. Deliberately NOT awaited here -
+        // this must stay fire-and-forget so `.finally(() => setQueueLoading(false))`
+        // below still fires as soon as the report rows themselves are
+        // ready, independent of how long thumbnails take (the queue list
+        // must render immediately; thumbnails fill in progressively).
+        setThumbnails((prev) => {
+          const next = { ...prev };
+          imageRows.forEach((row) => {
+            next[row.id] = next[row.id] ?? { status: 'loading', url: null };
           });
+          return next;
+        });
+
+        loadAdminReceiptThumbnails(imageRows).then((resolvedMap) => {
+          if (__DEV__) {
+            console.log('[Admin Home] thumbnail batch resolved', {
+              count: imageRows.length,
+              readyCount: Object.values(resolvedMap).filter((entry) => entry.status === 'ready').length,
+            });
+          }
+          setThumbnails((prev) => ({ ...prev, ...resolvedMap }));
+        });
       })
       .catch((err) => {
         // Dev-only: the real Supabase/Postgres error - never shown to the
@@ -268,6 +277,25 @@ export default function AdminHomeScreen() {
                         cachePolicy="memory-disk"
                         recyclingKey={report.id}
                         transition={100}
+                        onError={(event) => {
+                          // STAGE 17.1: a signed URL that resolved successfully
+                          // but then fails to actually LOAD (expired between
+                          // resolution and render, a genuine network failure on
+                          // the physical device, ...) previously left this
+                          // thumbnail permanently blank with the JS state stuck
+                          // at 'ready' - there was no error feedback loop at
+                          // all. Falling back to 'error' here re-shows the
+                          // placeholder icon instead of an invisible broken
+                          // image, and the log gives a real signal to trace
+                          // against on a physical device.
+                          if (__DEV__) {
+                            console.warn('[Admin Home] thumbnail image onError', {
+                              reportId: report.id,
+                              error: event?.error,
+                            });
+                          }
+                          setThumbnails((prev) => ({ ...prev, [report.id]: { status: 'error', url: null } }));
+                        }}
                       />
                     ) : thumb?.status === 'loading' ? (
                       <View style={styles.thumbPlaceholder}>
