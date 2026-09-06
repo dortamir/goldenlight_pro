@@ -14,10 +14,13 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import AdminShell from '../components/admin/AdminShell';
 import AppInput from '../components/common/AppInput';
 import PrimaryButton from '../components/common/PrimaryButton';
+import ZoomableImage from '../components/common/ZoomableImage';
 import {
   awardPurchasePoints,
   finalizePurchaseReport,
@@ -29,7 +32,7 @@ import {
   saveAdminManualItems,
 } from '../services/adminReportService';
 import { getProductSuggestions } from '../services/productMatching';
-import { getCachedReceiptUrl } from '../services/purchaseReportService';
+import { getCachedReceiptUrl, receiptImageCacheKey, warmReceiptImage } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { getAdminReportStatusMeta } from '../utils/adminReportStatus';
 import { isolateLTR } from '../utils/bidiText';
@@ -675,6 +678,19 @@ export default function AdminReportDetailScreen() {
   // customer-facing PurchaseReportDetailsScreen (dark overlay Modal,
   // resizeMode="contain", explicit close button).
   const [previewOpen, setPreviewOpen] = useState(false);
+  // STAGE 24.2: tracks whether the fullscreen receipt is currently zoomed
+  // past its normal fitted scale - reported by ZoomableImage's own optional
+  // onZoomChange callback (see that component's Stage 24.2 comment). Only
+  // used to decide whether tapping the dark backdrop around the receipt is
+  // safe to treat as "close the viewer" (the fitted-image bounds computed
+  // below are only accurate at rest - once zoomed, the receipt's real
+  // on-screen bounds are whatever ZoomableImage's own internal Reanimated
+  // transform currently renders, which this screen has no need to track).
+  // Always starts false; ZoomableImage itself only ever mounts fresh while
+  // previewOpen is true (see its conditional render below), so a fresh
+  // mount's own initial onZoomChange(false) call keeps this correctly
+  // reset on every reopen without any extra effect here.
+  const [isPreviewZoomed, setIsPreviewZoomed] = useState(false);
 
   // The unified review form - always editable while the report is
   // reviewable (submitted/needs_review), and also reused (in a clearly
@@ -760,18 +776,36 @@ export default function AdminReportDetailScreen() {
       });
   }, []);
 
+  // STAGE 24: distinguishes a genuine first load of THIS report (id never
+  // seen before, or the very first mount) from a reload of the SAME report
+  // - the 5 post-action calls below (after finalize/reject/award/manual-
+  // save all succeed) are always the latter. Only a genuine first load
+  // blocks with the full-page spinner and resets the receipt image/manual-
+  // items state to their empty/idle placeholders; a same-report reload
+  // keeps everything currently on screen exactly as-is until the fresh data
+  // actually arrives, then swaps it in atomically (setReport/setManualRows/
+  // imageState below) - no blank-then-rebuild flash for what is, from the
+  // admin's perspective, an action that just succeeded on the report
+  // they're already looking at.
+  const loadedReportIdRef = useRef(null);
+
   const loadDetail = useCallback(() => {
     if (!id) {
       return;
     }
 
-    setLoading(true);
+    const isInitialLoadForThisId = loadedReportIdRef.current !== id;
+
+    if (isInitialLoadForThisId) {
+      setLoading(true);
+      setImageState({ status: 'idle', url: null });
+      setImageNaturalSize(null);
+      setManualRows([]);
+    }
     setError('');
     setNotFound(false);
-    setImageState({ status: 'idle', url: null });
-    setImageNaturalSize(null);
     setPreviewOpen(false);
-    setManualRows([]);
+    setIsPreviewZoomed(false);
     setFinalizeModalOpen(false);
     setFinalizeError('');
     setRejectModalOpen(false);
@@ -791,6 +825,7 @@ export default function AdminReportDetailScreen() {
           return;
         }
 
+        loadedReportIdRef.current = id;
         setReport(data);
 
         // A reviewable report's line-item table is always editable - no
@@ -831,8 +866,22 @@ export default function AdminReportDetailScreen() {
           } else {
             setImageState({ status: 'loading', url: null });
             getAdminReceiptSignedUrl(data.receipt_path)
-              .then((url) => {
-                setImageState({ status: url ? 'ready' : 'error', url });
+              .then(async (url) => {
+                if (!url) {
+                  setImageState({ status: 'error', url: null });
+                  return;
+                }
+                // STAGE 21.1: warm the exact receipt:<path> cache entry this
+                // screen's own <Image cacheKey=...> renders below use before
+                // exposing 'ready' - matching the list screens' own
+                // warm-then-ready gating (loadAdminReceiptThumbnails). If
+                // this report was opened straight from a list row whose
+                // thumbnail was already warmed, this resolves from that same
+                // cache entry immediately - see getCachedReceiptUrl's own
+                // cache-hit branch just above, which never reaches here at
+                // all in that case.
+                await warmReceiptImage(data.receipt_path, url);
+                setImageState({ status: 'ready', url });
               })
               .catch((err) => {
                 if (__DEV__) {
@@ -1347,12 +1396,38 @@ export default function AdminReportDetailScreen() {
     receiptBoxMaxWidth,
     receiptBoxMaxHeight,
   );
-  // Fullscreen lightbox bounding box - nearly the full viewport, leaving a
-  // comfortable margin on every side. resizeMode="contain" then letterboxes
-  // the real image within this box, so it's always fully visible (never
-  // cropped, never stretched) regardless of aspect ratio or screen size.
-  const fullscreenPreviewWidth = Math.max(windowWidth - spacing.xl * 2, 0);
-  const fullscreenPreviewHeight = Math.max(windowHeight - spacing.xxl * 2, 0);
+  // STAGE 24.1: the fullscreen viewer's image layer now fills the entire
+  // modal edge-to-edge (see previewImageWrap's own styles below) rather
+  // than a smaller margined box - see that style's comment for why a
+  // smaller-than-screen box was the actual source of the visible "frame"
+  // reported after this stage's physical-device testing.
+  //
+  // STAGE 24.2: the SAME fitReceiptDisplaySize math used for the inline
+  // preview above, now computed against the full window instead of the
+  // inline card's smaller box - this is exactly the rectangle ZoomableImage
+  // will contain-fit the receipt into AT REST (1x, uncropped, centered).
+  // Used only to size the four backdrop "letterbox" tap-catchers below
+  // (top/bottom/left/right bands around that rectangle) - the rectangle
+  // itself never gets an overlay, so a tap directly on the receipt still
+  // reaches ZoomableImage's own gesture surface untouched.
+  const fullscreenFittedSize = fitReceiptDisplaySize(
+    imageNaturalSize?.width,
+    imageNaturalSize?.height,
+    windowWidth,
+    windowHeight,
+  );
+  const fullscreenFittedLeft = Math.max((windowWidth - fullscreenFittedSize.width) / 2, 0);
+  const fullscreenFittedTop = Math.max((windowHeight - fullscreenFittedSize.height) / 2, 0);
+  // Backdrop dismissal is only offered at rest (Part "Zoomed state
+  // behavior" - reliable backdrop-to-close at 1x, reliable X close at
+  // every zoom level, rather than fragile hit-testing against a live
+  // Reanimated transform this screen doesn't track). Also requires a real
+  // natural size - before that resolves there is nothing to compute a
+  // fitted rectangle against, so no catcher bands render (the plain
+  // full-screen previewBackdrop underneath still handles that brief
+  // window, see the render below).
+  const canDismissFullscreenViaBackdrop =
+    !isPreviewZoomed && Boolean(imageNaturalSize) && fullscreenFittedSize.width > 0 && fullscreenFittedSize.height > 0;
   const statusMeta = report ? getAdminReportStatusMeta(report.status) : null;
   const isReviewable = report ? REVIEWABLE_STATUSES.includes(report.status) : false;
   const isApproved = report?.status === 'approved';
@@ -1430,6 +1505,16 @@ export default function AdminReportDetailScreen() {
       : [];
   const hasOpenDescriptionSuggestions = focusedDescriptionSuggestions.length > 0;
 
+  // STAGE 24.2: the ONE shared close handler for the fullscreen viewer -
+  // used by the X button, the backdrop, the backdrop letterbox catchers,
+  // and the Modal's own onRequestClose (hardware back / swipe-down). Only
+  // ever touches previewOpen/isPreviewZoomed - no navigation, no
+  // loadDetail(), no receipt-cache invalidation.
+  const handleClosePreview = useCallback(() => {
+    setPreviewOpen(false);
+    setIsPreviewZoomed(false);
+  }, []);
+
   // router.back() unconditionally throws the React Navigation "GO_BACK was
   // not handled" warning whenever this screen has no history to go back to
   // - reached via a direct URL, a browser refresh, or any entry point that
@@ -1470,6 +1555,11 @@ export default function AdminReportDetailScreen() {
       ) : (
         <>
           <View style={styles.headerCard}>
+            {/* STAGE 24: small operational eyebrow, matching the same label
+                pattern introduced on Admin Home/History in Stage 22/23 -
+                establishes "this is the report-review workspace" before the
+                customer name/status, which stay the strongest text here. */}
+            <Text style={styles.pageEyebrow}>בדיקת חשבונית</Text>
             <View style={styles.headerTopRow}>
               <Text style={styles.customerName} numberOfLines={1}>
                 {report.customerName || 'משתמש ללא שם'}
@@ -1502,42 +1592,43 @@ export default function AdminReportDetailScreen() {
             onPress={() => canOpenPreview && setPreviewOpen(true)}
             disabled={!canOpenPreview}
             accessibilityRole={canOpenPreview ? 'button' : undefined}
-            accessibilityLabel="הגדלת תמונת החשבונית">
+            accessibilityLabel="פתיחת החשבונית במסך מלא">
             {isPdf ? (
               <View style={styles.imagePlaceholder}>
                 <Ionicons name="document-text-outline" size={28} color={colors.textMuted} />
                 <Text style={styles.imagePlaceholderText}>{`קובץ ${isolateLTR('PDF')}`}</Text>
               </View>
             ) : imageState.status === 'ready' && imageState.url ? (
-              <>
-                <Image
-                  source={{ uri: imageState.url }}
-                  style={[
-                    styles.receiptImage,
-                    receiptDisplaySize.width > 0
-                      ? { width: receiptDisplaySize.width, height: receiptDisplaySize.height }
-                      : null,
-                  ]}
-                  contentFit="contain"
-                  cachePolicy="memory-disk"
-                  recyclingKey={report?.id}
-                  transition={100}
-                  onLoad={handleReceiptImageLoad}
-                  onError={(event) => {
-                    // A signed URL that resolved successfully but then fails
-                    // to actually load must not stay stuck on 'ready' with a
-                    // blank/broken image and no visible failure state.
-                    if (__DEV__) {
-                      console.warn('[Admin] Receipt image failed to load', { reportId: report?.id, error: event?.error });
-                    }
-                    setImageState((prev) => ({ status: 'error', url: prev.url }));
-                  }}
-                />
-                <View style={styles.enlargeHint} pointerEvents="none">
-                  <Ionicons name="expand-outline" size={13} color={colors.white} />
-                  <Text style={styles.enlargeHintText}>הגדלה</Text>
-                </View>
-              </>
+              // STAGE 24: the visible "הגדלה" pill/magnifier hint that used to
+              // sit in the corner of this image was removed - the card
+              // itself stays fully tappable (onPress/accessibilityRole/
+              // accessibilityLabel above are unchanged) and still opens the
+              // same fullscreen viewer; the card's own shape/press feedback
+              // is the only affordance now, no instructional overlay on top
+              // of the receipt.
+              <Image
+                source={{ uri: imageState.url, cacheKey: receiptImageCacheKey(report?.receipt_path) }}
+                style={[
+                  styles.receiptImage,
+                  receiptDisplaySize.width > 0
+                    ? { width: receiptDisplaySize.width, height: receiptDisplaySize.height }
+                    : null,
+                ]}
+                contentFit="contain"
+                cachePolicy="memory-disk"
+                recyclingKey={report?.id}
+                transition={100}
+                onLoad={handleReceiptImageLoad}
+                onError={(event) => {
+                  // A signed URL that resolved successfully but then fails
+                  // to actually load must not stay stuck on 'ready' with a
+                  // blank/broken image and no visible failure state.
+                  if (__DEV__) {
+                    console.warn('[Admin] Receipt image failed to load', { reportId: report?.id, error: event?.error });
+                  }
+                  setImageState((prev) => ({ status: 'error', url: prev.url }));
+                }}
+              />
             ) : imageState.status === 'loading' ? (
               <View style={styles.imagePlaceholder}>
                 <ActivityIndicator color={colors.primary} size="small" />
@@ -2223,51 +2314,120 @@ export default function AdminReportDetailScreen() {
         </View>
       </Modal>
 
-      {/* Fullscreen click-to-enlarge viewer - the same dark-overlay + small
-          circular top-right X convention already used for the profile
-          avatar preview (see ProfileScreen.js's avatarPreviewVisible
-          modal): a dim backdrop that closes on tap, and the image/close
-          button as its SIBLINGS (not children) so the backdrop's own dim
-          color can never cascade onto them. Deliberately nothing else -
-          no title, date, or other control belongs in this view. */}
-      <Modal visible={previewOpen} transparent animationType="fade" onRequestClose={() => setPreviewOpen(false)}>
-        <View style={styles.previewRoot}>
+      {/* STAGE 24.1 fixed the close-button interception and the visible
+          zoom frame (see that stage's own notes, preserved below).
+          STAGE 24.2 adds backdrop-tap-to-close: four thin Pressable "letterbox"
+          bands (top/bottom/left/right), sized to exactly the dark space
+          around fullscreenFittedSize's centered rectangle - never
+          overlapping the rectangle where the receipt itself renders, so a
+          tap ON the receipt still reaches ZoomableImage's own gesture
+          surface untouched, while a tap in the surrounding dark space is
+          claimed by these bands instead. Only rendered at rest
+          (canDismissFullscreenViaBackdrop is false while isPreviewZoomed is
+          true) - once zoomed, the receipt's real on-screen bounds no longer
+          match this fitted rectangle, and reliable X-button dismissal
+          (already fixed in 24.1, further hardened below) is preferred over
+          fragile transformed-bounds hit-testing. All three dismiss paths
+          (X, backdrop, letterbox bands) share the one handleClosePreview
+          handler above.
+          STAGE 24.1: CLOSE BUTTON - ZoomableImage wraps ITSELF in its own
+          GestureHandlerRootView (scoped to just the image), while the close
+          button lived outside it as a plain RN-tree sibling within the same
+          Modal - react-native-gesture-handler's own documented requirement
+          for Modals is that ONE GestureHandlerRootView should wrap the
+          Modal's ENTIRE content, not just the gesture-heavy part; splitting
+          the button and the gesture surface across two different
+          touch-handling trees inside the same native modal window is
+          exactly what let the pinch/pan recognizer intermittently keep
+          claiming touches meant for the button once a gesture had been
+          active. Wrapping this WHOLE modal body in its own
+          GestureHandlerRootView (nesting harmlessly with ZoomableImage's
+          own inner one - RNGH explicitly supports nested roots) puts the
+          button and the gesture surface in the same recognized tree, so a
+          tap that starts on the button's own bounds is never absorbed by
+          the pinch/pan recognizer.
+          STAGE 24.1: VISIBLE FRAME - the image layer used to be a smaller
+          box (windowWidth/Height minus margins) with overflow:'hidden'. At
+          1x the box's edges exactly coincided with the contain-fitted
+          image's own edges (invisible), but once zoomed/panned the image
+          content would extend past that smaller box and get hard-clipped
+          there - a rectangular clip boundary floating inside the larger
+          dark backdrop, visible as a "frame" around the receipt. The image
+          layer now fills the entire modal edge-to-edge (previewImageWrap
+          below), so there is no smaller decorated box for the transform to
+          ever be clipped against - only ZoomableImage's own transparent,
+          border-less root+image are ever transformed, exactly matching "no
+          visible card edges" - the receipt now genuinely floats on the dark
+          backdrop at any zoom/pan position. */}
+      <Modal visible={previewOpen} transparent animationType="fade" onRequestClose={handleClosePreview}>
+        <GestureHandlerRootView style={styles.previewRoot}>
           <Pressable
             style={styles.previewBackdrop}
-            onPress={() => setPreviewOpen(false)}
+            onPress={handleClosePreview}
             accessibilityRole="button"
             accessibilityLabel="סגירה"
           />
 
-          {imageState.status === 'ready' && imageState.url ? (
-            <Image
-              source={{ uri: imageState.url }}
-              style={[styles.previewImage, { width: fullscreenPreviewWidth, height: fullscreenPreviewHeight }]}
-              contentFit="contain"
-              cachePolicy="memory-disk"
-              recyclingKey={report?.id}
-              transition={100}
-              onError={(event) => {
-                if (__DEV__) {
-                  console.warn('[Admin Detail] fullscreen preview image onError', {
-                    reportId: report?.id,
-                    error: event?.error,
-                  });
-                }
-                setImageState((prev) => ({ status: 'error', url: prev.url }));
-              }}
-            />
+          {previewOpen && imageState.status === 'ready' && imageState.url ? (
+            <View style={styles.previewImageWrap}>
+              <ZoomableImage
+                uri={imageState.url}
+                recyclingKey={report?.id}
+                cacheKey={receiptImageCacheKey(report?.receipt_path)}
+                onZoomChange={setIsPreviewZoomed}
+              />
+            </View>
           ) : null}
 
-          <Pressable
-            style={styles.previewCloseButton}
-            onPress={() => setPreviewOpen(false)}
-            accessibilityRole="button"
-            accessibilityLabel="סגירה"
-            hitSlop={10}>
-            <Ionicons name="close" size={22} color={colors.textOnDark} />
-          </Pressable>
-        </View>
+          {canDismissFullscreenViaBackdrop ? (
+            <>
+              <Pressable
+                style={[styles.previewBackdropCatcher, { top: 0, left: 0, right: 0, height: fullscreenFittedTop }]}
+                onPress={handleClosePreview}
+                accessibilityRole="button"
+                accessibilityLabel="סגירה"
+              />
+              <Pressable
+                style={[
+                  styles.previewBackdropCatcher,
+                  { bottom: 0, left: 0, right: 0, height: fullscreenFittedTop },
+                ]}
+                onPress={handleClosePreview}
+                accessibilityRole="button"
+                accessibilityLabel="סגירה"
+              />
+              <Pressable
+                style={[
+                  styles.previewBackdropCatcher,
+                  { top: fullscreenFittedTop, bottom: fullscreenFittedTop, left: 0, width: fullscreenFittedLeft },
+                ]}
+                onPress={handleClosePreview}
+                accessibilityRole="button"
+                accessibilityLabel="סגירה"
+              />
+              <Pressable
+                style={[
+                  styles.previewBackdropCatcher,
+                  { top: fullscreenFittedTop, bottom: fullscreenFittedTop, right: 0, width: fullscreenFittedLeft },
+                ]}
+                onPress={handleClosePreview}
+                accessibilityRole="button"
+                accessibilityLabel="סגירה"
+              />
+            </>
+          ) : null}
+
+          <SafeAreaView edges={['top', 'right']} style={styles.previewCloseSafeArea} pointerEvents="box-none">
+            <Pressable
+              style={styles.previewCloseButton}
+              onPress={handleClosePreview}
+              accessibilityRole="button"
+              accessibilityLabel="סגירה"
+              hitSlop={12}>
+              <Ionicons name="close" size={22} color={colors.textOnDark} />
+            </Pressable>
+          </SafeAreaView>
+        </GestureHandlerRootView>
       </Modal>
     </AdminShell>
   );
@@ -2313,6 +2473,10 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     textAlign: 'right',
   },
+  // STAGE 24: shadow dropped from shadows.softCard to shadows.sm across
+  // this header/the image card/every sectionCard below, matching Stage
+  // 22/23's "minimal shadows, subtle borders" admin visual language - the
+  // border already does the actual separation work.
   headerCard: {
     backgroundColor: colors.white,
     borderRadius: radius.lg,
@@ -2320,7 +2484,15 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     padding: spacing.lg,
     gap: spacing.xs,
-    ...shadows.softCard,
+    ...shadows.sm,
+  },
+  // Same small uppercase operational label used on Admin Home/History
+  // (typography.micro) - "בדיקת חשבונית" here, establishing this as the
+  // report-review workspace before the customer name/status.
+  pageEyebrow: {
+    ...typography.micro,
+    color: colors.textMuted,
+    textAlign: 'right',
   },
   headerTopRow: {
     flexDirection: 'row-reverse',
@@ -2370,7 +2542,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: spacing.lg,
     overflow: 'hidden',
-    ...shadows.softCard,
+    ...shadows.sm,
   },
   // Hover/press feedback only matters when the preview is actually
   // clickable (canOpenPreview) - a subtle tint, not a jarring color change,
@@ -2388,26 +2560,6 @@ const styles = StyleSheet.create({
   receiptImage: {
     width: '100%',
     minHeight: 220,
-  },
-  // A small, understated "tap to enlarge" affordance in the corner of the
-  // preview - never covers the receipt itself, never competes with it.
-  enlargeHint: {
-    position: 'absolute',
-    bottom: spacing.sm,
-    left: spacing.sm,
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(11,11,11,0.55)',
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 4,
-  },
-  enlargeHintText: {
-    ...typography.caption,
-    fontSize: 11,
-    fontWeight: '600',
-    color: colors.white,
   },
   imagePlaceholder: {
     alignItems: 'center',
@@ -2431,14 +2583,52 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(6, 10, 10, 0.9)',
   },
-  previewImage: {
-    // width/height applied inline per-render (see fullscreenPreviewWidth/
-    // Height above) - a plain fixed bounding box that resizeMode="contain"
-    // then letterboxes the real image within, matching its true ratio.
+  // STAGE 24.1: fills the entire modal edge-to-edge (matching
+  // previewBackdrop's own absoluteFillObject) - no smaller decorated box
+  // for the zoom/pan transform to ever be clipped against, which is what
+  // previously read as a "frame" once zoomed. No border/background/padding
+  // of its own - ZoomableImage's own contentFit="contain" fits the receipt
+  // naturally inside this full-bleed space at 1x, and the receipt is the
+  // only thing that ever visually moves/scales.
+  previewImageWrap: {
+    ...StyleSheet.absoluteFillObject,
   },
+  // STAGE 24.2: the four backdrop "letterbox" tap-catchers - positioned via
+  // inline top/bottom/left/right/height/width per-band (see the render
+  // above), this shared style only carries what's common to all four:
+  // transparent (no visible styling of its own - purely a touch target,
+  // never a decorated frame), and a zIndex above the image layer (0) but
+  // below the close button (20) so it never competes with that button's own
+  // touch priority.
+  previewBackdropCatcher: {
+    position: 'absolute',
+    zIndex: 10,
+    elevation: 10,
+  },
+  // STAGE 24: absoluteFillObject + a top/right-edges-only SafeAreaView, so
+  // the close button positioned inside it lands just past the actual
+  // device safe area (notch/dynamic island) instead of a fixed spacing.xxl
+  // offset that could sit under it on some devices. pointerEvents="box-none"
+  // so this full-screen wrapper itself never blocks taps on the backdrop/
+  // image beneath it - only the button itself is ever an actual touch target.
+  // STAGE 24.1: explicit zIndex/elevation added as a second, belt-and-
+  // suspenders guarantee (alongside the GestureHandlerRootView fix above)
+  // that this sits above the zoom/pan gesture surface in both paint order
+  // and touch-hit priority on every platform.
+  previewCloseSafeArea: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 20,
+    elevation: 20,
+  },
+  // STAGE 24.2: top nudged down slightly (spacing.md -> spacing.md +
+  // spacing.sm, a further 8px) - physical-device testing found the X sat
+  // slightly too high within the safe area. hitSlop on the Pressable itself
+  // (see render, now 12) already gives it a ~64x64 effective touch target,
+  // comfortably past the ~44-48px target, without changing the button's
+  // own 40x40 visual size.
   previewCloseButton: {
     position: 'absolute',
-    top: spacing.xxl,
+    top: spacing.md + spacing.sm,
     right: spacing.lg,
     width: 40,
     height: 40,
@@ -2454,7 +2644,7 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     padding: spacing.lg,
     gap: spacing.sm,
-    ...shadows.softCard,
+    ...shadows.sm,
   },
   sectionTitle: {
     fontSize: 16,

@@ -34,11 +34,17 @@ const accountActions = [
   { label: 'עריכת פרטים אישיים', icon: 'create-outline', route: '/(tabs)/profile/edit' },
   { label: 'שינוי סיסמה', icon: 'lock-closed-outline', route: '/(tabs)/profile/change-password' },
   { label: 'עזרה ותמיכה', icon: 'help-circle-outline', route: '/(tabs)/profile/help-support' },
+  // STAGE 28: placed last in this same array - the array is rendered
+  // directly above the separate, standalone logout button (see the render
+  // below), so this naturally lands "after עזרה ותמיכה, before התנתקות"
+  // exactly as requested, using the exact same row styling as every other
+  // entry here (no new visual pattern).
+  { label: 'הצהרת נגישות', icon: 'accessibility-outline', route: '/(tabs)/profile/accessibility-statement' },
 ];
 
 export default function ProfileScreen() {
   const router = useRouter();
-  const { signOut, user } = useAuth();
+  const { signOut, user, birthdayBonus, dismissBirthdayBonus, profileVersion } = useAuth();
   // STAGE 16.1: initializes from the shared profileService cache
   // (getCachedProfile - synchronous, service-level, already populated by
   // Home/Rewards if either was visited in the last few seconds) instead of
@@ -247,7 +253,14 @@ export default function ProfileScreen() {
       return () => {
         isActive = false;
       };
-    }, [user?.id]),
+    // STAGE 26: profileVersion is bumped by AuthContext exactly when the
+    // birthday-bonus RPC actually awards points (see that file) - included
+    // here purely as a "please re-run this fetch now" signal so a
+    // ProfileScreen that's already focused at that moment shows the real
+    // post-bonus points_balance immediately, without waiting for the next
+    // natural focus event. This never adds a second data source: the
+    // fetch itself is still the same getProfile() call as before.
+    }, [user?.id, profileVersion]),
   );
 
   const avatarLetter = (() => {
@@ -347,8 +360,41 @@ export default function ProfileScreen() {
                     {contactLine}
                   </Text>
                 ) : null}
-                <View style={[styles.tierPill, { borderColor: tierColor }]}>
-                  <Text style={[styles.tierPillText, { color: tierColor }]}>{tierKey}</Text>
+                {/* STAGE 26.4: restores an outlined capsule around the
+                    membership value - substantially larger/more premium
+                    than the original small badge, and without the
+                    "המעמד שלי" label this stage explicitly removed from
+                    THIS hero area only (it still appears in the stats card
+                    below, unchanged). Non-interactive - a plain View, never
+                    Pressable. tierColor (TIER_COLORS above, already used
+                    consistently by PointsBalanceCard) drives both the
+                    border and the text color, so this works unchanged for
+                    every real tier (SILVER/GOLD/...), never a hardcoded
+                    color. The base fill is colors.glassFill (the same
+                    "translucent content on a dark gradient" token already
+                    used elsewhere, e.g. RewardsScreen's promoVisualGlow) -
+                    not a new color - and a very subtle top-to-transparent
+                    white LinearGradient sheen sits above it for a restrained
+                    glint, not a strong highlight. */}
+                <View
+                  style={[
+                    styles.membershipBadge,
+                    { borderColor: tierColor, shadowColor: tierColor },
+                  ]}>
+                  <LinearGradient
+                    colors={['rgba(255, 255, 255, 0.10)', 'rgba(255, 255, 255, 0)']}
+                    start={{ x: 0.5, y: 0 }}
+                    end={{ x: 0.5, y: 1 }}
+                    style={styles.membershipBadgeSheen}
+                    pointerEvents="none"
+                  />
+                  <Text
+                    style={[styles.membershipBadgeText, { color: tierColor }]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.7}>
+                    {isolateLTR(tierKey)}
+                  </Text>
                 </View>
               </>
             )}
@@ -359,6 +405,37 @@ export default function ProfileScreen() {
             minHeight pattern as HomeScreen's own sheet. */}
         <View style={[styles.sheet, sheetMinHeight ? { minHeight: sheetMinHeight } : null]}>
           <View style={styles.sheetInner}>
+            {/* STAGE 26: shown only during the session that actually
+                received the bonus (AuthContext's own birthdayBonus state -
+                null on every other session/visit). Dismissible, not a
+                persistent banner - dismissBirthdayBonus() clears the
+                context state so it never reappears once closed, and it is
+                never re-derived from anything stored (no AsyncStorage/
+                local flag) - the real one-per-year guarantee lives entirely
+                in the database (see 028_birthday_bonus.sql), this is purely
+                a one-time celebratory message. */}
+            {birthdayBonus ? (
+              <View style={styles.birthdayBanner}>
+                <View style={styles.birthdayBannerIconWrap}>
+                  <Ionicons name="gift" size={22} color={colors.primary} />
+                </View>
+                <View style={styles.birthdayBannerTextWrap}>
+                  <Text style={styles.birthdayBannerTitle}>יום הולדת שמח! 🎉</Text>
+                  <Text style={styles.birthdayBannerBody}>
+                    {`${formatNumber(birthdayBonus.bonusPoints)} נקודות מתנה נוספו לחשבון שלך`}
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={dismissBirthdayBonus}
+                  accessibilityRole="button"
+                  accessibilityLabel="סגירה"
+                  hitSlop={8}
+                  style={styles.birthdayBannerClose}>
+                  <Ionicons name="close" size={18} color={colors.textMuted} />
+                </Pressable>
+              </View>
+            ) : null}
+
             <View style={styles.summaryCard}>
               {loading ? (
                 <View style={styles.summaryLoading}>
@@ -377,21 +454,27 @@ export default function ProfileScreen() {
                     <Text style={styles.summaryValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>
                       {formatNumber(profile?.points_balance ?? 0)}
                     </Text>
-                    <Text style={styles.summaryLabel}>נקודות</Text>
+                    <Text style={styles.summaryLabel} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85}>
+                      נקודות שנצברו
+                    </Text>
                   </View>
                   <View style={styles.summaryDivider} />
                   <View style={styles.summaryItem}>
                     <Text style={[styles.summaryValue, { color: tierColor }]} numberOfLines={1}>
                       {tierKey}
                     </Text>
-                    <Text style={styles.summaryLabel}>G Level</Text>
+                    <Text style={styles.summaryLabel} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85}>
+                      המעמד שלי
+                    </Text>
                   </View>
                   <View style={styles.summaryDivider} />
                   <View style={styles.summaryItem}>
                     <Text style={styles.summaryValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>
                       {formatNumber(profile?.approved_purchases_count ?? 0)}
                     </Text>
-                    <Text style={styles.summaryLabel}>רכישות מאושרות</Text>
+                    <Text style={styles.summaryLabel} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85}>
+                      רכישות מאושרות
+                    </Text>
                   </View>
                 </View>
               )}
@@ -405,6 +488,15 @@ export default function ProfileScreen() {
                 </View>
               </View>
               <View style={styles.actionsCard}>
+                {/* STAGE 26.3: the visible "תאריך לידה" row was removed from
+                    this main Personal Area screen per this stage's own
+                    request - the birthday itself remains fully stored
+                    (profile.date_of_birth) and functional (birthday bonus
+                    RPC, celebration banner below). A legacy customer who
+                    still needs to complete a missing birthday can still do
+                    so from EditProfileScreen ("עריכת פרטים אישיים" below),
+                    which keeps its own DateOfBirthPicker for exactly that -
+                    unchanged by this stage. */}
                 {accountActions.map((action, index) => (
                   <Pressable
                     key={action.label}
@@ -624,15 +716,41 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
     writingDirection: 'ltr',
   },
-  tierPill: {
-    marginTop: spacing.md,
-    borderWidth: 1,
+  // STAGE 26.4: replaces 26.3's label+value stack with a premium outlined
+  // capsule around the value alone - see the render's own comment.
+  // minWidth/height/paddingHorizontal/borderWidth all land inside this
+  // stage's own suggested ranges (210-240 / 58-64 / 28-34 / 1.5-2).
+  // overflow:'hidden' clips the sheen gradient to the pill's own rounded
+  // corners; the soft shadow (color set dynamically per tier at the call
+  // site) is what gives the restrained "glow," not a border/opacity hack.
+  membershipBadge: {
+    marginTop: spacing.xl,
+    alignSelf: 'center',
+    minWidth: 224,
+    height: 60,
     borderRadius: radius.pill,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 4,
+    borderWidth: 1.75,
+    paddingHorizontal: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.glassFill,
+    overflow: 'hidden',
+    shadowOpacity: 0.28,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 6,
   },
-  tierPillText: {
-    ...typography.micro,
+  // Absolute-fill behind the text - a purely decorative top-to-transparent
+  // highlight, never intercepts touches (pointerEvents="none" at the call
+  // site) and the badge itself is a plain View, never Pressable.
+  membershipBadgeSheen: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  membershipBadgeText: {
+    fontSize: 28,
+    fontWeight: '800',
+    letterSpacing: 2.5,
+    textAlign: 'center',
   },
   errorText: {
     fontSize: typography.caption.fontSize,
@@ -681,6 +799,51 @@ const styles = StyleSheet.create({
     height: 6,
     borderRadius: 3,
     backgroundColor: colors.primary,
+  },
+  // STAGE 26: one-time celebratory banner - same card language (white,
+  // radius.lg, border, softCard shadow) as the other light-section cards
+  // on this screen, not a new visual system.
+  birthdayBanner: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.sm,
+    backgroundColor: colors.white,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    ...shadows.softCard,
+  },
+  birthdayBannerIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  birthdayBannerTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  birthdayBannerTitle: {
+    fontSize: typography.body.fontSize,
+    fontWeight: '700',
+    color: colors.text,
+    textAlign: 'right',
+  },
+  birthdayBannerBody: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '500',
+    color: colors.textMuted,
+    textAlign: 'right',
+  },
+  birthdayBannerClose: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   summaryCard: {
     backgroundColor: colors.white,

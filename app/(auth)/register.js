@@ -1,5 +1,5 @@
-import RegisterScreen from '../../src/screens/RegisterScreen';
+import AuthScreen from '../../src/screens/AuthScreen';
 
 export default function RegisterRoute() {
-  return <RegisterScreen />;
+  return <AuthScreen initialMode="register" />;
 }

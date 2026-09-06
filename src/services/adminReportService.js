@@ -1,4 +1,4 @@
-import { getCachedReceiptUrl, setCachedReceiptUrl } from './purchaseReportService';
+import { getCachedReceiptUrl, setCachedReceiptUrl, warmReceiptImage } from './purchaseReportService';
 import { supabase } from './supabase';
 
 // STAGE 17: admin-local in-flight de-duplication for getAdminReceiptSignedUrl
@@ -214,51 +214,25 @@ export async function getAdminReports() {
   }));
 }
 
-// Full read-only detail for one report: the report row, its owner's name,
-// and - only if they actually exist - its OCR result/lines and per-line
-// match results. No product/points/approval data is fabricated when these
-// don't exist yet; callers should treat missing OCR/match data as a neutral
-// pending state, not an error.
-export async function getAdminReportDetail(reportId) {
-  if (!supabase || !reportId) {
-    return null;
-  }
-
-  const { data: report, error: reportError } = await supabase
-    .from('purchase_reports')
-    .select(
-      'id, user_id, receipt_path, original_filename, status, points_awarded, reviewed_at, rejection_reason, created_at, updated_at',
-    )
-    .eq('id', reportId)
-    .maybeSingle();
-
-  if (reportError) {
-    throw reportError;
-  }
-
-  if (!report) {
-    return null;
-  }
-
-  const nameById = await fetchProfileNamesByIds([report.user_id]);
-
-  // Isolated in its own try/catch - same reasoning as ocrLines/lineMatches/
-  // manualItems/pointsAward below, and CRITICALLY (unlike before) not left
-  // as an unguarded call any more: this was the one remaining read in this
-  // function that could take down the ENTIRE report-detail load on any
-  // transient failure, instead of degrading to the same neutral "no OCR
-  // data yet" state a genuinely OCR-less report already produces. receipt_
-  // ocr_results now has zero direct SELECT grant for `authenticated` (see
-  // 025_customer_column_grant_hardening.sql) - read through the existing
-  // SECURITY DEFINER get_admin_ocr_result() RPC instead (it has existed,
-  // is_admin()-gated and already granted, since
-  // 021_ocr_azure_document_intelligence.sql; this is simply its first real
-  // caller). Returns at most one row (purchase_report_id is unique on
-  // receipt_ocr_results), so take the first element the same way
-  // get_admin_ocr_lines/get_admin_manual_items' array results are already
-  // handled below.
+// STAGE 24: the OCR result -> OCR lines -> line matches chain has a REAL
+// sequential dependency (lines can only be fetched once ocrResult is known
+// to exist; matches only once there are lines to match) - that internal
+// ordering is preserved exactly as before, just extracted into its own
+// helper so getAdminReportDetail can run this whole chain CONCURRENTLY with
+// the other three genuinely independent reads below (profile name, manual
+// items, points award) instead of after them. Same isolation as before:
+// never throws - any failure inside degrades to the same neutral "no OCR
+// data yet" state a genuinely OCR-less report already produces, and must
+// never block the receipt image/approve-reject actions.
+async function fetchOcrDataForReport(reportId) {
   let ocrResult = null;
   try {
+    // receipt_ocr_results has zero direct SELECT grant for `authenticated`
+    // (see 025_customer_column_grant_hardening.sql) - read through the
+    // existing SECURITY DEFINER get_admin_ocr_result() RPC instead (it has
+    // existed, is_admin()-gated and already granted, since
+    // 021_ocr_azure_document_intelligence.sql). Returns at most one row
+    // (purchase_report_id is unique on receipt_ocr_results).
     const { data: ocrResultRows, error: ocrError } = await supabase.rpc('get_admin_ocr_result', {
       p_report_id: reportId,
     });
@@ -272,16 +246,9 @@ export async function getAdminReportDetail(reportId) {
     if (__DEV__) {
       console.warn('[Admin] Failed to load OCR result', { code: err?.code, message: err?.message });
     }
+    return { ocrResult: null, ocrLines: [], lineMatches: [] };
   }
 
-  // Deliberately isolated in its own try/catch, same reasoning as
-  // manualItems/pointsAward below: OCR/matching data is a convenience the
-  // admin review form (Stage 4 - see AdminReportDetailScreen's
-  // buildRowsFromOcrEvidence) uses to prefill from when no manual items
-  // exist yet, never a hard requirement for the rest of this screen to
-  // render. A failure here must not block the receipt image/approve-
-  // reject actions, and must not regress the existing manual-entry
-  // workflow for a report with missing/failed OCR.
   let ocrLines = [];
   let lineMatches = [];
 
@@ -338,42 +305,97 @@ export async function getAdminReportDetail(reportId) {
     lineMatches = [];
   }
 
-  // Deliberately isolated in its own try/catch, unlike the reads above: the
-  // manual-items table/RPC is a separate, secondary part of this screen
-  // (see AdminReportDetailScreen's manual-entry section), and any failure
-  // here (e.g. the underlying migration missing) must never take down the
-  // rest of an otherwise-working report load - the receipt image, OCR
-  // section, and approve/reject actions all have to keep rendering
-  // regardless. On failure this resolves to an empty list instead of
-  // rejecting the whole getAdminReportDetail() call.
-  let manualItems = [];
+  return { ocrResult, ocrLines, lineMatches };
+}
+
+// STAGE 24: same isolation as fetchOcrDataForReport above - never throws,
+// degrades to an empty list on failure. Extracted into its own named
+// function purely so it reads clearly as one of the parallel branches in
+// getAdminReportDetail's own Promise.all below (an inline try/catch cannot
+// live inside a Promise.all array literal).
+async function fetchManualItemsSafely(reportId) {
   try {
-    manualItems = await fetchManualItems(reportId);
+    return await fetchManualItems(reportId);
   } catch (err) {
     if (__DEV__) {
       console.warn('[Admin] Failed to load manual receipt items', { code: err?.code, message: err?.message });
     }
+    return [];
   }
+}
 
-  // Same isolation reasoning as manualItems above - whether points have
-  // already been awarded is secondary to the rest of this screen; a
-  // failure here must not block the receipt image/OCR/approve-reject
-  // sections from rendering.
-  let pointsAward = null;
+// STAGE 24: same isolation as fetchManualItemsSafely above.
+async function fetchPointsAwardSafely(reportId) {
   try {
-    pointsAward = await fetchPurchaseRewardTransaction(reportId);
+    return await fetchPurchaseRewardTransaction(reportId);
   } catch (err) {
     if (__DEV__) {
       console.warn('[Admin] Failed to load points award state', { code: err?.code, message: err?.message });
     }
+    return null;
   }
+}
+
+// Full read-only detail for one report: the report row, its owner's name,
+// and - only if they actually exist - its OCR result/lines and per-line
+// match results. No product/points/approval data is fabricated when these
+// don't exist yet; callers should treat missing OCR/match data as a neutral
+// pending state, not an error.
+//
+// STAGE 24 PERFORMANCE FIX: previously fetched the report row, then the
+// owner's profile name, then the OCR result, then (conditionally) OCR
+// lines, then (conditionally) line matches, then manual items, then the
+// points-award state - up to 7 round trips in strict sequence, each one
+// waiting for the previous to fully finish even though most of them don't
+// actually depend on each other. Only the report row itself is a genuine
+// prerequisite (everything else needs reportId/report.user_id, nothing
+// else needs each OTHER's result) and the OCR result -> lines -> matches
+// chain has a real internal order (now isolated in fetchOcrDataForReport
+// above). Every other combination was independent. Now: the report row is
+// fetched first (as it must be), then the profile-name lookup, the whole
+// OCR chain, the manual-items read, and the points-award read all run
+// CONCURRENTLY via Promise.all - cutting this function's wall-clock time
+// from up to 7 sequential round trips down to roughly 2 (the report row,
+// then the slowest of the four parallel branches). Error-handling
+// semantics are unchanged: a profile-name-lookup failure still rejects the
+// whole call exactly as before (fetchProfileNamesByIds was never wrapped in
+// its own try/catch), while the OCR/manual-items/points-award branches
+// remain individually isolated (each degrades to a neutral empty state
+// rather than failing the whole load), exactly as before.
+export async function getAdminReportDetail(reportId) {
+  if (!supabase || !reportId) {
+    return null;
+  }
+
+  const { data: report, error: reportError } = await supabase
+    .from('purchase_reports')
+    .select(
+      'id, user_id, receipt_path, original_filename, status, points_awarded, reviewed_at, rejection_reason, created_at, updated_at',
+    )
+    .eq('id', reportId)
+    .maybeSingle();
+
+  if (reportError) {
+    throw reportError;
+  }
+
+  if (!report) {
+    return null;
+  }
+
+  const [nameById, ocrData, manualItems, pointsAward] = await Promise.all([
+    fetchProfileNamesByIds([report.user_id]),
+    fetchOcrDataForReport(reportId),
+    fetchManualItemsSafely(reportId),
+    fetchPointsAwardSafely(reportId),
+  ]);
 
   return {
     ...report,
     customerName: nameById.get(report.user_id) || null,
-    ocrResult: ocrResult || null,
-    ocrLines,
-    lineMatches,
+    ocrResult: ocrData.ocrResult,
+    ocrLines: ocrData.ocrLines,
+    lineMatches: ocrData.lineMatches,
     manualItems,
     pointsAward,
   };
@@ -698,25 +720,62 @@ export async function getAdminReceiptSignedUrl(receiptPath, expiresInSeconds = 3
 // passed in - cache hits are resolved synchronously (no network call) and
 // included in the same returned map alongside freshly-fetched ones, so the
 // caller only ever needs one merge into its own state.
-export async function loadAdminReceiptThumbnails(rows) {
+//
+// STAGE 21.1: a cache hit here means this exact receipt was already
+// resolved AND warmed before (see the fresh-resolve branch below, and
+// warmReceiptImage's own comment on why a signed-URL cache hit is always a
+// safe proxy for "the expo-image cache entry is already warm too") - so it
+// still returns 'ready' immediately, with no warm call at all, same as
+// before. On a genuine cache MISS, though, this used to return 'ready' the
+// moment the signed URL existed, even though the actual receipt image bytes
+// had not been fetched yet - the rendered <Image> would then start its OWN
+// network load only once React committed that 'ready' state, which is
+// exactly the "row visible -> blank thumbnail -> image pops in" gap seen on
+// a physical device. Now the fresh-resolve branch awaits warmReceiptImage
+// before marking the row 'ready', so 'ready' means the exact cache entry
+// the <Image cacheKey=...> render will read from is already populated - by
+// the time React shows this thumbnail as ready, the pixels are already
+// there. warmReceiptImage never throws and always resolves (true or false),
+// so a warm failure still falls through to 'ready' with the resolved URL -
+// the <Image> component's own normal network loading remains the fallback
+// path rather than this row getting stuck on a permanent error for what may
+// only be a warm-specific failure.
+//
+// STAGE 21.1: accepts an optional onRowReady(id, entry) callback, invoked as
+// EACH row settles (cache hit or freshly warmed) rather than only once the
+// whole batch finishes - Part E of that stage explicitly calls for the
+// first several History rows to show their own image the moment THEIR OWN
+// warm completes, not after the slowest row in the batch. The returned
+// full merged map is unchanged, so a caller that doesn't pass the callback
+// (or only cares about the final combined result) behaves exactly as
+// before.
+export async function loadAdminReceiptThumbnails(rows, onRowReady) {
   const result = {};
   const toFetch = [];
 
   for (const row of rows) {
     const cachedUrl = getCachedReceiptUrl(row.receipt_path);
     if (cachedUrl) {
-      result[row.id] = { status: 'ready', url: cachedUrl };
+      const entry = { status: 'ready', url: cachedUrl };
+      result[row.id] = entry;
+      onRowReady?.(row.id, entry);
     } else {
       toFetch.push(row);
     }
   }
 
   if (toFetch.length > 0) {
-    const resolved = await Promise.all(
+    await Promise.all(
       toFetch.map(async (row) => {
+        let entry;
         try {
           const url = await getAdminReceiptSignedUrl(row.receipt_path);
-          return { id: row.id, status: url ? 'ready' : 'error', url };
+          if (!url) {
+            entry = { status: 'error', url: null };
+          } else {
+            await warmReceiptImage(row.receipt_path, url);
+            entry = { status: 'ready', url };
+          }
         } catch (err) {
           if (__DEV__) {
             console.warn('[Admin image] thumbnail batch resolve failed', {
@@ -724,14 +783,12 @@ export async function loadAdminReceiptThumbnails(rows) {
               message: err?.message,
             });
           }
-          return { id: row.id, status: 'error', url: null };
+          entry = { status: 'error', url: null };
         }
+        result[row.id] = entry;
+        onRowReady?.(row.id, entry);
       }),
     );
-
-    resolved.forEach(({ id, status, url }) => {
-      result[id] = { status, url };
-    });
   }
 
   return result;

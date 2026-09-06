@@ -55,7 +55,12 @@ function formatPoints(value) {
 //                       if not provided.
 //   style             - optional outer style override (e.g. margin).
 export default function PointsBalanceCard({
-  label = 'יתרת הנקודות שלך',
+  // STAGE 26.3: "נקודות שנצברו" ("points accumulated") - the customer-facing
+  // balance label, changed from "יתרת הנקודות שלך" here in the one shared
+  // component both HomeScreen and RewardsScreen render, rather than as a
+  // per-screen override (neither currently passes its own `label`, so both
+  // pick this up automatically).
+  label = 'נקודות שנצברו',
   pointsBalance = 0,
   meta,
   membershipLevel,
@@ -117,8 +122,18 @@ export default function PointsBalanceCard({
           {tierKey ? (
             <>
               <View style={styles.tierRow}>
-                <Text style={[styles.tierBadge, { color: tierColor }]}>{isolateLTR(`G Level · ${tierKey}`)}</Text>
-                <Text style={styles.tierMeta}>{progressLabel}</Text>
+                {/* STAGE 26.3: "המעמד שלי" (Hebrew, RTL) replaces "G Level" -
+                    only the English tier value itself is isolateLTR'd now,
+                    not the whole string, matching src/utils/bidiText.js's
+                    own "wrap ONLY the embedded LTR segment" convention -
+                    wrapping the entire previous "G Level · SILVER" string
+                    was correct only because that whole label was English. */}
+                <Text style={[styles.tierBadge, { color: tierColor }]} numberOfLines={1}>
+                  {`המעמד שלי · ${isolateLTR(tierKey)}`}
+                </Text>
+                <Text style={styles.tierMeta} numberOfLines={1}>
+                  {progressLabel}
+                </Text>
               </View>
               <View style={styles.progressTrack}>
                 <View
@@ -138,6 +153,18 @@ const styles = StyleSheet.create({
   // card, the case radius.xl exists for; regular cards elsewhere keep
   // radius.lg so the roundness hierarchy stays legible instead of
   // everything looking equally rounded.
+  //
+  // STAGE 25.2: paddingVertical restored to spacing.xxl (Stage 25.1 had
+  // trimmed it to spacing.lg for a more compact card). Used by both
+  // HomeScreen and RewardsScreen (the only two real callers - verified via
+  // repo-wide search); both render this card as a normal in-flow block
+  // with no fixed-height dependency on its own rendered size, so this
+  // applies consistently to both.
+  //
+  // STAGE 25.5: Stage 25.4's further paddingVertical increase and minHeight
+  // floor (an attempt to compensate for the removed meta row's lost space)
+  // were reverted at the user's explicit request - back to exactly the
+  // Stage 25.3 values below.
   card: {
     borderRadius: radius.xl,
     paddingHorizontal: spacing.xxl,
@@ -146,9 +173,14 @@ const styles = StyleSheet.create({
     borderColor: colors.charcoalBorder,
     ...shadows.glow,
   },
+  // STAGE 25.3: fontSize 13 -> 15, weight 600 -> 700 - stronger and easier
+  // to read, still clearly secondary to pointsValue below (hierarchy:
+  // pointsValue > label > tierBadge > tierMeta, per this stage's own
+  // ordering).
   label: {
-    ...typography.caption,
-    fontWeight: '600',
+    fontSize: 15,
+    lineHeight: 20,
+    fontWeight: '700',
     color: colors.mutedOnDark,
     textAlign: 'right',
   },
@@ -192,18 +224,25 @@ const styles = StyleSheet.create({
     color: colors.primary,
     textAlign: 'right',
   },
+  // STAGE 25.2: marginTop restored to spacing.lg (see `card` above).
   pointsRow: {
     flexDirection: 'row-reverse',
     alignItems: 'baseline',
     marginTop: spacing.lg,
     gap: spacing.xs,
   },
-  // Base size comes from the theme's single "hero" token - adjustsFontSizeToFit
-  // + minimumFontScale let a very large balance shrink proportionally
-  // (down to 55% of typography.hero.fontSize) instead of wrapping or
-  // clipping, without introducing a second hardcoded pixel size anywhere.
+  // STAGE 25.1: fontSize/lineHeight raised from the theme's shared "hero"
+  // token (52/56) to an explicit 60/66 - about a 15% increase, making this
+  // the single most dominant element on the screen as requested. Overridden
+  // directly here (not by changing typography.hero itself) so no other
+  // consumer of that shared token is affected - this is the only screen
+  // element using it. adjustsFontSizeToFit + minimumFontScale={0.55} (see
+  // the render) still let a very large balance shrink proportionally
+  // (down to ~33px) instead of wrapping or clipping.
   pointsValue: {
     ...typography.hero,
+    fontSize: 60,
+    lineHeight: 66,
     color: colors.primary,
     textAlign: 'right',
     flexShrink: 1,
@@ -211,21 +250,42 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 16,
   },
+  // STAGE 25.3: fontSize 20 -> 22, weight 600 -> 700 - stronger, staying
+  // visually proportional to pointsValue beside it.
   pointsUnit: {
-    fontSize: 18,
-    fontWeight: '600',
+    fontSize: 22,
+    fontWeight: '700',
     color: colors.textOnDark,
-    lineHeight: 22,
+    lineHeight: 26,
     marginBottom: 1,
     flexShrink: 0,
   },
+  // STAGE 25.2: HomeScreen no longer passes a `meta` string ("מתנות יופיעו
+  // בהמשך" was removed entirely, not replaced - see that screen's own
+  // PointsBalanceCard call) and RewardsScreen never has. This style/the
+  // conditional render above it stay in place only as a generic, optional
+  // capability for a future caller that might supply one - unused by
+  // either current real usage today, so no vertical space is reserved for
+  // it in practice.
   meta: {
-    marginTop: spacing.sm,
-    ...typography.caption,
-    fontWeight: '500',
+    marginTop: spacing.xs,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '600',
     color: colors.mutedOnDark,
     textAlign: 'right',
   },
+  // STAGE 25.2: marginTop/paddingTop restored to spacing.xl/spacing.xs (see
+  // `card` above).
+  // STAGE 25.3: explicit gap added - with tierBadge/tierMeta both now
+  // meaningfully larger (Part 3), justifyContent: 'space-between' alone
+  // only distributes LEFTOVER space between them - if their combined
+  // shrunk width ever equals the row's full width on a narrow screen, they
+  // would otherwise sit flush against each other with zero gap. This
+  // guarantees a minimum visual separation regardless.
+  // STAGE 25.5: Stage 25.4's further marginTop increase (spacing.xl ->
+  // spacing.xxl) was reverted at the user's explicit request - back to
+  // exactly the Stage 25.3 value below.
   tierRow: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
@@ -233,15 +293,29 @@ const styles = StyleSheet.create({
     marginTop: spacing.xl,
     marginBottom: spacing.sm,
     paddingTop: spacing.xs,
+    gap: spacing.sm,
   },
+  // STAGE 25.3: fontSize 11 -> 14, weight 700 -> 800 - noticeably stronger/
+  // more premium as requested, letterSpacing kept from typography.micro.
+  // flexShrink + the render's own numberOfLines={1} keep this from
+  // colliding with tierMeta (its tierRow sibling, laid out via
+  // justifyContent: 'space-between') on narrow widths now that both are
+  // meaningfully larger than before.
   tierBadge: {
     ...typography.micro,
+    fontSize: 14,
+    fontWeight: '800',
+    flexShrink: 1,
   },
+  // STAGE 25.3: fontSize 13 -> 14, weight 600 -> 700 - stronger, still
+  // clearly secondary to pointsValue/label. flexShrink for the same
+  // narrow-width safety as tierBadge above.
   tierMeta: {
-    fontSize: 12,
-    fontWeight: '500',
+    fontSize: 14,
+    fontWeight: '700',
     color: colors.mutedOnDark,
     textAlign: 'right',
+    flexShrink: 1,
   },
   progressTrack: {
     height: 8,

@@ -26,7 +26,16 @@ const NAV_ITEMS = [
 // out) over a light scrollable content area. Intentionally not a copy of
 // the customer app's tab bar - this is a compact, desktop-oriented
 // management surface, not a mobile screen stretched onto desktop.
-export default function AdminShell({ activeKey = 'dashboard', children }) {
+// STAGE 21.2: onScroll/scrollEventThrottle are optional passthrough props to
+// the ScrollView below - purely functional wiring, not a visual/layout
+// change (a caller that doesn't pass them gets the exact same ScrollView as
+// before). Added so AdminReportsHistoryScreen can detect scroll progress on
+// the ACTUAL scrolling container (owned here, not duplicated in that
+// screen) to drive its own bounded on-demand thumbnail loading as the admin
+// scrolls through a long report history - see that screen's own comment for
+// why. AdminHomeScreen and any other current/future AdminShell consumer are
+// unaffected unless they explicitly pass these props.
+export default function AdminShell({ activeKey = 'dashboard', children, onScroll, scrollEventThrottle }) {
   const router = useRouter();
   const { signOut } = useAuth();
 
@@ -101,7 +110,9 @@ export default function AdminShell({ activeKey = 'dashboard', children }) {
       <ScrollView
         style={styles.body}
         contentContainerStyle={styles.bodyContent}
-        showsVerticalScrollIndicator={false}>
+        showsVerticalScrollIndicator={false}
+        onScroll={onScroll}
+        scrollEventThrottle={onScroll ? scrollEventThrottle : undefined}>
         {children}
       </ScrollView>
     </View>

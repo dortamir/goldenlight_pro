@@ -4,7 +4,7 @@ import { readLocalFileAsArrayBuffer } from '../utils/localFileBytes';
 import { supabase } from './supabase';
 
 const PROFILE_COLUMNS =
-  'id, full_name, phone, profession, avatar_path, points_balance, membership_level, approved_purchases_count, created_at, updated_at';
+  'id, full_name, phone, profession, date_of_birth, avatar_path, points_balance, membership_level, approved_purchases_count, created_at, updated_at';
 
 const AVATAR_BUCKET = 'profile-avatars';
 const AVATAR_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp'];
@@ -200,6 +200,17 @@ export async function updateProfile(userId, updates) {
     payload.avatar_path = updates.avatar_path ?? null;
   }
 
+  // STAGE 26: same "only included when explicitly provided" pattern as
+  // avatar_path above - a profile save that isn't setting a birthday never
+  // touches the existing column. The database is the real enforcement
+  // point for "settable once" (see supabase/migrations/028_birthday_bonus.sql's
+  // profiles_prevent_date_of_birth_change trigger) - this client whitelist
+  // only decides which columns THIS function is willing to forward at all,
+  // it is not itself a security boundary.
+  if (updates && Object.prototype.hasOwnProperty.call(updates, 'date_of_birth')) {
+    payload.date_of_birth = updates.date_of_birth ?? null;
+  }
+
   const { data, error } = await supabase
     .from('profiles')
     .update(payload)
@@ -222,6 +233,41 @@ export async function updateProfile(userId, updates) {
   }
 
   return data;
+}
+
+// STAGE 26: calls the server-side public.claim_my_birthday_bonus() RPC
+// (see supabase/migrations/028_birthday_bonus.sql). All eligibility logic -
+// whether today is the caller's birthday, whether this year's bonus was
+// already granted, the +1,000 point amount itself - lives entirely inside
+// that SECURITY DEFINER function; this is a thin, side-effect-free wrapper
+// that never computes or assumes anything about eligibility itself. Safe to
+// call on every authenticated session start (see AuthContext.js) - on any
+// day that isn't a qualifying birthday, or once this year's bonus already
+// exists, the RPC itself is a read-only no-op that returns awarded: false.
+export async function claimBirthdayBonus() {
+  if (!supabase) {
+    return { awarded: false, pointsBalance: null, bonusPoints: 0 };
+  }
+
+  const { data, error } = await supabase.rpc('claim_my_birthday_bonus');
+
+  if (error) {
+    if (__DEV__) {
+      console.warn('[Profile] claimBirthdayBonus failed', { code: error.code, message: error.message });
+    }
+    throw error;
+  }
+
+  // supabase-js returns a `returns table (...)` RPC result as an array of
+  // rows - this function always returns exactly one row for an
+  // authenticated caller.
+  const row = Array.isArray(data) ? data[0] : data;
+
+  return {
+    awarded: Boolean(row?.awarded),
+    pointsBalance: Number.isFinite(row?.points_balance) ? row.points_balance : null,
+    bonusPoints: Number.isFinite(row?.bonus_points) ? row.bonus_points : 0,
+  };
 }
 
 function getAvatarExtension(mimeType) {

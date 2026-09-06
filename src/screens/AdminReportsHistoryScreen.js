@@ -6,12 +6,56 @@ import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, TextInput, Vi
 
 import AdminShell from '../components/admin/AdminShell';
 import { getAdminDashboardSummary, getAdminReports, loadAdminReceiptThumbnails } from '../services/adminReportService';
-import { colors, radius, shadows, spacing, typography } from '../theme';
+import { receiptImageCacheKey } from '../services/purchaseReportService';
+import { colors, radius, spacing, typography } from '../theme';
 import { getAdminReportStatusMeta } from '../utils/adminReportStatus';
 import { isolateLTR } from '../utils/bidiText';
 
-const THUMB_WIDTH = 52;
-const THUMB_HEIGHT = 68;
+// STAGE 23: bumped from a 52x68 portrait box to a square 68px - matches
+// AdminHomeScreen's own Stage 22 thumbnail size exactly, for visual
+// consistency between the two admin list surfaces. Purely a style-level
+// size change - every Stage 21/21.1/21.2 <Image> prop (cacheKey,
+// cachePolicy, recyclingKey, onError fallback) below is untouched.
+const THUMB_SIZE = 68;
+
+// STAGE 21: this screen loads the full admin history in one query (a
+// separate, larger concern than this stage's scope), but signed-URL
+// resolution for every row's thumbnail doesn't need to compete equally -
+// the first rows are what's actually visible without scrolling. Splitting
+// into a small high-priority batch (dispatched first) and a background
+// batch (dispatched right after) means the rows an admin sees first win
+// the network race, without ever leaving later rows permanently blank.
+const HIGH_PRIORITY_THUMBNAIL_COUNT = 8;
+
+// STAGE 21.1: Stage 21 dispatched every remaining row (however many the
+// full admin history contains) as a single unbounded second batch right
+// after the priority one - fine while histories are small, but an admin
+// account's full history has no upper bound, and this would eventually mean
+// warming dozens or hundreds of images at once on a single screen load. A
+// second small bounded batch keeps "the next several rows likely to be
+// scrolled to soon" warm without that risk.
+const BACKGROUND_THUMBNAIL_COUNT = 12;
+
+// STAGE 21.2: Stage 21.1 left everything beyond the priority+background 20
+// permanently unresolved until the admin opened that report's own Detail
+// screen - not acceptable for a long history the admin actually scrolls
+// through. This is the size of each further, ON-DEMAND chunk dispatched as
+// the admin scrolls close to the bottom of the currently-rendered list -
+// same bound as the background batch, reused for consistency, not a new
+// concept.
+const ON_DEMAND_THUMBNAIL_CHUNK_SIZE = 12;
+
+// STAGE 21.2: AdminShell owns the actual scrolling container (a ScrollView,
+// not a FlatList - see that component's own comment on why this screen
+// forwards onScroll to it rather than migrating to FlatList). There is no
+// per-row viewability signal available the way FlatList's
+// onViewableItemsChanged would give - this screen's own report rows are
+// plain Views inside one always-fully-rendered list, not a virtualized one.
+// The closest safe equivalent is content-progress-based: once the visible
+// scroll position is within this many px of the bottom of the CURRENTLY
+// rendered content, treat that as "the admin is about to see more rows" and
+// dispatch the next bounded chunk - see handleScroll below.
+const SCROLL_LOAD_THRESHOLD_PX = 600;
 
 // STAGE 13 UPDATE: client-side filters over the single full
 // getAdminReports() list - no separate query per filter, unchanged from
@@ -36,7 +80,11 @@ function isPdfFile(name) {
   return /\.pdf$/i.test(String(name || ''));
 }
 
-function formatReportDate(value) {
+// STAGE 23: now includes the time, not just the date - the same operational
+// date treatment introduced on Admin Home in Stage 22, over the same
+// already-fetched purchase_reports.created_at value (no new field, no new
+// query).
+function formatReportDateTime(value) {
   const date = new Date(value);
 
   if (!value || Number.isNaN(date.getTime())) {
@@ -46,7 +94,9 @@ function formatReportDate(value) {
   const day = String(date.getDate()).padStart(2, '0');
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const year = date.getFullYear();
-  return `${day}.${month}.${year}`;
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${day}.${month}.${year} · ${hours}:${minutes}`;
 }
 
 // Normalizes useLocalSearchParams()'s `filter` value (a plain string for a
@@ -108,31 +158,16 @@ export default function AdminReportsHistoryScreen() {
 
     getAdminReports()
       .then((rows) => {
+        // STAGE 21.2: thumbnail dispatch no longer happens here - it used
+        // to run against `rows` (the raw, unfiltered fetch result), which
+        // is wrong the moment a filter/search is already active (e.g. this
+        // screen opened via AdminHome's own `?filter=needs_review` deep
+        // link): the rows an admin actually SEES first are visibleReports'
+        // first rows, not necessarily rows[0..N]. See the visibleReports-
+        // driven effect and handleScroll below, which both dispatch against
+        // the actual currently-visible, filtered/searched list instead.
         setReports(rows);
         hasLoadedReportsRef.current = true;
-
-        const imageRows = rows.filter((row) => !isPdfFile(row.original_filename) && row.receipt_path);
-        if (imageRows.length === 0) {
-          return;
-        }
-
-        // STAGE 17.2: same Promise.all batch resolution as AdminHomeScreen -
-        // see adminReportService.js's loadAdminReceiptThumbnails() and that
-        // screen's own comment. Fire-and-forget on purpose: the report list
-        // itself must render immediately (`.finally(() => setLoading(false))`
-        // below), with thumbnails filling in progressively as the batch
-        // resolves.
-        setThumbnails((prev) => {
-          const next = { ...prev };
-          imageRows.forEach((row) => {
-            next[row.id] = next[row.id] ?? { status: 'loading', url: null };
-          });
-          return next;
-        });
-
-        loadAdminReceiptThumbnails(imageRows).then((resolvedMap) => {
-          setThumbnails((prev) => ({ ...prev, ...resolvedMap }));
-        });
       })
       .catch(() => {
         if (isInitialLoad) {
@@ -197,6 +232,116 @@ export default function AdminReportsHistoryScreen() {
     });
   }, [reports, activeFilter, searchQuery]);
 
+  // STAGE 21.2: every report id whose thumbnail has ever been dispatched
+  // (eagerly or on-demand) this session - a Set, not component state, since
+  // it exists purely to prevent re-dispatching the same row and never
+  // drives a render itself. Deliberately never cleared on filter/search/
+  // focus - a report's own thumbnail doesn't need re-resolving just because
+  // the admin changed what's visible or came back from Detail (Part G): the
+  // underlying receipt_path/signed-url/expo-image caches this ultimately
+  // reads through (getCachedReceiptUrl, warmReceiptImage's own in-flight
+  // map) are the real source of truth for "is this actually loaded" - this
+  // Set only exists to avoid asking loadAdminReceiptThumbnails about the
+  // same row over and over as the admin scrolls back and forth.
+  const loadedThumbnailIdsRef = useRef(new Set());
+  // Simple mutex so on-demand scroll-triggered chunks never overlap each
+  // other - the initial priority+background pair below is deliberately NOT
+  // gated by this (Stage 21.1's own behavior: background starts right after
+  // priority, not waiting for it).
+  const chunkInFlightRef = useRef(false);
+
+  const getPendingImageRows = useCallback((rows) => {
+    return rows.filter(
+      (row) => !isPdfFile(row.original_filename) && row.receipt_path && !loadedThumbnailIdsRef.current.has(row.id),
+    );
+  }, []);
+
+  const dispatchThumbnailChunk = useCallback((rowsToLoad, { gated = false } = {}) => {
+    if (rowsToLoad.length === 0) {
+      return;
+    }
+
+    rowsToLoad.forEach((row) => loadedThumbnailIdsRef.current.add(row.id));
+
+    setThumbnails((prev) => {
+      const next = { ...prev };
+      rowsToLoad.forEach((row) => {
+        next[row.id] = next[row.id] ?? { status: 'loading', url: null };
+      });
+      return next;
+    });
+
+    if (gated) {
+      chunkInFlightRef.current = true;
+    }
+
+    loadAdminReceiptThumbnails(rowsToLoad, (id, entry) => {
+      setThumbnails((prev) => ({ ...prev, [id]: entry }));
+    }).finally(() => {
+      if (gated) {
+        chunkInFlightRef.current = false;
+      }
+    });
+  }, []);
+
+  // STAGE 21.2: replaces Stage 21.1's dispatch-inside-loadReports - runs
+  // against visibleReports (the actual filtered/searched list), so a filter
+  // or search change that reveals rows never seen before also warms THEIR
+  // first priority+background rows, exactly like a fresh data load does.
+  // Rows already in loadedThumbnailIdsRef are skipped by getPendingImageRows,
+  // so this is a no-op on a background refresh or a filter toggle back to a
+  // previously-seen view - nothing already loaded is ever re-dispatched or
+  // reset (Part G).
+  useEffect(() => {
+    const pending = getPendingImageRows(visibleReports);
+    if (pending.length === 0) {
+      return;
+    }
+
+    const priorityRows = pending.slice(0, HIGH_PRIORITY_THUMBNAIL_COUNT);
+    const backgroundRows = pending.slice(HIGH_PRIORITY_THUMBNAIL_COUNT, HIGH_PRIORITY_THUMBNAIL_COUNT + BACKGROUND_THUMBNAIL_COUNT);
+
+    // STAGE 21.1 behavior preserved: priority dispatched first, background
+    // right after, both committing per-row via onRowReady inside
+    // dispatchThumbnailChunk/loadAdminReceiptThumbnails - never waiting for
+    // the slowest row in either batch.
+    dispatchThumbnailChunk(priorityRows);
+    dispatchThumbnailChunk(backgroundRows);
+  }, [visibleReports, getPendingImageRows, dispatchThumbnailChunk]);
+
+  // STAGE 21.2: AdminShell's ScrollView is the actual scrolling container
+  // (see that component's own onScroll passthrough) - this screen's report
+  // rows are plain Views inside it, not a virtualized list, so there is no
+  // per-row viewability event available the way FlatList's
+  // onViewableItemsChanged would give. Instead, once scroll position is
+  // within SCROLL_LOAD_THRESHOLD_PX of the bottom of the currently rendered
+  // content, treat that as "more rows are about to be seen" and dispatch
+  // the next bounded chunk of whatever in visibleReports still has no
+  // thumbnail - gated by chunkInFlightRef so a burst of throttled scroll
+  // events while lingering near the bottom dispatches chunks one at a time,
+  // never overlapping.
+  const handleScroll = useCallback(
+    (event) => {
+      if (chunkInFlightRef.current) {
+        return;
+      }
+
+      const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+      const distanceFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
+      if (distanceFromBottom > SCROLL_LOAD_THRESHOLD_PX) {
+        return;
+      }
+
+      const pending = getPendingImageRows(visibleReports);
+      if (pending.length === 0) {
+        return;
+      }
+
+      dispatchThumbnailChunk(pending.slice(0, ON_DEMAND_THUMBNAIL_CHUNK_SIZE), { gated: true });
+    },
+    [visibleReports, getPendingImageRows, dispatchThumbnailChunk],
+  );
+
   const isFiltered = activeFilter !== 'all';
   const isSearching = searchQuery.trim().length > 0;
 
@@ -225,13 +370,27 @@ export default function AdminReportsHistoryScreen() {
   // exactly the reported bug. There is still only one state variable
   // driving both controls; only the RENDER of the summary chips was ever
   // disconnected from it.
+  // STAGE 23.1: "הכל" joins this array as a real, fourth, equal segment -
+  // its count is reports.length, the exact same already-loaded full list
+  // visibleReports itself derives from (see that useMemo above) - no
+  // backend query, no separate count source, always exactly consistent
+  // with what "no filter" actually shows.
   const summaryItems = [
+    {
+      key: 'all',
+      label: 'הכל',
+      value: reports.length,
+      activeChipStyle: styles.summaryChipActiveAll,
+      activeValueStyle: styles.summaryValueActiveAll,
+      dotStyle: styles.summaryStripDotAll,
+    },
     {
       key: 'needs_review',
       label: 'דורשות בדיקה',
       value: summary?.pendingCount,
       activeChipStyle: styles.summaryChipActiveNeedsReview,
       activeValueStyle: styles.summaryValueActiveNeedsReview,
+      dotStyle: styles.summaryStripDotNeedsReview,
     },
     {
       key: 'approved',
@@ -239,6 +398,7 @@ export default function AdminReportsHistoryScreen() {
       value: summary?.approvedCount,
       activeChipStyle: styles.summaryChipActiveApproved,
       activeValueStyle: styles.summaryValueActiveApproved,
+      dotStyle: styles.summaryStripDotApproved,
     },
     {
       key: 'rejected',
@@ -246,52 +406,85 @@ export default function AdminReportsHistoryScreen() {
       value: summary?.rejectedCount,
       activeChipStyle: styles.summaryChipActiveRejected,
       activeValueStyle: styles.summaryValueActiveRejected,
+      dotStyle: styles.summaryStripDotRejected,
     },
   ];
 
   return (
-    <AdminShell activeKey="history">
-      <View style={styles.section}>
+    <AdminShell activeKey="history" onScroll={handleScroll} scrollEventThrottle={200}>
+      <View style={styles.pageHeader}>
+        <Text style={styles.pageEyebrow}>ניהול חשבוניות</Text>
         <Text style={styles.pageTitle}>כל החשבוניות</Text>
+        <Text style={styles.pageSubtitle}>חיפוש, סינון ובדיקת חשבוניות שהוגשו למערכת</Text>
+      </View>
 
-        {summaryError ? (
-          <View style={styles.summaryErrorRow}>
-            <Text style={styles.errorText}>{summaryError}</Text>
-            <Pressable onPress={loadSummary} accessibilityRole="button">
-              <Text style={styles.retryText}>נסו שוב</Text>
-            </Pressable>
-          </View>
-        ) : (
-          <View style={styles.summaryRow}>
-            {summaryLoading
-              ? [0, 1, 2].map((key) => (
-                  <View key={key} style={styles.summaryChip}>
-                    <ActivityIndicator color={colors.primary} size="small" />
-                  </View>
-                ))
-              : summaryItems.map((item) => {
-                  const isActive = activeFilter === item.key;
-                  return (
-                    <Pressable
-                      key={item.key}
-                      onPress={() => setActiveFilter(item.key)}
-                      style={({ pressed, hovered }) => [
-                        styles.summaryChip,
-                        isActive && item.activeChipStyle,
-                        hovered && styles.summaryChipHovered,
-                        pressed && styles.summaryChipPressed,
-                      ]}
-                      accessibilityRole="button"
-                      accessibilityState={{ selected: isActive }}
-                      accessibilityLabel={`${item.value ?? 0} חשבוניות ${item.label}, מעבר לסינון לפי סטטוס זה`}>
-                      <Text style={[styles.summaryValue, isActive && item.activeValueStyle]}>{item.value ?? 0}</Text>
-                      <Text style={styles.summaryLabel}>{item.label}</Text>
-                    </Pressable>
-                  );
-                })}
-          </View>
-        )}
+      {/* STAGE 23.1: one unified 4-segment strip (הכל/דורשות בדיקה/אושרו/נדחו)
+          is now the ONLY filtering UI on this screen - the separate filter-
+          chip row was removed entirely (see Part below). Same real
+          summary.pendingCount/approvedCount/rejectedCount data plus
+          reports.length for "הכל", same click-to-filter behavior as before
+          (setActiveFilter, no refetch) - just one control instead of two
+          that did the same thing. */}
+      {summaryError ? (
+        <View style={styles.summaryErrorRow}>
+          <Text style={styles.errorText}>{summaryError}</Text>
+          <Pressable onPress={loadSummary} accessibilityRole="button">
+            <Text style={styles.retryText}>נסו שוב</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <View style={styles.summaryStrip}>
+          {/* STAGE 23.1: "הכל"'s count comes from reports.length (loadReports/
+              `loading`), not from the summary endpoint - so the skeleton
+              stays up until BOTH the summary counts AND the report list's
+              true first load have resolved, never showing "0" for "הכל"
+              while reports are still loading. `loading` is only ever true
+              during a genuine first load (see loadReports' own
+              isInitialLoad gate) - a background refresh-on-focus never
+              re-triggers this skeleton. */}
+          {summaryLoading || loading
+            ? [0, 1, 2, 3].map((key) => (
+                <View key={key} style={[styles.summaryStripItem, key > 0 && styles.summaryStripDivider]}>
+                  <ActivityIndicator color={colors.primary} size="small" />
+                </View>
+              ))
+            : summaryItems.map((item, index) => {
+                const isActive = activeFilter === item.key;
+                return (
+                  <Pressable
+                    key={item.key}
+                    onPress={() => setActiveFilter(item.key)}
+                    style={({ pressed, hovered }) => [
+                      styles.summaryStripItem,
+                      index > 0 && styles.summaryStripDivider,
+                      hovered && styles.summaryStripItemHovered,
+                      pressed && styles.summaryStripItemPressed,
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: isActive }}
+                    accessibilityLabel={`${item.value ?? 0} חשבוניות ${item.label}, מעבר לסינון לפי סטטוס זה`}>
+                    <View style={[styles.summaryStripPill, isActive && item.activeChipStyle]}>
+                      <View style={[styles.summaryStripDot, item.dotStyle]} />
+                      <Text style={[styles.summaryStripValue, isActive && item.activeValueStyle]}>
+                        {item.value ?? 0}
+                      </Text>
+                    </View>
+                    <Text style={styles.summaryStripLabel} numberOfLines={1}>
+                      {item.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+        </View>
+      )}
 
+      {/* STAGE 23: search, filters, the result-context row, and the list/
+          state below all sit inside one shared section with a tight
+          internal gap - they read as one connected "list controls + list"
+          unit, distinct from the looser spacing between pageHeader/
+          summaryStrip/this section (AdminShell's own inter-section gap,
+          matching Stage 22's Admin Home convention). */}
+      <View style={styles.listSection}>
         <View style={styles.searchRow}>
           <Ionicons name="search-outline" size={16} color={colors.textMuted} />
           <TextInput
@@ -311,27 +504,13 @@ export default function AdminReportsHistoryScreen() {
           ) : null}
         </View>
 
-        <View style={styles.filterRow}>
-          {STATUS_FILTERS.map((filter) => {
-            const isActive = activeFilter === filter.key;
-            return (
-              <Pressable
-                key={filter.key}
-                onPress={() => setActiveFilter(filter.key)}
-                style={({ pressed, hovered }) => [
-                  styles.filterChip,
-                  isActive && styles.filterChipActive,
-                  !isActive && hovered && styles.filterChipHovered,
-                  pressed && styles.filterChipPressed,
-                ]}
-                accessibilityRole="button"
-                accessibilityLabel={`סינון לפי ${filter.label}`}
-                accessibilityState={{ selected: isActive }}>
-                <Text style={[styles.filterChipText, isActive && styles.filterChipTextActive]}>{filter.label}</Text>
-              </Pressable>
-            );
-          })}
-        </View>
+        {/* STAGE 23, Part F: a small real-data context row - visibleReports.length
+            is the exact same array the list below renders, nothing separately
+            computed/estimated. Omitted while loading/erroring/empty, since
+            there's nothing meaningful to count yet in those states. */}
+        {!loading && !error && visibleReports.length > 0 ? (
+          <Text style={styles.resultContext}>{`מציג ${isolateLTR(visibleReports.length)} חשבוניות`}</Text>
+        ) : null}
 
         {loading ? (
           <View style={styles.stateCard}>
@@ -346,6 +525,15 @@ export default function AdminReportsHistoryScreen() {
           </View>
         ) : visibleReports.length === 0 ? (
           <View style={styles.stateCard}>
+            {!isFiltered && !isSearching ? (
+              <View style={styles.emptyStateIconBadge}>
+                <Ionicons name="document-text-outline" size={20} color={colors.textMuted} />
+              </View>
+            ) : (
+              <View style={styles.emptyStateIconBadge}>
+                <Ionicons name="search-outline" size={20} color={colors.textMuted} />
+              </View>
+            )}
             <Text style={styles.emptyText}>{emptyStateMessage}</Text>
           </View>
         ) : (
@@ -378,7 +566,7 @@ export default function AdminReportsHistoryScreen() {
                       </View>
                     ) : thumb?.status === 'ready' && thumb.url ? (
                       <Image
-                        source={{ uri: thumb.url }}
+                        source={{ uri: thumb.url, cacheKey: receiptImageCacheKey(report.receipt_path) }}
                         style={styles.thumbImage}
                         contentFit="contain"
                         cachePolicy="memory-disk"
@@ -412,17 +600,22 @@ export default function AdminReportsHistoryScreen() {
                     <Text style={styles.filename} numberOfLines={1}>
                       {report.original_filename ? isolateLTR(report.original_filename) : 'חשבונית'}
                     </Text>
-                    <Text style={styles.date}>{isolateLTR(formatReportDate(report.created_at))}</Text>
+                    <Text style={styles.date} numberOfLines={1}>
+                      {isolateLTR(formatReportDateTime(report.created_at))}
+                    </Text>
                     {report.status === 'approved' && report.points_awarded > 0 ? (
-                      <Text style={styles.points}>{`נצברו ${isolateLTR(report.points_awarded)} נק׳`}</Text>
+                      <Text style={styles.points} numberOfLines={1}>{`נצברו ${isolateLTR(report.points_awarded)} נק׳`}</Text>
                     ) : null}
                   </View>
 
-                  <View style={[styles.statusBadge, { backgroundColor: statusMeta.backgroundColor }]}>
-                    <Text style={[styles.statusBadgeText, { color: statusMeta.textColor }]}>{statusMeta.label}</Text>
+                  <View style={styles.trailing}>
+                    <View style={[styles.statusBadge, { backgroundColor: statusMeta.backgroundColor }]}>
+                      <Text style={[styles.statusBadgeText, { color: statusMeta.textColor }]} numberOfLines={1}>
+                        {statusMeta.label}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-back" size={16} color={colors.textMuted} />
                   </View>
-
-                  <Ionicons name="chevron-back" size={18} color={colors.textMuted} />
                 </Pressable>
               );
             })}
@@ -434,8 +627,16 @@ export default function AdminReportsHistoryScreen() {
 }
 
 const styles = StyleSheet.create({
-  section: {
-    gap: spacing.md,
+  // STAGE 23: mirrors AdminHomeScreen's own Stage 22 pageHeader exactly
+  // (eyebrow + title + subtitle sizes/weights) for visual consistency
+  // between the two admin surfaces (Part R).
+  pageHeader: {
+    gap: 2,
+  },
+  pageEyebrow: {
+    ...typography.micro,
+    color: colors.textMuted,
+    textAlign: 'right',
   },
   pageTitle: {
     fontSize: 22,
@@ -448,15 +649,19 @@ const styles = StyleSheet.create({
     lineHeight: 28,
     color: colors.text,
     textAlign: 'right',
+    marginTop: 2,
   },
-  // STAGE 13: the compact summary strip - small stat chips, deliberately
-  // lighter-weight than AdminHomeScreen's own larger summaryCard (this
-  // screen already has a filter row + search input competing for vertical
-  // space right below it, so these stay compact rather than duplicating
-  // that heavier card treatment).
-  summaryRow: {
-    flexDirection: 'row-reverse',
-    flexWrap: 'wrap',
+  pageSubtitle: {
+    ...typography.caption,
+    color: colors.textMuted,
+    textAlign: 'right',
+    marginTop: 2,
+  },
+  // STAGE 23: search/filters/result-context/list all live inside this one
+  // tightly-spaced section, distinct from the larger gap AdminShell's own
+  // bodyContent applies between pageHeader/summaryStrip/this section - see
+  // the render's own comment above this View.
+  listSection: {
     gap: spacing.sm,
   },
   summaryErrorRow: {
@@ -464,51 +669,106 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.sm,
   },
-  summaryChip: {
-    flexGrow: 1,
-    flexBasis: 84,
-    minHeight: 56,
-    alignItems: 'flex-end',
-    justifyContent: 'center',
-    gap: 2,
+  // STAGE 23, Part C: one bordered strip instead of three separate cards -
+  // three equal segments (flex: 1 each) divided by a thin inner border,
+  // each segment still independently tappable into the matching filter.
+  // Deliberately no shadow - this is a compact status readout, not a card.
+  summaryStrip: {
+    flexDirection: 'row-reverse',
     backgroundColor: colors.white,
     borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
-    paddingHorizontal: spacing.md,
+    overflow: 'hidden',
+  },
+  // STAGE 23.1: tightened for 4 equal segments instead of 3 (paddingHorizontal
+  // spacing.xs -> 2, gap 3 -> 2) - the strip now has to fit "הכל" as well,
+  // and this is the one control on the page with the least per-item width
+  // to spare on a 360px phone.
+  summaryStripItem: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
     paddingVertical: spacing.sm,
+    paddingHorizontal: 2,
     cursor: 'pointer',
   },
-  // STAGE 17.1: each summary card's ACTIVE (selected) look, applied only
-  // when `activeFilter` actually equals that card's own key - see
-  // summaryItems above. Reuses the exact same status colors as
+  // Divider between segments - applied to every item except the first
+  // rendered (index 0), which in this row-reverse row sits at the right
+  // edge and needs no border on its own leading side.
+  summaryStripDivider: {
+    borderRightWidth: 1,
+    borderRightColor: colors.border,
+  },
+  summaryStripItemHovered: {
+    backgroundColor: colors.surfaceMuted,
+  },
+  summaryStripItemPressed: {
+    opacity: 0.85,
+  },
+  // The small pill wrapping the accent dot + count - this (not the whole
+  // segment) is what tints when its filter is active, keeping the "active"
+  // signal compact and centered rather than recoloring the entire strip
+  // segment/divider. Horizontal padding trimmed (sm -> xs) for the same
+  // 4-segment width reason as summaryStripItem above.
+  summaryStripPill: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: spacing.xs,
+    paddingVertical: 2,
+    borderRadius: radius.pill,
+  },
+  summaryStripDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: colors.textMuted,
+  },
+  // STAGE 23.1: "הכל" gets the brand teal accent - it's the "no filter,
+  // show everything" segment, distinct from the three real status accents
+  // below.
+  summaryStripDotAll: {
+    backgroundColor: colors.primary,
+  },
+  summaryStripDotNeedsReview: {
+    backgroundColor: colors.warning,
+  },
+  summaryStripDotApproved: {
+    backgroundColor: colors.success,
+  },
+  summaryStripDotRejected: {
+    backgroundColor: colors.error,
+  },
+  // STAGE 17.1 (carried forward): each item's ACTIVE (selected) look is
+  // looked up from `activeFilter` itself - the same state now driving the
+  // ONLY filter control on this screen (Stage 23.1 removed the separate
+  // chip row that used to read the same state) - never a static flag
+  // disconnected from selection. Reuses the exact same status colors as
   // src/utils/adminReportStatus.js/the row status badges below (amber for
   // "דורשות בדיקה", never the red/error tokens reserved for rejection;
-  // green for "אושרו"; red for "נדחו"), so a card's selected color always
-  // matches what that status already means everywhere else in this screen.
+  // green for "אושרו"; red for "נדחו"); "הכל" uses the brand teal soft tint.
+  summaryChipActiveAll: {
+    backgroundColor: colors.primarySoft,
+  },
   summaryChipActiveNeedsReview: {
     backgroundColor: colors.warningSoft,
-    borderColor: colors.warning,
   },
   summaryChipActiveApproved: {
     backgroundColor: colors.successSoft,
-    borderColor: colors.success,
   },
   summaryChipActiveRejected: {
     backgroundColor: colors.errorSoft,
-    borderColor: colors.error,
   },
-  summaryChipHovered: {
-    borderColor: colors.primary,
-  },
-  summaryChipPressed: {
-    opacity: 0.85,
-  },
-  summaryValue: {
-    fontSize: 20,
+  summaryStripValue: {
+    fontSize: 14,
     fontWeight: '700',
     color: colors.text,
     textAlign: 'right',
+  },
+  summaryValueActiveAll: {
+    color: colors.primaryPressed,
   },
   summaryValueActiveNeedsReview: {
     color: colors.warning,
@@ -519,12 +779,17 @@ const styles = StyleSheet.create({
   summaryValueActiveRejected: {
     color: colors.error,
   },
-  summaryLabel: {
-    ...typography.caption,
+  summaryStripLabel: {
+    fontSize: 10,
+    lineHeight: 13,
     fontWeight: '600',
     color: colors.textMuted,
-    textAlign: 'right',
+    textAlign: 'center',
   },
+  // STAGE 23, Part D: functionally unchanged from before (same TextInput,
+  // same clear-X, same placeholder) - only minor visual polish (border/
+  // radius already matched the "admin search control" spec, so this is
+  // carried forward as-is).
   searchRow: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
@@ -546,38 +811,12 @@ const styles = StyleSheet.create({
     // no-op on native, not just an unrecognized style key.
     ...Platform.select({ web: { outlineStyle: 'none' } }),
   },
-  filterRow: {
-    flexDirection: 'row-reverse',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-  },
-  filterChip: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: 9,
-    borderRadius: radius.pill,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.white,
-    cursor: 'pointer',
-  },
-  filterChipHovered: {
-    borderColor: colors.primary,
-  },
-  filterChipActive: {
-    backgroundColor: colors.primary,
-    borderColor: colors.primary,
-  },
-  filterChipPressed: {
-    opacity: 0.85,
-  },
-  filterChipText: {
+  // STAGE 23, Part F: a plain small text row, not a card - real
+  // visibleReports.length, nothing invented.
+  resultContext: {
     ...typography.caption,
-    fontWeight: '700',
     color: colors.textMuted,
-    textAlign: 'center',
-  },
-  filterChipTextActive: {
-    color: colors.white,
+    textAlign: 'right',
   },
   stateCard: {
     minHeight: 120,
@@ -588,6 +827,14 @@ const styles = StyleSheet.create({
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
+  },
+  emptyStateIconBadge: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.surfaceMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   errorText: {
     ...typography.body,
@@ -607,22 +854,34 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     textAlign: 'center',
   },
+  // STAGE 23, Part M: a tighter gap (xs, not sm) between rows for a denser,
+  // more table-like feel - option B from that part (subtle individual rows
+  // with minimal gap), since the screen's existing structure already
+  // renders each report as its own independently-styled Pressable (needed
+  // for per-row hover/press/attention-border state) rather than one shared
+  // container - restructuring to divider-separated single-container rows
+  // (option A) would have meant rebuilding that per-row state handling for
+  // a purely visual outcome, so option B integrates far more cleanly here.
   list: {
-    gap: spacing.sm,
+    gap: spacing.xs,
   },
+  // STAGE 23, Part M: dropped shadows.softCard entirely - elevation now
+  // comes only from the existing border, matching "subtle borders, avoid
+  // heavy individual card shadows". minHeight raised 76 -> 84 (Part H's
+  // ~82-94px target) to fit the larger 68px thumbnail; radius.md (not .lg)
+  // reads as a denser list row rather than a standalone card.
   row: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
     gap: spacing.md,
-    minHeight: 76,
+    minHeight: 84,
     backgroundColor: colors.white,
-    borderRadius: radius.lg,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     cursor: 'pointer',
-    ...shadows.softCard,
   },
   rowHovered: {
     borderColor: colors.primary,
@@ -639,8 +898,8 @@ const styles = StyleSheet.create({
     borderRightColor: colors.warning,
   },
   thumbWrap: {
-    width: THUMB_WIDTH,
-    height: THUMB_HEIGHT,
+    width: THUMB_SIZE,
+    height: THUMB_SIZE,
     borderRadius: radius.sm,
     overflow: 'hidden',
     borderWidth: 1,
@@ -669,9 +928,14 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
     alignItems: 'flex-end',
+    gap: 2,
   },
+  // Part I: the strongest text in the row - one line, ellipsis, never
+  // pushed off-screen by the fixed-width thumbnail/trailing column since
+  // this is the only flex: 1 element in the row.
   customer: {
-    ...typography.body,
+    fontSize: 15,
+    lineHeight: 19,
     fontWeight: '700',
     color: colors.text,
     textAlign: 'right',
@@ -680,29 +944,38 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.textMuted,
     textAlign: 'right',
-    marginTop: 2,
   },
   date: {
     ...typography.caption,
     color: colors.textMuted,
     textAlign: 'right',
-    marginTop: 2,
   },
   points: {
     ...typography.caption,
     fontWeight: '700',
     color: colors.success,
     textAlign: 'right',
-    marginTop: 2,
   },
+  // Trailing column (status pill above the chevron), stacked vertically -
+  // takes only as much horizontal width as the badge itself needs, leaving
+  // `info` (flex: 1) the rest. Mirrors AdminHomeScreen's own Stage 22
+  // queueTrailing pattern exactly (Part R).
+  trailing: {
+    alignItems: 'center',
+    gap: spacing.xs,
+    flexShrink: 0,
+  },
+  // Part L: compact, quiet badge - never louder than the customer name
+  // above. Same admin-facing labels/colors as getAdminReportStatusMeta
+  // everywhere else (Detail, Admin Home) - no internal/backend wording.
   statusBadge: {
     borderRadius: radius.pill,
     paddingHorizontal: spacing.sm,
-    paddingVertical: 6,
+    paddingVertical: 3,
     flexShrink: 0,
   },
   statusBadgeText: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '700',
     textAlign: 'center',
   },

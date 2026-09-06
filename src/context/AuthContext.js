@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState } from 
 import * as Linking from 'expo-linking';
 
 import { isCurrentUserAdmin } from '../services/adminService';
-import { clearAvatarUrlCache, clearProfileCache } from '../services/profileService';
+import { claimBirthdayBonus, clearAvatarUrlCache, clearProfileCache, invalidateProfileCache } from '../services/profileService';
 import { clearReceiptUrlCache } from '../services/purchaseReportService';
 import { supabase } from '../services/supabase';
 
@@ -84,6 +84,26 @@ export function AuthProvider({ children }) {
   // SECURITY DEFINER RPC (is_admin()), regardless of this value.
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminLoading, setAdminLoading] = useState(true);
+  // STAGE 26: result of this session's own claim_my_birthday_bonus() call
+  // (see the effect below) - null until that call resolves, then either
+  // stays null (not awarded, the overwhelming majority of sessions) or
+  // becomes { bonusPoints } once, the one time a birthday bonus is
+  // actually granted during this session. HomeScreen reads this to show a
+  // lightweight, one-time celebratory message; dismissBirthdayBonus()
+  // clears it back to null so it is never shown twice.
+  const [birthdayBonus, setBirthdayBonus] = useState(null);
+  // STAGE 26: a plain incrementing counter, bumped once whenever the
+  // birthday-bonus RPC actually awards points (see the effect below). This
+  // is NOT a second copy of the profile/points data - Home/Rewards/Profile
+  // still read the real balance exclusively through their own existing
+  // getProfile() calls (profileService.js). It exists only as a "please
+  // re-fetch now" signal for a screen that is already mounted and focused
+  // at the exact moment the award happens (the common case, since the
+  // claim below fires right at session start, around the same time those
+  // screens run their own first fetch) - each of those screens already
+  // includes profileVersion in its own focus-effect dependency array so a
+  // bump re-runs the existing fetch, it does not introduce a new one.
+  const [profileVersion, setProfileVersion] = useState(0);
   // Idempotency guard for the recovery deep-link effect below: remembers
   // the exact callback URL already processed during this AuthProvider's
   // lifetime, so the same URL is never handled twice (React dev-mode
@@ -232,6 +252,63 @@ export function AuthProvider({ children }) {
     };
   }, [loading, user?.id]);
 
+  // STAGE 26: claims this user's annual birthday bonus exactly once per
+  // signed-in session - guarded by a ref (not state) keyed on user id, so
+  // React's dev-mode StrictMode double-effect invocation or a re-render
+  // never fires the RPC twice client-side. This is a convenience guard
+  // only, not the real security boundary: public.claim_my_birthday_bonus()
+  // (supabase/migrations/028_birthday_bonus.sql) is itself fully
+  // idempotent - it locks the caller's own profiles row and checks for an
+  // existing 'birthday_bonus' ledger row for this reward year before ever
+  // inserting one, so calling it any number of times (a second tab, a
+  // fast logout/login, an app relaunch) can never award more than once.
+  //
+  // Runs as soon as `loading` (session restoration) settles and a real
+  // user exists - the same readiness gate the isAdmin effect above uses -
+  // which is at or before the moment Home/Rewards/Profile issue their own
+  // first getProfile() call, so the overwhelming majority of sessions
+  // (not a qualifying birthday) resolve invisibly before those screens
+  // even render real numbers. On the rare day this DOES award points, the
+  // profile cache is invalidated and profileVersion is bumped immediately
+  // so any already-mounted screen re-fetches the real, post-bonus balance
+  // instead of continuing to show the pre-bonus number.
+  const claimedBirthdayBonusForUserRef = useRef(null);
+
+  useEffect(() => {
+    if (loading || !user?.id || !supabase) {
+      return;
+    }
+
+    if (claimedBirthdayBonusForUserRef.current === user.id) {
+      return;
+    }
+    claimedBirthdayBonusForUserRef.current = user.id;
+
+    claimBirthdayBonus()
+      .then((result) => {
+        if (!result?.awarded) {
+          return;
+        }
+
+        if (__DEV__) {
+          console.log('[Auth] Birthday bonus awarded', { bonusPoints: result.bonusPoints });
+        }
+
+        invalidateProfileCache(user.id);
+        setBirthdayBonus({ bonusPoints: result.bonusPoints });
+        setProfileVersion((version) => version + 1);
+      })
+      .catch((error) => {
+        if (__DEV__) {
+          console.warn('[Auth] claimBirthdayBonus failed', { code: error?.code, message: error?.message });
+        }
+      });
+  }, [loading, user?.id]);
+
+  const dismissBirthdayBonus = () => {
+    setBirthdayBonus(null);
+  };
+
   // Password-recovery deep-link handling. Works identically on web (the
   // recovery link opens a normal page load, whose full URL - including the
   // #access_token=...&type=recovery fragment Supabase appends - is read via
@@ -349,7 +426,7 @@ export function AuthProvider({ children }) {
     return data;
   };
 
-  const signUp = async ({ email, password, fullName, phone, profession }) => {
+  const signUp = async ({ email, password, fullName, phone, profession, dateOfBirth }) => {
     if (!supabase) {
       throw new Error('Supabase is not configured.');
     }
@@ -362,6 +439,14 @@ export function AuthProvider({ children }) {
           full_name: fullName,
           phone,
           profession,
+          // STAGE 26: read by public.handle_new_user() (see
+          // supabase/migrations/028_birthday_bonus.sql) via the exact same
+          // raw_user_meta_data mechanism full_name/phone/profession already
+          // use - no separate client-side insert. Expected as a
+          // 'YYYY-MM-DD' string or omitted entirely; that trigger silently
+          // drops anything malformed or future-dated to NULL rather than
+          // ever failing the signup over it.
+          date_of_birth: dateOfBirth || null,
         },
       },
     });
@@ -414,6 +499,14 @@ export function AuthProvider({ children }) {
     // definite "not admin", not a still-loading state.
     setIsAdmin(false);
     setAdminLoading(false);
+    // STAGE 26: a different user signing in on the same device afterward
+    // must never see a leftover birthday-bonus celebration from the
+    // previous session. Clearing the ref (not just the state) also lets
+    // the SAME user get a fresh eligibility check if they sign back in
+    // later - see the claim effect above, which re-fires whenever
+    // user?.id transitions away from and back to a value.
+    claimedBirthdayBonusForUserRef.current = null;
+    setBirthdayBonus(null);
   };
 
   const value = useMemo(
@@ -425,12 +518,15 @@ export function AuthProvider({ children }) {
       adminLoading,
       passwordRecovery,
       recoveryError,
+      birthdayBonus,
+      dismissBirthdayBonus,
+      profileVersion,
       signIn,
       signUp,
       signOut,
       clearPasswordRecovery,
     }),
-    [loading, isAdmin, adminLoading, passwordRecovery, recoveryError, session, user],
+    [loading, isAdmin, adminLoading, passwordRecovery, recoveryError, session, user, birthdayBonus, profileVersion],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

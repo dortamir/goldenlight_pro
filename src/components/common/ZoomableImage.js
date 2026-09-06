@@ -1,7 +1,13 @@
 import { Image } from 'expo-image';
 import { StyleSheet } from 'react-native';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
-import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
+import Animated, {
+  runOnJS,
+  useAnimatedReaction,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 
 const MIN_SCALE = 1;
 const MAX_SCALE = 4;
@@ -31,13 +37,37 @@ const DOUBLE_TAP_SCALE = 2;
 // pattern. contentFit="contain" + cachePolicy/recyclingKey are unchanged
 // from the non-zoomable usage this replaces, so image quality/caching
 // behavior is identical - only pan/zoom is new.
-export default function ZoomableImage({ uri, recyclingKey }) {
+//
+// STAGE 24.2: `onZoomChange` is an OPTIONAL callback, undefined by default -
+// no existing caller (the customer-facing PurchaseReportDetailsScreen)
+// passes it, so that usage is byte-for-byte unaffected. When provided, it's
+// called with a plain boolean (true once scale exceeds ~1x, false once back
+// at rest) any time that boundary is crossed - added for
+// AdminReportDetailScreen's own fullscreen viewer, which needs to know
+// whether the receipt is currently zoomed to decide whether tapping the
+// dark backdrop around it should close the viewer (safe only at rest,
+// where the fitted-image bounds are still accurate) without this component
+// needing to know anything about backdrop-dismissal itself.
+export default function ZoomableImage({ uri, recyclingKey, cacheKey, onZoomChange }) {
   const scale = useSharedValue(1);
   const savedScale = useSharedValue(1);
   const translateX = useSharedValue(0);
   const translateY = useSharedValue(0);
   const savedTranslateX = useSharedValue(0);
   const savedTranslateY = useSharedValue(0);
+
+  // Reports only genuine boundary crossings (rest -> zoomed, zoomed -> rest),
+  // not every intermediate scale value during an active pinch - the small
+  // epsilon above MIN_SCALE avoids floating-point jitter right at rest
+  // ever reading as "zoomed".
+  useAnimatedReaction(
+    () => scale.value > MIN_SCALE + 0.01,
+    (isZoomed, previousIsZoomed) => {
+      if (onZoomChange && isZoomed !== previousIsZoomed) {
+        runOnJS(onZoomChange)(isZoomed);
+      }
+    },
+  );
 
   const resetZoom = () => {
     'worklet';
@@ -109,7 +139,7 @@ export default function ZoomableImage({ uri, recyclingKey }) {
       <GestureDetector gesture={gesture}>
         <Animated.View style={[styles.root, animatedStyle]}>
           <Image
-            source={{ uri }}
+            source={{ uri, cacheKey }}
             style={styles.image}
             contentFit="contain"
             cachePolicy="memory-disk"

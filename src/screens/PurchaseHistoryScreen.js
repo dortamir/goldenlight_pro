@@ -8,7 +8,12 @@ import AppBackButton from '../components/common/AppBackButton';
 import AppScreen from '../components/common/AppScreen';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
-import { getCachedReceiptUrl, getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
+import {
+  getCachedReceiptUrl,
+  getMyPurchaseReports,
+  getReceiptSignedUrl,
+  receiptImageCacheKey,
+} from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { isolateLTR } from '../utils/bidiText';
 import { getCustomerReceiptStatusMeta } from '../utils/purchaseReportStatus';
@@ -312,7 +317,7 @@ export default function PurchaseHistoryScreen() {
                           </View>
                         ) : preview?.status === 'ready' && preview.url ? (
                           <Image
-                            source={{ uri: preview.url }}
+                            source={{ uri: preview.url, cacheKey: receiptImageCacheKey(report.receipt_path) }}
                             style={styles.thumbnailImage}
                             contentFit="contain"
                             cachePolicy="memory-disk"

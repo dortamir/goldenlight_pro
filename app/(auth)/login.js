@@ -1,5 +1,5 @@
-import LoginScreen from '../../src/screens/LoginScreen';
+import AuthScreen from '../../src/screens/AuthScreen';
 
 export default function LoginRoute() {
-  return <LoginScreen />;
+  return <AuthScreen initialMode="login" />;
 }

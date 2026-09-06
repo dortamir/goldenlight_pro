@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -16,6 +16,7 @@ import {
   getEligibleReceiptItems,
   getPurchaseReportById,
   getReceiptSignedUrl,
+  receiptImageCacheKey,
 } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { isolateLTR } from '../utils/bidiText';
@@ -138,6 +139,24 @@ export default function PurchaseReportDetailsScreen() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [rootHeight, setRootHeight] = useState(0);
   const [heroHeight, setHeroHeight] = useState(0);
+  // STAGE 20: same hasLoaded-ref stale-while-refresh pattern already proven
+  // on HomeScreen/PurchaseHistoryScreen/ProfileScreen (see HomeScreen's own
+  // hasLoadedReportsRef for the full explanation) - this screen was
+  // previously missing it entirely: `loading` was set unconditionally on
+  // every focus, blanking the whole screen (image + summary + items +
+  // points) to a spinner and rebuilding it from scratch even when
+  // revisiting a report already viewed this session (e.g. History -> back
+  // -> History -> same report again, or simply backgrounding/foregrounding
+  // the app while this screen is focused).
+  const hasLoadedReportRef = useRef(false);
+  // Which report id hasLoadedReportRef's current value actually applies to.
+  // useFocusEffect re-invokes its callback on EVERY focus, not only when
+  // `id` changes, so hasLoadedReportRef cannot simply be reset at the top
+  // of that callback (that would reset it - and defeat the whole stale-
+  // while-refresh fix - on every single focus, including a focus for the
+  // SAME report). Comparing against this ref inside loadReport is what
+  // limits the reset to genuine navigations to a different report id.
+  const loadedReportIdRef = useRef(null);
 
   // Same measured-minHeight approach as HomeScreen/ProfileScreen/
   // PurchaseScreen/RewardsScreen/PurchaseHistoryScreen's dark hero + light
@@ -189,7 +208,20 @@ export default function PurchaseReportDetailsScreen() {
   // regardless. An empty result is the normal case for every report with no
   // confirmed Golden Light items yet (still pending review, or genuinely
   // zero eligible items), not an error.
-  const loadEligibleItems = useCallback((purchaseReportId, isActiveRef) => {
+  //
+  // STAGE 20: no longer preceded by an unconditional setEligibleItems([])
+  // right before this runs (see loadReport below) - that reset used to
+  // blank the already-rendered items list on every single focus, even
+  // though this fetch usually resolves to the exact same data a moment
+  // later, causing a visible flash/removal-then-reappearance of that whole
+  // section. The list now only ever changes when new data actually
+  // arrives - a real update replaces the old array directly (React
+  // reconciles the row diff), never an intermediate empty state. On error,
+  // `isInitialLoad` (passed through from loadReport) gates whether this
+  // clears to empty - a background-refresh failure keeps the last-good
+  // items list visible instead of wiping a section the user was already
+  // looking at.
+  const loadEligibleItems = useCallback((purchaseReportId, isActiveRef, isInitialLoad) => {
     getEligibleReceiptItems(purchaseReportId)
       .then((items) => {
         if (isActiveRef.current) {
@@ -197,7 +229,7 @@ export default function PurchaseReportDetailsScreen() {
         }
       })
       .catch(() => {
-        if (isActiveRef.current) {
+        if (isActiveRef.current && isInitialLoad) {
           setEligibleItems([]);
         }
       });
@@ -209,6 +241,7 @@ export default function PurchaseReportDetailsScreen() {
 
       async function loadReport() {
         if (!user?.id || !id) {
+          hasLoadedReportRef.current = false;
           setReport(null);
           setLoading(false);
           setError('');
@@ -216,8 +249,28 @@ export default function PurchaseReportDetailsScreen() {
           return;
         }
 
+        // STAGE 20: only the TRUE first load (nothing valid on screen yet)
+        // blocks with the full-screen spinner - a background refresh-on-
+        // focus (e.g. revisiting an already-viewed report) keeps showing
+        // the last-good report/image/items the whole time instead of
+        // blanking the whole screen and rebuilding it from scratch. A
+        // genuinely different report id (navigating from one report
+        // straight to another) must still start as a true first load, so
+        // hasLoadedReportRef is reset here whenever `id` no longer matches
+        // which report it was last computed for - see loadedReportIdRef's
+        // own comment above for why this can't just be reset at the top of
+        // the effect (useFocusEffect fires on every focus, not only id
+        // changes).
+        if (loadedReportIdRef.current !== id) {
+          hasLoadedReportRef.current = false;
+          loadedReportIdRef.current = id;
+        }
+        const isInitialLoad = !hasLoadedReportRef.current;
+
         try {
-          setLoading(true);
+          if (isInitialLoad) {
+            setLoading(true);
+          }
           setError('');
           setNotFound(false);
           const data = await getPurchaseReportById(id, user.id);
@@ -227,17 +280,25 @@ export default function PurchaseReportDetailsScreen() {
           }
 
           if (!data) {
+            // A real "not found" result is authoritative regardless of
+            // initial/background - never keep showing a stale report that
+            // the server just said doesn't exist (or isn't this user's).
+            hasLoadedReportRef.current = false;
             setReport(null);
             setNotFound(true);
             return;
           }
 
           setReport(data);
+          hasLoadedReportRef.current = true;
           loadImage(data, isActiveRef);
-          setEligibleItems([]);
-          loadEligibleItems(data.id, isActiveRef);
+          loadEligibleItems(data.id, isActiveRef, isInitialLoad);
         } catch (err) {
-          if (isActiveRef.current) {
+          if (isActiveRef.current && isInitialLoad) {
+            // Background-refresh failure keeps the last-good report/image/
+            // items visible (stale-while-refresh) - only the true first
+            // load, with nothing valid to fall back to, shows the error
+            // state.
             setReport(null);
             setError('לא הצלחנו לטעון את פרטי החשבונית');
           }
@@ -268,15 +329,22 @@ export default function PurchaseReportDetailsScreen() {
     getPurchaseReportById(id, user.id)
       .then((data) => {
         if (!data) {
+          hasLoadedReportRef.current = false;
           setReport(null);
           setNotFound(true);
           return;
         }
 
         setReport(data);
+        hasLoadedReportRef.current = true;
+        loadedReportIdRef.current = id;
         loadImage(data, isActiveRef);
-        setEligibleItems([]);
-        loadEligibleItems(data.id, isActiveRef);
+        // This retry only ever runs from the error state (the button is
+        // only rendered there - see the render below), so there is no
+        // valid prior eligible-items list to preserve on a repeat
+        // failure - `true` here matches that same "nothing to fall back
+        // to" reasoning loadReport uses for a genuine first load.
+        loadEligibleItems(data.id, isActiveRef, true);
       })
       .catch(() => setError('לא הצלחנו לטעון את פרטי החשבונית'))
       .finally(() => setLoading(false));
@@ -369,7 +437,7 @@ export default function PurchaseReportDetailsScreen() {
                     </View>
                   ) : imageState.status === 'ready' && imageState.url ? (
                     <Image
-                      source={{ uri: imageState.url }}
+                      source={{ uri: imageState.url, cacheKey: receiptImageCacheKey(report?.receipt_path) }}
                       style={styles.receiptImage}
                       contentFit="contain"
                       cachePolicy="memory-disk"
@@ -540,7 +608,11 @@ export default function PurchaseReportDetailsScreen() {
               the last time it was open. */}
           <View style={styles.previewBody}>
             {previewOpen && imageState.status === 'ready' && imageState.url ? (
-              <ZoomableImage uri={imageState.url} recyclingKey={report?.id} />
+              <ZoomableImage
+                uri={imageState.url}
+                recyclingKey={report?.id}
+                cacheKey={receiptImageCacheKey(report?.receipt_path)}
+              />
             ) : null}
           </View>
 

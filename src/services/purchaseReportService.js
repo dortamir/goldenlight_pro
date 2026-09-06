@@ -1,3 +1,4 @@
+import { Image } from 'expo-image';
 import { Platform } from 'react-native';
 
 import { readLocalFileAsArrayBuffer } from '../utils/localFileBytes';
@@ -352,6 +353,29 @@ export async function getEligibleReceiptItems(purchaseReportId) {
   return data || [];
 }
 
+// STAGE 20: stable expo-image cache identity for receipt images. The
+// underlying Supabase signed URL for a given receipt_path changes every
+// time it's regenerated (a fresh query string/token), but expo-image's
+// default cache identity IS the request URL itself unless a separate
+// `cacheKey` is supplied on the image source ("The cache key used to query
+// and store this specific image. If not provided, the uri is used also as
+// the cache key." - verified against the installed expo-image 57.0.2 type
+// definitions, node_modules/expo-image/build/Image.types.d.ts, before
+// writing this). Without this, a receipt whose signed URL was regenerated
+// between visits looks like a brand-new image to expo-image and gets
+// refetched/redecoded from scratch even though it's the exact same file.
+// Keying on receiptPath (already globally unique per report, already the
+// key this file's own receiptUrlCache uses) keeps the SAME expo-image
+// cache entry valid across however many different signed URLs get
+// generated for that same object, so a receipt already seen once (a Home
+// thumbnail, a History thumbnail, or the Detail screen's full image) stays
+// instantly available from expo-image's own memory/disk cache everywhere
+// else it's shown - independent of this module's own 5-minute signed-URL
+// TTL, and independent of which screen resolved it first.
+export function receiptImageCacheKey(receiptPath) {
+  return receiptPath ? `receipt:${receiptPath}` : undefined;
+}
+
 // Returns a still-valid cached signed URL for this receipt path, or null if
 // there is none/it's expired - synchronous, so a caller can skip straight
 // to rendering on a cache hit instead of showing a loading placeholder
@@ -430,4 +454,116 @@ export async function getReceiptSignedUrl(receiptPath, expiresInSeconds = RECEIP
   } finally {
     receiptUrlInflight.delete(receiptPath);
   }
+}
+
+// STAGE 21.1: the single shared place that actually warms an expo-image
+// cache entry for a receipt - extracted here because, before this, the same
+// `Image.loadAsync({ uri, cacheKey })` call was duplicated inline in
+// HomeScreen.js's loadThumbnails AND in prefetchReceiptImages below, and
+// admin (adminReportService.js) had no warming at all (see that file's own
+// STAGE 21.1 comment on loadAdminReceiptThumbnails). Every caller - customer
+// or admin, priority or background - now goes through this one function, so
+// there is exactly one place that can warm a receipt's cache entry
+// incorrectly, and exactly one place the in-flight de-dupe below applies.
+//
+// Takes an ALREADY-RESOLVED signed URL rather than a receiptPath alone -
+// resolving the URL is the caller's job (via getReceiptSignedUrl /
+// getAdminReceiptSignedUrl, whichever is appropriate for who's asking), kept
+// deliberately separate from warming so a caller that already has a fresh
+// URL (e.g. from the shared receiptUrlCache) never pays for a redundant
+// resolve just to warm the image.
+//
+// De-duped by cacheKey, not receiptPath, purely for symmetry with
+// receiptImageCacheKey's own output - two near-simultaneous callers for the
+// same receipt (e.g. a History row's priority batch and someone opening that
+// same report's Detail screen at the same moment) share the one in-flight
+// Image.loadAsync call instead of issuing two.
+//
+// Never throws - resolves to a boolean (true = warmed, false = failed) so a
+// caller can gate a "this thumbnail is genuinely ready" state on the result,
+// while still choosing to fall back to a normal <Image> network load (by
+// still exposing the URL) even when warming itself failed. See
+// adminReportService.js's loadAdminReceiptThumbnails for that exact pattern.
+//
+// STAGE 21.1 / PART G note: no separate "is this already cached?" pre-check
+// (e.g. Image.getCachePathAsync, which IS a real, verified API in the
+// installed expo-image build) was added in front of this. Image.loadAsync
+// itself already resolves from its own memory/disk cache first and only
+// hits the network on a genuine miss, so awaiting it on an already-warm
+// cacheKey is not "a mandatory network gate" - it settles immediately from
+// cache. Every caller here also already has its OWN fast path for a warm
+// receipt: a cache hit on the signed-URL cache (getCachedReceiptUrl) is
+// treated as ready without ever calling this function at all, since a URL
+// only ever lands in that cache after this function has already been
+// awaited once for it (see getReceiptSignedUrl's own callers and
+// loadAdminReceiptThumbnails below) - so a genuinely warm receipt never
+// reaches this function a second time in the first place.
+const imageWarmInflight = new Map();
+
+export function warmReceiptImage(receiptPath, signedUrl) {
+  if (!receiptPath || !signedUrl) {
+    return Promise.resolve(false);
+  }
+
+  const cacheKey = receiptImageCacheKey(receiptPath);
+  const inflight = imageWarmInflight.get(cacheKey);
+  if (inflight) {
+    return inflight;
+  }
+
+  const warmPromise = Image.loadAsync({ uri: signedUrl, cacheKey })
+    .then(() => true)
+    .catch((err) => {
+      if (__DEV__) {
+        console.warn('[Purchase] Receipt image warm failed', receiptPath, err?.message);
+      }
+      return false;
+    })
+    .finally(() => {
+      imageWarmInflight.delete(cacheKey);
+    });
+
+  imageWarmInflight.set(cacheKey, warmPromise);
+  return warmPromise;
+}
+
+// STAGE 20.1: superseded Stage 20's own Image.prefetch(url)-based version.
+// Re-investigated per the physical-device finding that prefetched images
+// weren't measurably speeding up the actual render: Image.prefetch() only
+// accepts a URL (confirmed again against the installed expo-image 57.0.2
+// type definitions, node_modules/expo-image/build/Image.d.ts) - no cacheKey
+// parameter - so it warms a cache entry keyed by the signed URL itself,
+// while every rendered receipt <Image> in this app uses the STABLE
+// `receipt:<path>` cacheKey (see receiptImageCacheKey above), a genuinely
+// different cache entry. That mismatch meant the prefetch's own network
+// fetch was real (and did warm the OS/CDN layer to some degree), but expo-
+// image itself would still treat the later render as a cache miss and
+// re-request the bytes under the correct key.
+//
+// STAGE 21.1: now delegates the actual warm to warmReceiptImage above
+// instead of calling Image.loadAsync directly - same behavior, just no
+// longer a second copy of that call.
+export async function prefetchReceiptImages(receiptPaths) {
+  if (!Array.isArray(receiptPaths) || receiptPaths.length === 0) {
+    return;
+  }
+
+  await Promise.all(
+    receiptPaths.map(async (receiptPath) => {
+      if (!receiptPath) {
+        return;
+      }
+
+      try {
+        const url = await getReceiptSignedUrl(receiptPath);
+        if (url) {
+          await warmReceiptImage(receiptPath, url);
+        }
+      } catch (err) {
+        if (__DEV__) {
+          console.warn('[Purchase] Receipt image prefetch failed', receiptPath, err?.message);
+        }
+      }
+    }),
+  );
 }

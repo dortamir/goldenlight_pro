@@ -71,6 +71,19 @@ export default function AuthLayout() {
           what actually makes React Navigation's per-screen Background
           transparent (Stack's own contentStyle/cardStyle options do not
           control it). */}
+      {/* STAGE 19.2: Stage 19.1's animation:'none' overrides on the login/
+          register routes are gone - they were a workaround for a real
+          Stack navigation between two separate screens, which still let
+          both briefly appear together on a physical device. login.js and
+          register.js now both render the SAME persistent AuthScreen
+          component (see src/screens/AuthScreen.js) with a different
+          initialMode - switching modes is a local state update inside
+          that component, never a Stack navigation, so there is no
+          transition left here to disable. Both routes still exist (deep
+          links to /login and /register both work, landing on the correct
+          starting mode) and still go through this same plain Stack with
+          its normal default animation, same as forgot-password/
+          reset-password. */}
       <Stack screenOptions={{ headerShown: false }} />
     </View>
   );

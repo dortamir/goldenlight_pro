@@ -3,40 +3,33 @@ import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
 import PointsBalanceCard from '../components/common/PointsBalanceCard';
 import { getMembershipLevelInfo } from '../constants/membershipLevels';
 import { useAuth } from '../context/AuthContext';
 import { getProfile } from '../services/profileService';
-import { getCachedReceiptUrl, getMyPurchaseReports, getReceiptSignedUrl } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { isolateLTR } from '../utils/bidiText';
-import { getCustomerReceiptStatusMeta } from '../utils/purchaseReportStatus';
 
-function isPdfFile(name) {
-  return /\.pdf$/i.test(String(name || ''));
-}
-
-// Fixed-size receipt preview container for the two side-by-side horizontal
-// recent-activity cards - width/height stay constant regardless of the
-// source image's real proportions (portrait phone photo, landscape scan,
-// screenshot, ...), see activityRowThumbnailWrap/activityRowThumbnailImage
-// below.
-const RECEIPT_IMAGE_WIDTH = 68;
-const RECEIPT_IMAGE_HEIGHT = 92;
-
+// STAGE 25: "דיווח רכישה" keeps its exact existing route/copy/icon - only
+// the second card (previously a plain "מתנות" link) changed, to emphasize
+// point redemption instead - see the render below for its slightly stronger
+// accent treatment (isRewardsAction). Both still route to already-existing
+// screens; no new backend/route was added for either.
 const quickActions = [
   {
+    key: 'report',
     title: 'דיווח רכישה',
     subtitle: 'העלאת חשבונית חדשה',
     route: '/(tabs)/purchase',
     icon: 'receipt-outline',
   },
   {
-    title: 'מתנות',
-    subtitle: 'צפייה במתנות שלך',
+    key: 'rewards',
+    title: 'למימוש הנקודות',
+    subtitle: 'למתנות ולמימוש הנקודות שלך',
     route: '/(tabs)/rewards',
     icon: 'gift-outline',
   },
@@ -55,27 +48,21 @@ export default function HomeScreen() {
   // own effects re-run the moment auth settles even in an edge case where
   // it were ever reached while still marked loading, instead of silently
   // firing a request against not-yet-fully-settled auth state.
-  const { user, loading: authLoading } = useAuth();
+  const { user, loading: authLoading, profileVersion, birthdayBonus, dismissBirthdayBonus } = useAuth();
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [reports, setReports] = useState([]);
-  const [reportsLoading, setReportsLoading] = useState(true);
-  const [reportsError, setReportsError] = useState('');
-  // STAGE 15.3: tracks whether a profile/reports fetch has ever SUCCEEDED
-  // this session, independent of React state/re-renders (a ref, not state,
-  // so it can't itself trigger a re-render or become a useCallback
-  // dependency - putting `profile`/`reports` state directly in
-  // loadProfile/loadReports' own dependency arrays would recreate those
-  // callbacks on every successful fetch, which would re-trigger
-  // useFocusEffect's own re-run-while-focused behavior and fetch in a
-  // loop). Used to distinguish the true first load (full-screen
+  // STAGE 15.3: tracks whether a profile fetch has ever SUCCEEDED this
+  // session, independent of React state/re-renders (a ref, not state, so it
+  // can't itself trigger a re-render or become a useCallback dependency -
+  // putting `profile` state directly in loadProfile's own dependency array
+  // would recreate that callback on every successful fetch, which would
+  // re-trigger useFocusEffect's own re-run-while-focused behavior and fetch
+  // in a loop). Used to distinguish the true first load (full-screen
   // spinner) from a background refresh-on-focus (last-good data stays
   // visible the whole time, per Stage 15.3's stale-while-refresh
   // requirement).
   const hasLoadedProfileRef = useRef(false);
-  const hasLoadedReportsRef = useRef(false);
-  const [previewUrls, setPreviewUrls] = useState({});
   const [rootHeight, setRootHeight] = useState(0);
   const [heroHeight, setHeroHeight] = useState(0);
 
@@ -104,9 +91,8 @@ export default function HomeScreen() {
   // the background, the normal case for a bottom-tab navigator) must see
   // their real points_balance on returning to this tab, not a stale value
   // from whenever it first mounted. Matches the exact pattern
-  // ProfileScreen.js's own profile load already uses, and the pattern
-  // recentReports already uses right below for the same reason. The
-  // backend profile/ledger remains the sole source of truth - this never
+  // ProfileScreen.js's own profile load already uses. The backend
+  // profile/ledger remains the sole source of truth - this never
   // adds/estimates points locally, only re-fetches the authoritative value.
   useFocusEffect(
     useCallback(() => {
@@ -195,122 +181,14 @@ export default function HomeScreen() {
       return () => {
         isMounted = false;
       };
-    }, [user?.id, authLoading]),
-  );
-
-  // Thumbnails are only requested for the 2 reports actually rendered in
-  // "פעילות אחרונה" (see recentReports.slice below), never the full report
-  // list - keeps this bounded to at most 2 signed-URL requests per focus,
-  // the same private-Storage pattern already used by PurchaseHistoryScreen
-  // (never getPublicUrl, never a public bucket).
-  // STAGE 15.2: no longer resets every entry to 'loading' up front - a
-  // cached signed URL (getCachedReceiptUrl, synchronous) is shown
-  // immediately as 'ready', so a report whose thumbnail was already loaded
-  // earlier this session never flashes back to a placeholder just because
-  // the user switched tabs and came back. Only genuinely uncached reports
-  // go through the 'loading' -> fetch -> 'ready'/'error' sequence.
-  const loadThumbnails = useCallback((items, isActiveRef) => {
-    items
-      .filter((report) => !isPdfFile(report.original_filename) && report.receipt_path)
-      .forEach((report) => {
-        const cachedUrl = getCachedReceiptUrl(report.receipt_path);
-        if (cachedUrl) {
-          setPreviewUrls((prev) => ({ ...prev, [report.id]: { status: 'ready', url: cachedUrl } }));
-          return;
-        }
-
-        setPreviewUrls((prev) => ({ ...prev, [report.id]: prev[report.id] ?? { status: 'loading', url: null } }));
-
-        getReceiptSignedUrl(report.receipt_path)
-          .then((url) => {
-            if (!isActiveRef.current) {
-              return;
-            }
-            setPreviewUrls((prev) => ({ ...prev, [report.id]: { status: url ? 'ready' : 'error', url } }));
-          })
-          .catch(() => {
-            if (!isActiveRef.current) {
-              return;
-            }
-            setPreviewUrls((prev) => ({ ...prev, [report.id]: { status: 'error', url: null } }));
-          });
-      });
-  }, []);
-
-  useFocusEffect(
-    useCallback(() => {
-      const isActiveRef = { current: true };
-
-      async function loadReports() {
-        if (__DEV__) {
-          console.log('[Home] Focus - loadReports start', { authLoading, hasUserId: Boolean(user?.id) });
-        }
-
-        // Same auth-readiness gate as loadProfile above - never fetch
-        // against not-yet-settled auth state, and leave reportsLoading as
-        // its current (initially true) value instead of clearing it with
-        // nothing real to show.
-        if (authLoading) {
-          if (__DEV__) {
-            console.log('[Home] loadReports deferred - auth still loading');
-          }
-          return;
-        }
-
-        if (!user?.id) {
-          hasLoadedReportsRef.current = false;
-          setReports([]);
-          setReportsLoading(false);
-          setReportsError('');
-          return;
-        }
-
-        // STAGE 15.3: same true-first-load-only spinner as loadProfile
-        // above - a background refresh keeps the last-good recent-activity
-        // list visible instead of blanking it to a spinner on every focus.
-        const isInitialLoad = !hasLoadedReportsRef.current;
-
-        try {
-          if (isInitialLoad) {
-            setReportsLoading(true);
-          }
-          setReportsError('');
-          const data = await getMyPurchaseReports(user.id);
-
-          if (isActiveRef.current) {
-            if (__DEV__) {
-              console.log('[Home] loadReports succeeded', { isInitialLoad, count: data.length });
-            }
-            setReports(data);
-            hasLoadedReportsRef.current = true;
-            loadThumbnails(data.slice(0, 2), isActiveRef);
-          }
-        } catch (err) {
-          if (isActiveRef.current) {
-            if (__DEV__) {
-              console.warn('[Home] loadReports failed', { isInitialLoad, code: err?.code, message: err?.message });
-            }
-            // Background-refresh failure keeps the last-good list visible
-            // (stale-while-refresh) - only the true first load, with
-            // nothing to fall back to, shows the error state.
-            if (isInitialLoad) {
-              setReports([]);
-              setReportsError('לא הצלחנו לטעון את הפעילות האחרונה');
-            }
-          }
-        } finally {
-          if (isActiveRef.current) {
-            setReportsLoading(false);
-          }
-        }
-      }
-
-      loadReports();
-
-      return () => {
-        isActiveRef.current = false;
-      };
-    }, [user?.id, authLoading, loadThumbnails]),
+    // STAGE 26: profileVersion is bumped by AuthContext exactly when the
+    // birthday-bonus RPC actually awards points (see that file's own
+    // comment) - included here purely as a "please re-run this fetch now"
+    // signal so Home, if already focused at that exact moment, shows the
+    // real post-bonus points_balance immediately rather than the last-
+    // fetched value. Still the same getProfile() call/cache as before, not
+    // a second data source.
+    }, [user?.id, authLoading, profileVersion]),
   );
 
   const firstName = (() => {
@@ -340,26 +218,6 @@ export default function HomeScreen() {
   const levelProgressLabel = levelInfo.nextLevel
     ? `${isolateLTR(`${levelInfo.progressInBracket} / ${levelInfo.bracketSize}`)} ל-${isolateLTR(levelInfo.nextLevel)}`
     : 'הגעתם לרמה הגבוהה ביותר';
-
-  const formatNumber = (value) => {
-    const numericValue = Number.isFinite(value) ? value : 0;
-    return numericValue.toLocaleString('he-IL');
-  };
-
-  const formatReportDate = (value) => {
-    const date = new Date(value);
-
-    if (!value || Number.isNaN(date.getTime())) {
-      return '';
-    }
-
-    const day = String(date.getDate()).padStart(2, '0');
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const year = date.getFullYear();
-    return `${day}.${month}.${year}`;
-  };
-
-  const recentReports = reports.slice(0, 2);
 
   return (
     <View style={styles.root} onLayout={onRootLayout}>
@@ -393,16 +251,60 @@ export default function HomeScreen() {
         edges={['top', 'left', 'right']}>
         <View style={styles.heroSection} onLayout={onHeroLayout}>
           <View style={styles.heroInner}>
-            <Text style={styles.greeting}>{loading ? 'טוען...' : `שלום, ${firstName}`}</Text>
-            <Text style={styles.title}>{`ברוכים הבאים ל ${isolateLTR('GOLDEN+')}`}</Text>
+            {/* STAGE 27: the personal greeting is now the visual entry point
+                of the hero - substantially larger/bolder/brighter than
+                before (see `greeting` below), sitting clearly above the
+                existing "ברוכים הבאים ל GOLDEN+" headline, which stays the
+                larger of the two (36px vs this line's 28px) so the
+                approved hierarchy (greeting -> headline -> tagline ->
+                points card) is preserved, not inverted. numberOfLines={1}
+                is a defensive addition only (an unusually long name
+                truncates instead of wrapping to a second line and growing
+                the hero) - no change to the name/personalization logic
+                itself. */}
+            <Text style={styles.greeting} numberOfLines={1}>
+              {loading ? 'טוען...' : `שלום, ${firstName}`}
+            </Text>
+            {/* STAGE 25 / 25.1: the full headline MUST stay on one line at
+                normal iPhone widths - numberOfLines={1} + adjustsFontSizeToFit
+                lets RN shrink the rendered font size (down to
+                minimumFontScale, 55% of `title`'s own 36px base = ~20px
+                floor) just enough to fit the available width instead of
+                wrapping or clipping. The base size was deliberately raised
+                (Stage 25.1) starting from a large, confident size and only
+                shrinking on narrower devices when actually needed, rather
+                than sizing down for the narrowest case up front. "GOLDEN+"
+                stays plain (no separate color/weight split) - there is no
+                existing app-wide convention for highlighting that substring
+                differently from the rest of a sentence, and inventing one
+                here would be a new typography pattern, not a reuse of an
+                existing one. */}
+            <Text style={styles.title} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.55}>
+              {`ברוכים הבאים ל ${isolateLTR('GOLDEN+')}`}
+            </Text>
             <Text style={styles.tagline}>מועדון המקצוענים של גולדן לייט</Text>
 
+            {/* STAGE 25, Part B: PointsBalanceCard itself is otherwise
+                unchanged - same data, same loading/error/retry behavior.
+                STAGE 25.2: the `meta` prop ("מתנות יופיעו בהמשך") was
+                removed entirely, not replaced - the component's own
+                conditional render (`{meta ? <Text>...</Text> : null}`)
+                means omitting it renders nothing at all, reserving no
+                vertical space, rather than leaving an empty placeholder
+                line.
+                STAGE 25.6: `style` (the component's own existing, documented
+                "optional outer style override, e.g. margin" prop - nothing
+                new added to PointsBalanceCard.js) widens just this card's
+                outer edges via pointsCardWidthOverride below, to align with
+                the light section's own wider content box - see that
+                style's own comment for the exact math. heroInner's padding
+                itself (and therefore the greeting/headline/tagline's own
+                position) is untouched. */}
             <PointsBalanceCard
               pointsBalance={pointsBalance}
               membershipLevel={safeMembershipLevel}
               progressPercent={levelInfo.progressPercent ?? 100}
               progressLabel={levelProgressLabel}
-              meta="מתנות יופיעו בהמשך"
               loading={loading}
               error={error}
               onRetry={() =>
@@ -411,6 +313,7 @@ export default function HomeScreen() {
                   .then(setProfile)
                   .catch(() => setError('לא הצלחנו לטעון את נתוני החשבון'))
               }
+              style={styles.pointsCardWidthOverride}
             />
           </View>
         </View>
@@ -423,6 +326,39 @@ export default function HomeScreen() {
             uses for the hero. */}
         <View style={[styles.sheet, sheetMinHeight ? { minHeight: sheetMinHeight } : null]}>
           <View style={styles.sheetInner}>
+            {/* STAGE 26: one-time celebratory message for the rare session
+                that actually receives the annual birthday bonus -
+                AuthContext's own birthdayBonus state, null on every other
+                visit. Dismissible; dismissing clears the context state so
+                it never reappears (not re-derived from anything stored -
+                the real once-per-year guarantee is entirely in the
+                database, see supabase/migrations/028_birthday_bonus.sql).
+                Placed here (not in the protected hero section above) as a
+                small additive, conditional card using the exact same
+                visual language as the rest of this light sheet - not a
+                redesign of Stage 25.7's own approved layout. */}
+            {birthdayBonus ? (
+              <View style={styles.birthdayBanner}>
+                <View style={styles.birthdayBannerIconWrap}>
+                  <Ionicons name="gift" size={22} color={colors.primary} />
+                </View>
+                <View style={styles.birthdayBannerTextWrap}>
+                  <Text style={styles.birthdayBannerTitle}>יום הולדת שמח! 🎉</Text>
+                  <Text style={styles.birthdayBannerBody}>
+                    {`${birthdayBonus.bonusPoints.toLocaleString('he-IL')} נקודות מתנה נוספו לחשבון שלך`}
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={dismissBirthdayBonus}
+                  accessibilityRole="button"
+                  accessibilityLabel="סגירה"
+                  hitSlop={8}
+                  style={styles.birthdayBannerClose}>
+                  <Ionicons name="close" size={18} color={colors.textMuted} />
+                </Pressable>
+              </View>
+            ) : null}
+
             <View style={styles.section}>
               <View style={styles.sectionHeaderRow}>
                 <View style={styles.sectionHeadingGroup}>
@@ -431,153 +367,116 @@ export default function HomeScreen() {
                 </View>
               </View>
               <View style={styles.actionsRow}>
-                {quickActions.map((action) => (
-                  <Pressable
-                    key={action.title}
-                    style={({ pressed }) => [styles.actionCard, pressed && styles.actionCardPressed]}
-                    onPress={() => router.push(action.route)}>
-                    <View style={styles.actionIconWrap}>
-                      <Ionicons name={action.icon} size={20} color={colors.primary} />
-                    </View>
-                    <Text style={styles.actionTitle}>{action.title}</Text>
-                    <Text style={styles.actionSubtitle}>{action.subtitle}</Text>
-                  </Pressable>
-                ))}
-              </View>
-            </View>
-
-            <View style={styles.section}>
-              <View style={styles.sectionHeaderRow}>
-                <View style={styles.sectionHeadingGroup}>
-                  <Text style={[styles.sectionLabel, styles.sectionTitle]}>פעילות אחרונה</Text>
-                  <View style={styles.sectionAccentDot} />
-                </View>
-                <Pressable
-                  onPress={() => router.push('/(tabs)/activity')}
-                  accessibilityRole="link"
-                  style={styles.viewAllRow}
-                  hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}>
-                  <Ionicons name="chevron-back" size={18} color={colors.primary} style={styles.viewAllIcon} />
-                  <Text style={[styles.sectionLabel, styles.viewAllText]}>לכל הפעילות</Text>
-                </Pressable>
-              </View>
-              {reportsLoading ? (
-                <View style={styles.activityCard}>
-                  <View style={styles.activityLoadingWrap}>
-                    <ActivityIndicator color={colors.primary} size="small" />
-                  </View>
-                </View>
-              ) : reportsError ? (
-                <View style={styles.activityCard}>
-                  <View style={styles.activityInfo}>
-                    <Text style={styles.activityErrorText}>{reportsError}</Text>
+                {quickActions.map((action) => {
+                  return (
                     <Pressable
-                      onPress={() =>
-                        user?.id &&
-                        getMyPurchaseReports(user.id)
-                          .then((data) => {
-                            setReports(data);
-                            setReportsError('');
-                            loadThumbnails(data.slice(0, 2), { current: true });
-                          })
-                          .catch(() => setReportsError('לא הצלחנו לטעון את הפעילות האחרונה'))
-                      }>
-                      <Text style={styles.retryText}>נסו שוב</Text>
+                      key={action.key}
+                      style={({ pressed }) => [styles.actionCard, pressed && styles.actionCardPressed]}
+                      onPress={() => router.push(action.route)}>
+                      {/* STAGE 25.7: the "למימוש הנקודות" card's own accent
+                          icon-badge treatment (solid teal bg + white icon)
+                          was removed - both quick-action cards now share the
+                          exact same actionIconWrap style (soft-tint bg +
+                          teal icon), same icon size, same badge dimensions/
+                          radius, matching "דיווח רכישה" exactly. */}
+                      <View style={styles.actionIconWrap}>
+                        <Ionicons name={action.icon} size={20} color={colors.primary} />
+                      </View>
+                      <Text style={styles.actionTitle}>{action.title}</Text>
+                      <Text style={styles.actionSubtitle}>{action.subtitle}</Text>
                     </Pressable>
-                  </View>
-                </View>
-              ) : recentReports.length === 0 ? (
-                <View style={styles.activityCard}>
-                  <View style={styles.activityInfo}>
-                    <Text style={styles.activityTitle}>אין פעילות אחרונה להצגה</Text>
-                    <Text style={styles.activitySubtitle}>הפעילות תופיע כאן לאחר אישורים חדשים</Text>
-                  </View>
-                </View>
-              ) : (
-                <View style={styles.activityList}>
-                  {recentReports.map((report) => {
-                    const statusMeta = getCustomerReceiptStatusMeta(report.status);
-                    const showPoints = report.status === 'approved' && report.points_awarded > 0;
-                    const isPdf = isPdfFile(report.original_filename);
-                    const preview = previewUrls[report.id];
-
-                    return (
-                      <Pressable
-                        key={report.id}
-                        style={({ pressed }) => [styles.activityRow, pressed && styles.activityRowPressed]}
-                        onPress={() =>
-                          router.push({ pathname: '/(tabs)/activity/[id]', params: { id: report.id, from: 'home' } })
-                        }
-                        accessibilityRole="button"
-                        accessibilityLabel="פתיחת פרטי חשבונית">
-                        {/* Image on the RIGHT, info on the LEFT: this is the
-                            first JSX child inside a row-reverse container,
-                            which places it at the visual end (right) of the
-                            row explicitly, rather than relying on default
-                            browser/OS direction behavior. */}
-                        <View style={styles.activityRowThumbnailWrap}>
-                          {isPdf ? (
-                            <View style={styles.activityRowPlaceholder}>
-                              <Text style={styles.activityRowPlaceholderText}>{isolateLTR('PDF')}</Text>
-                            </View>
-                          ) : preview?.status === 'ready' && preview.url ? (
-                            <Image
-                              source={{ uri: preview.url }}
-                              style={styles.activityRowThumbnailImage}
-                              contentFit="contain"
-                              cachePolicy="memory-disk"
-                              recyclingKey={report.id}
-                              transition={100}
-                            />
-                          ) : preview?.status === 'loading' ? (
-                            <View style={styles.activityRowPlaceholder}>
-                              <ActivityIndicator color={colors.primary} size="small" />
-                            </View>
-                          ) : (
-                            <View style={styles.activityRowPlaceholder}>
-                              <Text style={styles.activityRowPlaceholderText}>חשבונית</Text>
-                            </View>
-                          )}
-                        </View>
-
-                        <View style={styles.activityRowInfo}>
-                          <Text style={styles.activityRowTitle} numberOfLines={1}>חשבונית</Text>
-                          <Text style={styles.activityRowDate} numberOfLines={1}>
-                            {isolateLTR(formatReportDate(report.created_at))}
-                          </Text>
-
-                          <View style={[styles.statusBadge, { backgroundColor: statusMeta.backgroundColor }]}>
-                            <Text style={[styles.statusBadgeText, { color: statusMeta.textColor }]} numberOfLines={1}>
-                              {statusMeta.label}
-                            </Text>
-                          </View>
-
-                          {showPoints ? (
-                            <Text style={styles.activityPoints} numberOfLines={1}>
-                              {`+${isolateLTR(formatNumber(report.points_awarded))} נק׳`}
-                            </Text>
-                          ) : null}
-                        </View>
-                      </Pressable>
-                    );
-                  })}
-                  {/* STAGE 16.1: when there's only one recent report,
-                      activityRow's own flex:1 (needed so two real cards
-                      split the row evenly, matching actionsRow's 2-column
-                      grid above) has nothing to share the row with - a
-                      lone flex:1 child fills the whole row by itself. This
-                      invisible spacer keeps the same flex:1 sizing math
-                      active with two children again, so the one real card
-                      gets EXACTLY the same width/height as either card in
-                      the two-report layout, leaving the second slot empty
-                      instead of stretching into it - never a second visual
-                      design for the one-item case. */}
-                  {recentReports.length === 1 ? (
-                    <View style={styles.activityRowEmpty} pointerEvents="none" />
-                  ) : null}
-                </View>
-              )}
+                  );
+                })}
+              </View>
             </View>
+
+            {/* STAGE 25, Part F-J: replaces the old "פעילות אחרונה" section
+                (heading, "לכל הפעילות" link, two receipt-thumbnail cards)
+                entirely with one wide image-based card leading to the same
+                existing history route ("/(tabs)/activity", exactly what
+                "לכל הפעילות" used to push) - no new route, no duplicated
+                screen. The whole card is the one accessible action (a
+                single accessibilityLabel covering both the heading and the
+                CTA's meaning) - the CTA pill below is purely decorative
+                text/icon, not a second nested Pressable, so no duplicate
+                accessibility target is announced. */}
+            <Pressable
+              onPress={() => router.push('/(tabs)/activity')}
+              style={({ pressed }) => [styles.historyHero, pressed && styles.historyHeroPressed]}
+              accessibilityRole="button"
+              accessibilityLabel="היסטוריית הרכישות, מעבר לצפייה בחשבוניות ובדיווחים">
+              {/* STAGE 25, Part G: local decorative asset - see
+                  src/assets/images/purchase-history-hero.png. No remote URL,
+                  no runtime fetch; contentFit="cover" fills this card's
+                  fixed aspect-ratio box without distortion. */}
+              <Image
+                source={require('../assets/images/purchase-history-hero.png')}
+                style={styles.historyHeroImage}
+                contentFit="cover"
+              />
+              <LinearGradient
+                colors={['transparent', 'rgba(6, 10, 10, 0.92)']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 0, y: 1 }}
+                style={styles.historyHeroOverlay}
+                pointerEvents="none"
+              />
+              <View style={styles.historyHeroContent} pointerEvents="none">
+                <Text style={styles.historyHeroTitle}>היסטוריית הרכישות</Text>
+                <Text style={styles.historyHeroSubtitle}>לצפייה בחשבוניות ובדיווחים שלך</Text>
+                <View style={styles.historyHeroCta}>
+                  <Text style={styles.historyHeroCtaText}>להיסטוריית הרכישות</Text>
+                  <Ionicons name="chevron-back" size={14} color={colors.primary} />
+                </View>
+              </View>
+            </Pressable>
+
+            {/* STAGE 25.7: richer promotional banner - a purely
+                informational block, still not a Pressable (no onPress
+                anywhere in it), no route, no backend call, no new business
+                logic. "למימוש הנקודות" (the quick action above) remains the
+                one real action toward Rewards. Uses only existing Ionicons
+                + styled Views for the decorative reward area - no new image
+                asset, no new dependency. Same overall width as the
+                purchase-history hero above (both are plain children of
+                sheetInner, width:'100%' by default, no explicit override on
+                either), so their left/right edges already align. */}
+            <LinearGradient
+              colors={[colors.primarySoft, colors.white]}
+              start={{ x: 0.05, y: 0 }}
+              end={{ x: 0.95, y: 1 }}
+              style={styles.motivationBanner}>
+              <View style={styles.motivationBannerTopRow}>
+                <View style={styles.motivationBannerTextWrap}>
+                  <Text style={styles.motivationBannerTitle}>
+                    {'🎁 כל קנייה משתלמת יותר עם '}
+                    <Text style={styles.motivationBannerTitleAccent}>{isolateLTR('Golden Light')}</Text>
+                    {'!'}
+                  </Text>
+                  <Text style={styles.motivationBannerBody}>
+                    המשיכו לצבור נקודות על כל רכישה של מוצרי Golden Light והמירו אותן למתנות, הטבות ופרסים שווים
+                    במיוחד.
+                  </Text>
+                </View>
+
+                {/* Decorative reward area - a larger gift badge with a small
+                    overlapping sparkle accent, built entirely from existing
+                    Ionicons + styled Views (no illustration asset). */}
+                <View style={styles.motivationBannerGiftArea}>
+                  <View style={styles.motivationBannerGiftBadge}>
+                    <Ionicons name="gift" size={32} color={colors.primary} />
+                  </View>
+                  <View style={styles.motivationBannerSparkleBadge}>
+                    <Ionicons name="sparkles" size={12} color={colors.primaryPressed} />
+                  </View>
+                </View>
+              </View>
+
+              <View style={styles.motivationBannerFooter}>
+                <Ionicons name="sparkles" size={13} color={colors.primaryPressed} />
+                <Text style={styles.motivationBannerFooterText}>קונים וצוברים נקודות — ממשיכים ליהנות!</Text>
+              </View>
+            </LinearGradient>
           </View>
         </View>
       </AppScreen>
@@ -616,7 +515,11 @@ root: {
     flexGrow: 1,
   },
   heroSection: {
-    paddingTop: spacing.sm,
+    // STAGE 25, Part A: a touch more top breathing room than before
+    // (spacing.sm -> spacing.md), matching the larger welcome block below -
+    // deliberately modest, not an oversized hero (Part A's own "do not make
+    // the top excessively tall").
+    paddingTop: spacing.md,
     // Extra bottom padding absorbs the sheet's negative marginTop overlap
     // below, so the rounded corners never cut into the points card.
     paddingBottom: spacing.xxl + radius.xl,
@@ -627,27 +530,75 @@ root: {
     alignSelf: 'center',
     paddingHorizontal: spacing.lg,
   },
+  // STAGE 25.6: heroInner (spacing.lg = 16px horizontal padding) and
+  // sheetInner (spacing.md = 12px) share the exact same maxWidth:480,
+  // alignSelf:'center' outer box, but use different padding - which was the
+  // actual, sole cause of the points card (a plain block that stretches to
+  // fill heroInner's own content width, same as the greeting/title/tagline
+  // Text elements above it) rendering 4px narrower on each side than the
+  // light section's own content. Rather than reducing heroInner's own
+  // padding (which would also shift the welcome text's position/wrapping -
+  // explicitly not wanted this stage), this negative margin - applied only
+  // to the card via its own existing `style` prop - pulls just the card's
+  // outer edges out by that same 4px on each side, landing it exactly on
+  // sheetInner's own content edges: card left edge = heroInner's content
+  // left (spacing.lg) minus 4 = spacing.md, matching sheetInner's own left
+  // padding precisely (and symmetrically on the right) - a relative,
+  // token-derived value, not a hardcoded pixel width, so it stays correct
+  // at any screen width.
+  pointsCardWidthOverride: {
+    marginHorizontal: -(spacing.lg - spacing.md),
+  },
+  // STAGE 25.1: fontSize 17 -> 18, still clearly the smallest/most muted
+  // line of the three, but large enough to read as a real opening line
+  // rather than a caption.
+  // STAGE 27: fontSize 18 -> 28, fontWeight 600 -> 800 - this line is now
+  // the screen's true visual entry point, clearly stronger than before,
+  // while still staying smaller than `title` below it (36px) so the
+  // approved greeting -> headline -> tagline -> points-card hierarchy reads
+  // correctly rather than the two lines competing. marginBottom trimmed
+  // 8 -> 4 to absorb most of the added line height, so the hero's overall
+  // height grows only modestly rather than by the full ~10px fontSize
+  // increase.
+  // STAGE 27.1: color textOnDark (white) -> primary (the app's own
+  // turquoise brand token, already used throughout for accents/CTAs) - the
+  // greeting is now immediately recognizable in the brand color against the
+  // dark hero, per this stage's explicit request. Size/weight/spacing all
+  // unchanged from Stage 27.
   greeting: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: colors.mutedOnDark,
+    fontSize: 28,
+    lineHeight: 34,
+    fontWeight: '800',
+    letterSpacing: -0.2,
+    color: colors.primary,
     textAlign: 'right',
     marginBottom: 4,
   },
+  // STAGE 25.1: fontSize 32 -> 36, letterSpacing added - clearly larger and
+  // bolder, the real hero headline of the screen. fontWeight stays '800'
+  // (the app's reserved maximum weight, otherwise only used for hero/
+  // display numerals - already adopted for this in Stage 25).
+  // numberOfLines/adjustsFontSizeToFit/minimumFontScale (see the render
+  // above) are what keep "ברוכים הבאים ל GOLDEN+" on one line at every
+  // supported width instead of wrapping.
   title: {
-    fontSize: 24,
-    lineHeight: 30,
-    fontWeight: '700',
+    fontSize: 36,
+    lineHeight: 42,
+    fontWeight: '800',
+    letterSpacing: -0.3,
     color: colors.textOnDark,
     textAlign: 'right',
   },
+  // STAGE 25.1: fontSize 15 -> 16, marginTop/marginBottom both nudged up
+  // slightly for a touch more breathing room before the points card, on
+  // top of Stage 25's own spacing.xl -> spacing.xxl increase.
   tagline: {
-    fontSize: 13,
+    fontSize: 16,
     fontWeight: '500',
     color: colors.mutedOnDark,
     textAlign: 'right',
-    marginTop: 4,
-    marginBottom: spacing.xl,
+    marginTop: 8,
+    marginBottom: spacing.xxl + spacing.xs,
   },
   sheet: {
     flex: 1,
@@ -656,7 +607,7 @@ root: {
     borderTopRightRadius: radius.xl,
     marginTop: -radius.xl,
   },
-  // Larger gap BETWEEN sections (quick actions vs. recent activity) than
+  // Larger gap BETWEEN sections (quick actions vs. the history hero) than
   // within one (see `section` below, heading-to-content) - the hierarchy
   // the heading/content spacing is meant to express.
   sheetInner: {
@@ -667,6 +618,51 @@ root: {
     paddingTop: spacing.xl,
     paddingBottom: spacing.xxl,
     gap: spacing.lg,
+  },
+  // STAGE 26: one-time celebratory banner - same white/border/softCard
+  // card language as the quick-action cards below it, not a new visual
+  // system.
+  birthdayBanner: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.sm,
+    backgroundColor: colors.white,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    ...shadows.softCard,
+  },
+  birthdayBannerIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  birthdayBannerTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  birthdayBannerTitle: {
+    fontSize: typography.body.fontSize,
+    fontWeight: '700',
+    color: colors.text,
+    textAlign: 'right',
+  },
+  birthdayBannerBody: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '500',
+    color: colors.textMuted,
+    textAlign: 'right',
+  },
+  birthdayBannerClose: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   // Smaller internal gap - the heading feels directly connected to its own
   // content, distinct from the larger between-section gap above.
@@ -683,8 +679,6 @@ root: {
     alignItems: 'center',
     gap: spacing.xs,
   },
-  // Shared by sectionTitle and viewAllText below (same fontSize/fontWeight/
-  // lineHeight - only color differs, since "לכל הפעילות" is interactive).
   sectionLabel: {
     fontSize: 18,
     fontWeight: '700',
@@ -701,29 +695,6 @@ root: {
     height: 6,
     borderRadius: 3,
     backgroundColor: colors.primary,
-  },
-  retryText: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '700',
-    color: colors.primary,
-    textAlign: 'right',
-  },
-  // No minHeight:44 here - the 44px touch target comes from the
-  // Pressable's hitSlop instead (see JSX), so it doesn't add invisible
-  // layout height that would push the heading-to-content gap out wider
-  // than intended.
-  viewAllRow: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    gap: 2,
-    paddingHorizontal: spacing.xs,
-  },
-  viewAllIcon: {
-    marginTop: 1,
-  },
-  viewAllText: {
-    color: colors.primary,
-    textAlign: 'right',
   },
   actionsRow: {
     flexDirection: 'row-reverse',
@@ -749,6 +720,9 @@ root: {
     borderColor: colors.primary,
     opacity: 0.97,
   },
+  // STAGE 25.7: both quick-action cards now share this exact same icon-
+  // badge treatment - the "למימוש הנקודות" card's own solid-teal accent
+  // variant (Stage 25, Part D) was removed at the user's request.
   actionIconWrap: {
     width: 40,
     height: 40,
@@ -771,171 +745,168 @@ root: {
     textAlign: 'right',
     marginTop: spacing.xs,
   },
-  activityCard: {
-    backgroundColor: colors.white,
+  // STAGE 25, Part F: landscape hero card, ~1.8:1 (within the requested
+  // 1.7-2:1 range) - width:'100%' of sheetInner, which is itself capped at
+  // maxWidth:480 and centered, so this never grows "absurdly tall" on
+  // tablet/web (Part O) - it's bounded by the exact same column every other
+  // Home content already uses.
+  historyHero: {
+    width: '100%',
+    aspectRatio: 1.8,
     borderRadius: radius.lg,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    ...shadows.softCard,
-  },
-  activityInfo: {
-    flex: 1,
-    alignItems: 'flex-end',
-  },
-  activityTitle: {
-    fontSize: typography.body.fontSize,
-    fontWeight: '700',
-    color: colors.text,
-    textAlign: 'right',
-  },
-  activitySubtitle: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '500',
-    color: colors.textMuted,
-    textAlign: 'right',
-    marginTop: spacing.xs,
-  },
-  // Two cards side by side, sharing the EXACT same row/gap system as
-  // actionsRow above (not a separately invented width calculation), so the
-  // two rows of cards align into one consistent 2-column grid. row-reverse
-  // so the first-rendered (most recent) report lands on the right, matching
-  // RTL reading order.
-  activityList: {
-    flexDirection: 'row-reverse',
-    gap: spacing.md,
-    alignItems: 'stretch',
-  },
-  // flex:1 (matching actionCard's own flex:1 below) gives both cards the
-  // same width as the Quick Action cards automatically, without measuring
-  // anything. image-right/info-left internally via row-reverse - first JSX
-  // child (thumbnail) lands at the visual right, second (info block) at the
-  // visual left - explicit RTL order, not incidental browser/OS direction.
-  // justifyContent:'center' (paired with activityRowInfo NOT being flex:1
-  // below) is what makes the image+info group read as one centered unit
-  // rather than the image sitting on the border with info stretched flush
-  // to the opposite edge.
-  activityRow: {
-    flex: 1,
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.white,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
-    // Kept thin - at the narrowest supported width (360px, ~142px card)
-    // every extra pixel here comes straight out of the info column's text
-    // budget. The "not edge-flush" feel comes from justifyContent:'center'
-    // + activityRowInfo no longer being flex:1 (so the image+info group is
-    // only as wide as it needs to be and centers with room on both sides),
-    // not from padding size.
-    paddingHorizontal: spacing.xs,
-    paddingVertical: spacing.sm,
-    gap: spacing.lg,
-    minHeight: 122,
-    ...shadows.softCard,
-  },
-  activityRowPressed: {
-    opacity: 0.85,
-  },
-  // STAGE 16.1: invisible spacer for the one-recent-report case - see the
-  // render comment above. flex:1 only, matching activityRow's own flex:1,
-  // no background/border/content, so it takes up the second slot's space
-  // without ever being visible or interactive.
-  activityRowEmpty: {
-    flex: 1,
-  },
-  // Fixed-size container (not tied to the image's real aspect ratio) - the
-  // CONTAINER dictates the box, and the image (resizeMode="contain" below)
-  // scales down to fit inside it however it needs to, so a receipt's real
-  // proportions (portrait phone photo, landscape scan, screenshot, ...)
-  // never get stretched or cropped, at the cost of some empty letterboxing
-  // space - an acceptable trade-off for a homescreen preview.
-  activityRowThumbnailWrap: {
-    width: RECEIPT_IMAGE_WIDTH,
-    height: RECEIPT_IMAGE_HEIGHT,
-    borderRadius: radius.sm,
     overflow: 'hidden',
+    backgroundColor: colors.charcoal,
     borderWidth: 1,
     borderColor: colors.border,
-    backgroundColor: colors.surfaceMuted,
+    ...shadows.softCard,
+  },
+  historyHeroPressed: {
+    opacity: 0.92,
+  },
+  historyHeroImage: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  // STAGE 25, Part H: a restrained top-transparent -> bottom-dark gradient,
+  // not a flat opaque layer - the image stays visible through most of the
+  // card; only the lower portion (where the text sits) darkens enough for
+  // white text to stay readable.
+  historyHeroOverlay: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  historyHeroContent: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    padding: spacing.lg,
+  },
+  historyHeroTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: colors.textOnDark,
+    textAlign: 'right',
+  },
+  historyHeroSubtitle: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: colors.mutedOnDark,
+    textAlign: 'right',
+    marginTop: 4,
+    marginBottom: spacing.md,
+  },
+  // STAGE 25, Part H: compact outlined/teal-accent CTA - a soft-teal-tinted
+  // pill with a teal border, reading as "integrated into the card" rather
+  // than a separate solid white button sitting on top of a photo.
+  historyHeroCta: {
+    flexDirection: 'row-reverse',
     alignItems: 'center',
-    justifyContent: 'center',
+    alignSelf: 'flex-end',
+    gap: 4,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: 'rgba(46, 196, 199, 0.16)',
   },
-  activityRowThumbnailImage: {
-    width: '100%',
-    height: '100%',
-  },
-  activityRowPlaceholder: {
-    width: '100%',
-    height: '100%',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.surfaceMuted,
-  },
-  activityRowPlaceholderText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: colors.textMuted,
-    textAlign: 'center',
-  },
-  // No flex:1 here (unlike the previous full-width version) - sizing to its
-  // own natural content width, instead of stretching to fill the card, is
-  // what lets activityRow's justifyContent:'center' actually center the
-  // image+info group as one unit. flexShrink:1 is a safety net: if a card
-  // ever ends up narrower than the natural content needs, this lets the
-  // column shrink rather than overflow the card (numberOfLines on each
-  // Text below then truncates gracefully instead of clipping the layout).
-  activityRowInfo: {
-    flexShrink: 1,
-    alignItems: 'flex-end',
-  },
-  activityRowTitle: {
+  historyHeroCtaText: {
     fontSize: 13,
     fontWeight: '700',
+    color: colors.primary,
+  },
+  // STAGE 25.7: richer promotional banner below the history hero - a
+  // subtle two-stop gradient (colors.primarySoft -> colors.white, both
+  // existing tokens, no new palette) reading as a premium "rewards card"
+  // rather than a flat fill, a soft teal-tinted border (a local rgba value
+  // scoped to just this style, not a new shared theme token), and the same
+  // restrained shadow every other Home card uses. Same width as the
+  // purchase-history hero above (see the render's own comment).
+  motivationBanner: {
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: 'rgba(46, 196, 199, 0.35)',
+    paddingHorizontal: 20,
+    paddingVertical: 20,
+    gap: spacing.lg,
+    ...shadows.softCard,
+  },
+  motivationBannerTopRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  motivationBannerTextWrap: {
+    flex: 1,
+    gap: 6,
+  },
+  motivationBannerTitle: {
+    fontSize: 18,
+    lineHeight: 24,
+    fontWeight: '800',
     color: colors.text,
     textAlign: 'right',
   },
-  activityRowDate: {
-    fontSize: 10,
+  // The "Golden Light" accent within the title (see the render's nested
+  // Text) - same size/weight as the surrounding title, only the color
+  // changes, so it reads as emphasis rather than a separate heading.
+  motivationBannerTitleAccent: {
+    color: colors.primaryPressed,
+  },
+  motivationBannerBody: {
+    fontSize: 14,
+    lineHeight: 20,
     fontWeight: '500',
     color: colors.textMuted,
     textAlign: 'right',
-    marginTop: 2,
   },
-  activityLoadingWrap: {
-    minHeight: 64,
-    justifyContent: 'center',
+  // Decorative reward area - fixed-size, flexShrink: 0 so it never
+  // squeezes the text column; the surrounding 84x84 box gives the small
+  // overlapping sparkle badge room to sit outside the main 72x72 gift
+  // badge without being clipped.
+  motivationBannerGiftArea: {
+    width: 84,
+    height: 84,
     alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
   },
-  activityErrorText: {
-    fontSize: typography.body.fontSize,
-    fontWeight: '700',
-    color: colors.error,
-    textAlign: 'right',
+  motivationBannerGiftBadge: {
+    width: 72,
+    height: 72,
+    borderRadius: 26,
+    backgroundColor: colors.white,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(46, 196, 199, 0.25)',
+    ...shadows.sm,
   },
-  statusBadge: {
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.xs,
-    paddingVertical: 3,
+  motivationBannerSparkleBadge: {
+    position: 'absolute',
+    top: 2,
+    left: 2,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: colors.white,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...shadows.sm,
+  },
+  // STAGE 25.7, Part 7: a small non-interactive pill reinforcing the
+  // purchase -> points -> reward loop - never a button (no onPress
+  // anywhere on it), just a subtle highlighted row under the main text.
+  motivationBannerFooter: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
     alignSelf: 'flex-end',
-    marginTop: 4,
+    gap: 6,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+    borderRadius: radius.pill,
+    backgroundColor: colors.white,
   },
-  statusBadgeText: {
-    fontSize: 10,
+  motivationBannerFooterText: {
+    fontSize: 12,
     fontWeight: '700',
-    textAlign: 'center',
-  },
-  activityPoints: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: colors.success,
-    textAlign: 'right',
-    marginTop: 2,
+    color: colors.primaryPressed,
   },
 });

@@ -44,7 +44,23 @@ export default function AuthScreenShell({
 }) {
   return (
     <View style={styles.root}>
-      <AppScreen backgroundColor="transparent">
+      {/* STAGE 19: `contentContainerStyle` overrides AppScreen's own default
+          ScrollView contentContainer (which centers its content vertically
+          - `justifyContent: 'center'`, `alignItems: 'center'` - useful for
+          most AppScreen callers, but here it was the actual root cause of
+          the Login<->Register "page jump": AppScreen centers the WHOLE
+          hero+card block as one unit whenever it's shorter than the
+          viewport, so the block's top edge (logo, title, segmented
+          control) moves up/down depending on the CARD's own height -
+          taller on Register (5 fields) than Login (2 fields). Overriding
+          justifyContent to 'flex-start' here (and keeping every other
+          default: flexGrow/paddingHorizontal/paddingVertical/alignItems)
+          makes the block start at the SAME fixed offset from the top on
+          both screens - natural document flow, with the ScrollView still
+          free to scroll for whichever screen's content is taller than the
+          viewport (Register on a small device). AppScreen.js itself is
+          untouched - every OTHER caller keeps the centered default. */}
+      <AppScreen backgroundColor="transparent" contentContainerStyle={styles.screenContentContainer}>
         <View style={styles.screenContent}>
           {backFallbackRoute ? (
             <AppBackButton
@@ -95,10 +111,20 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
   },
+  // STAGE 19: mirrors AppScreen's own default contentContainer values
+  // (paddingHorizontal/paddingVertical: spacing.xl) so nothing else shifts
+  // - only `justifyContent` changes, from 'center' to 'flex-start'. See
+  // the render's own comment above for the full root-cause explanation.
+  screenContentContainer: {
+    flexGrow: 1,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.xl,
+    justifyContent: 'flex-start',
+    alignItems: 'center',
+  },
   screenContent: {
     flex: 1,
     width: '100%',
-    justifyContent: 'center',
     position: 'relative',
   },
   // Top-right, same position every other secondary screen's back button

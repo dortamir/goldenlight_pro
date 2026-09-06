@@ -10,6 +10,7 @@ import AppBackButton from '../components/common/AppBackButton';
 import AppCard from '../components/common/AppCard';
 import AppInput from '../components/common/AppInput';
 import AppScreen from '../components/common/AppScreen';
+import DateOfBirthPicker from '../components/common/DateOfBirthPicker';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
 import {
@@ -43,6 +44,18 @@ export default function EditProfileScreen() {
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
   const [profession, setProfession] = useState('');
+  // STAGE 26: dateOfBirth mirrors the loaded profile's real value
+  // ('YYYY-MM-DD' or ''). originalDateOfBirth is captured once, at load
+  // time, and never updated afterward - it is what decides whether the
+  // field renders as an editable DateOfBirthPicker (only ever true for a
+  // customer whose birthday was NULL when this screen loaded) or a locked,
+  // read-only value. This mirrors - but does not replace - the real
+  // enforcement: supabase/migrations/028_birthday_bonus.sql's
+  // profiles_prevent_date_of_birth_change trigger rejects any UPDATE that
+  // changes an already-non-null date_of_birth at the database level
+  // regardless of what this screen does or doesn't render.
+  const [dateOfBirth, setDateOfBirth] = useState('');
+  const [originalDateOfBirth, setOriginalDateOfBirth] = useState('');
   const [fieldErrors, setFieldErrors] = useState({});
   const [saveError, setSaveError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
@@ -93,6 +106,8 @@ export default function EditProfileScreen() {
         setFullName(data?.full_name || '');
         setPhone(data?.phone || '');
         setProfession(data?.profession || '');
+        setDateOfBirth(data?.date_of_birth || '');
+        setOriginalDateOfBirth(data?.date_of_birth || '');
 
         const avatarPath = data?.avatar_path || null;
 
@@ -197,6 +212,18 @@ export default function EditProfileScreen() {
       nextFieldErrors.phone = 'יש להזין מספר טלפון';
     }
 
+    // STAGE 26: only ever validated/sent when the birthday is being set for
+    // the FIRST time (originalDateOfBirth was empty on load) - once a real
+    // value exists, the field renders read-only below and dateOfBirth can
+    // never differ from originalDateOfBirth.
+    const isSettingBirthdayNow = !originalDateOfBirth && Boolean(dateOfBirth);
+    if (isSettingBirthdayNow) {
+      const todayIso = new Date().toISOString().slice(0, 10);
+      if (dateOfBirth > todayIso) {
+        nextFieldErrors.dateOfBirth = 'תאריך הלידה אינו יכול להיות בעתיד';
+      }
+    }
+
     setFieldErrors(nextFieldErrors);
     setSaveError('');
     setSuccessMessage('');
@@ -218,6 +245,10 @@ export default function EditProfileScreen() {
         phone: trimmedPhone,
         profession: trimmedProfession || null,
       };
+
+      if (isSettingBirthdayNow) {
+        profileUpdates.date_of_birth = dateOfBirth;
+      }
 
       if (pickedAsset) {
         const newAvatarPath = await uploadProfileAvatar(user.id, pickedAsset);
@@ -373,6 +404,30 @@ export default function EditProfileScreen() {
                     error={fieldErrors.phone}
                     style={styles.input}
                   />
+
+                  {/* STAGE 26: editable only while no birthday is on file
+                      yet - once set, it is permanently locked (see
+                      028_birthday_bonus.sql's own trigger), so it is shown
+                      here as a plain read-only value instead of an input a
+                      customer could mistakenly believe they can change. */}
+                  {originalDateOfBirth ? (
+                    <View style={styles.birthdayReadOnlyWrapper}>
+                      <Text style={styles.birthdayReadOnlyLabel}>תאריך לידה</Text>
+                      <Text style={styles.birthdayReadOnlyValue}>
+                        {isolateLTR((() => {
+                          const [year, month, day] = originalDateOfBirth.split('-');
+                          return `${day}/${month}/${year}`;
+                        })())}
+                      </Text>
+                    </View>
+                  ) : (
+                    <DateOfBirthPicker
+                      value={dateOfBirth}
+                      onChange={setDateOfBirth}
+                      error={fieldErrors.dateOfBirth}
+                      style={styles.input}
+                    />
+                  )}
 
                   <AppInput
                     label="מקצוע"
@@ -575,6 +630,31 @@ const styles = StyleSheet.create({
   // Soft muted box (not just a divided row) - subtly distinguishes this
   // read-only field from the editable AppInput fields above it, without
   // reading as a broken/disabled input.
+  // STAGE 26: same "read-only box" treatment as emailWrapper below - a
+  // birthday that's already on file is permanently locked (see the
+  // render's own comment), so it's styled identically to the other
+  // non-editable field on this screen rather than inventing a new pattern.
+  birthdayReadOnlyWrapper: {
+    alignItems: 'flex-end',
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  birthdayReadOnlyLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.textMuted,
+    textAlign: 'right',
+  },
+  birthdayReadOnlyValue: {
+    fontSize: typography.caption.fontSize,
+    fontWeight: '600',
+    color: colors.text,
+    textAlign: 'right',
+    marginTop: 4,
+  },
   emailWrapper: {
     alignItems: 'flex-end',
     backgroundColor: colors.surfaceMuted,
