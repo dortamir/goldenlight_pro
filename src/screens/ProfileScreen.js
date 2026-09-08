@@ -588,9 +588,16 @@ export default function ProfileScreen() {
 }
 
 const styles = StyleSheet.create({
+  // Matches heroGradient's own END color (colors.charcoal), the same fix
+  // confirmed on the physically-approved RewardsScreen.js and Stage 28.7's
+  // dark-hero secondary screens - not colors.background (the app's default
+  // light surface). heroGradient is an absolute-fill decorative layer; if
+  // it is ever not yet painted for even one frame, root's own background is
+  // what actually shows behind it. Purely a fallback color - no layout,
+  // spacing, or content change.
   root: {
     flex: 1,
-    backgroundColor: colors.background,
+    backgroundColor: colors.charcoal,
   },
   heroGradient: {
     ...StyleSheet.absoluteFillObject,

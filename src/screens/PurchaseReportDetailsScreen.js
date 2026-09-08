@@ -3,13 +3,11 @@ import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppBackButton from '../components/common/AppBackButton';
 import AppScreen from '../components/common/AppScreen';
-import PrimaryButton from '../components/common/PrimaryButton';
-import ZoomableImage from '../components/common/ZoomableImage';
+import ReceiptImageViewerModal from '../components/common/ReceiptImageViewerModal';
 import { useAuth } from '../context/AuthContext';
 import {
   getCachedReceiptUrl,
@@ -590,43 +588,39 @@ export default function PurchaseReportDetailsScreen() {
         </View>
       </AppScreen>
 
-      <Modal visible={previewOpen} animationType="fade" transparent onRequestClose={() => setPreviewOpen(false)}>
-        <SafeAreaView style={styles.previewOverlay}>
-          <View style={styles.previewHeader}>
-            <Text style={styles.previewTitle}>חשבונית</Text>
-            {report ? <Text style={styles.previewDate}>{isolateLTR(formatReportDate(report.created_at))}</Text> : null}
-          </View>
-
-          {/* STAGE 16.1: ZoomableImage reuses this already-resolved,
-              already-cached imageState.url directly - opening/closing the
-              viewer never triggers a fresh signed-URL request. Only
-              rendered while previewOpen (not just while the image itself is
-              ready) - Modal doesn't unmount its children when hidden, so
-              this is what makes ZoomableImage genuinely mount fresh (zoom
-              reset to fit) every time the viewer is reopened, rather than
-              silently keeping whatever zoom/pan state was left over from
-              the last time it was open. */}
-          <View style={styles.previewBody}>
-            {previewOpen && imageState.status === 'ready' && imageState.url ? (
-              <ZoomableImage
-                uri={imageState.url}
-                recyclingKey={report?.id}
-                cacheKey={receiptImageCacheKey(report?.receipt_path)}
-              />
-            ) : null}
-          </View>
-
-          <PrimaryButton title="סגירה" onPress={() => setPreviewOpen(false)} style={styles.closeButton} />
-        </SafeAreaView>
-      </Modal>
+      {/* STAGE 28.9: extracted into ReceiptImageViewerModal - byte-identical
+          structure/styles/behavior to what previously lived inline here
+          (see that component's own comment). ZoomableImage still only ever
+          mounts fresh while previewOpen is true, via the same
+          `imageState.status === 'ready'` gating, now expressed as the
+          `imageUrl` prop only being passed a real value in that exact
+          case. STAGE 28.10: the shared viewer dropped its header/footer
+          (title/subtitle/"סגירה" button) in favor of a full-bleed dark
+          backdrop with a top-right X, so those props no longer exist. */}
+      <ReceiptImageViewerModal
+        visible={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        imageUrl={imageState.status === 'ready' ? imageState.url : null}
+        recyclingKey={report?.id}
+        cacheKey={receiptImageCacheKey(report?.receipt_path)}
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  // Matches heroGradient's own END color (colors.charcoal), the same fix
+  // already proven correct on the physically-approved RewardsScreen.js -
+  // not colors.background (the app's default light surface). heroGradient
+  // is an absolute-fill decorative layer; if it is ever not yet painted for
+  // even one frame (e.g. right on this screen's first mount), root's own
+  // background is what actually shows behind it - colors.background made
+  // that moment read as a flat light page instead of the intended dark
+  // hero, exactly the composition bug this fix corrects. Purely a fallback
+  // color - no layout, spacing, or content change.
   root: {
     flex: 1,
-    backgroundColor: colors.background,
+    backgroundColor: colors.charcoal,
   },
   heroGradient: {
     ...StyleSheet.absoluteFillObject,
@@ -1089,39 +1083,8 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     textAlign: 'center',
   },
-  previewOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(11,11,11,0.94)',
-    justifyContent: 'space-between',
-  },
-  previewHeader: {
-    flexDirection: 'row-reverse',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: spacing.xl,
-    paddingTop: spacing.md,
-  },
-  previewTitle: {
-    fontSize: typography.title.fontSize,
-    fontWeight: '700',
-    color: colors.white,
-    textAlign: 'right',
-  },
-  previewDate: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '500',
-    color: colors.surfaceMuted,
-    textAlign: 'right',
-  },
-  previewBody: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.lg,
-  },
-  closeButton: {
-    marginHorizontal: spacing.xl,
-    marginBottom: spacing.xl,
-  },
+  // STAGE 28.9: previewOverlay/previewHeader/previewTitle/previewDate/
+  // previewBody/closeButton moved to ReceiptImageViewerModal.js - see that
+  // component (src/components/common/ReceiptImageViewerModal.js) for the
+  // same values, now shared with AdminReportDetailScreen.js too.
 });

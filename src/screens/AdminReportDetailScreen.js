@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -14,13 +14,11 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { SafeAreaView } from 'react-native-safe-area-context';
 
 import AdminShell from '../components/admin/AdminShell';
 import AppInput from '../components/common/AppInput';
 import PrimaryButton from '../components/common/PrimaryButton';
-import ZoomableImage from '../components/common/ZoomableImage';
+import ReceiptImageViewerModal from '../components/common/ReceiptImageViewerModal';
 import {
   awardPurchasePoints,
   finalizePurchaseReport,
@@ -470,15 +468,35 @@ function formatReportDate(value) {
 // never be visually confused with 'not_golden_light' (an explicit admin
 // decision that this line is NOT a Golden Light product) - see the task's
 // "three distinct states" rule.
+// STAGE 29.1: `backgroundColor` added (display-only, alongside the existing
+// label/icon/color) so the match-status cell can render as a small tinted
+// pill/chip instead of bare icon+text - matching the same *Soft-background
+// -plus-solid-text convention already used by getAdminReportStatusMeta's
+// own status badges elsewhere on this screen. `unresolved` moved from
+// colors.textMuted to colors.warning/warningSoft - a row awaiting a match
+// decision is genuinely the one state worth flagging for attention (the
+// same semantic this app already gives "needs_review" report statuses),
+// where `not_golden_light` is a settled admin decision and stays neutral
+// gray. Presentation only - match_status values/semantics are unchanged.
 function getManualMatchStatusMeta(status) {
   switch (status) {
     case 'matched':
-      return { label: 'זוהה מוצר', icon: 'checkmark-circle', color: colors.success };
+      return { label: 'זוהה מוצר', icon: 'checkmark-circle', color: colors.success, backgroundColor: colors.successSoft };
     case 'not_golden_light':
-      return { label: `לא מוצר ${isolateLTR('GL')}`, icon: 'close-circle', color: colors.textMuted };
+      return {
+        label: `לא מוצר ${isolateLTR('GL')}`,
+        icon: 'close-circle',
+        color: colors.textMuted,
+        backgroundColor: colors.surfaceMuted,
+      };
     case 'unresolved':
     default:
-      return { label: 'טרם הוגדר', icon: 'help-circle-outline', color: colors.textMuted };
+      return {
+        label: 'טרם הוגדר',
+        icon: 'help-circle-outline',
+        color: colors.warning,
+        backgroundColor: colors.warningSoft,
+      };
   }
 }
 
@@ -659,6 +677,326 @@ function DescriptionSuggestionDropdown({ suggestions, onSelect }) {
   );
 }
 
+// STAGE 29.2: a single, stable, reusable "no suggestions" array reference -
+// passed to every ManualItemRow that isn't the currently-focused
+// description field, INSTEAD OF a fresh `[]` literal computed inline on
+// every render. That distinction is what makes ManualItemRow's own
+// React.memo below actually work: a brand-new `[]` is a brand-new
+// reference every render (`[] !== []` in JS), which would make React.memo
+// see a "changed" prop for every unfocused row on every keystroke and
+// re-render them anyway, defeating the whole point.
+const EMPTY_SUGGESTIONS = [];
+
+// STAGE 29.2: one editable invoice-item row, extracted out of what used to
+// be an inline .map() callback inside the main screen component, and
+// wrapped in React.memo.
+//
+// ROOT CAUSE of the reported typing/cursor/focus bug: every keystroke into
+// ANY row's field updated top-level `manualRows` state in
+// AdminReportDetailScreen. Before this stage, each row (and its 2-3
+// AppInputs, each an AppInput -> Pressable -> TextInput tree, plus the
+// receipt-image card, the header, the eligible-total summary, and the
+// finalize section) was all rendered inline in one large render pass with
+// no memoization anywhere - so ONE keystroke forced React to re-render and
+// re-diff the ENTIRE page, not just the one field being typed into. That is
+// NOT a data-corruption bug (verified first, before writing any fix): row
+// keys were already stable - report.manualItems' own database id for a
+// saved row, or a sequential id assigned exactly ONCE at row creation (see
+// createEmptyManualRow's module-level manualRowSeq counter) for a new row -
+// never regenerated, never derived from an editable field (description/
+// quantity/price/match), and manualRows was never resynced from server data
+// during typing (it is only ever set inside loadDetail(), which itself only
+// ever runs on mount or when the report id changes - confirmed by tracing
+// every setManualRows call site). The bug was pure render cost: on a
+// physical device, a full-page re-render on every keystroke was slow enough
+// to fall behind actual native key delivery, and React Native's controlled
+// TextInput resets its cursor to the end of `value` whenever a
+// now-stale-relative-to-what-was-really-typed value arrives late - exactly
+// the "jumping / losing position / being overwritten while typing" symptom
+// reported, on every field (description, quantity, price alike), matching
+// that it wasn't specific to Hebrew/RTL or to any one field.
+//
+// THE FIX is standard React list-performance practice, not a data-flow
+// change: every prop this component receives that comes from the parent's
+// own render (not derived fresh from `row` itself) is either a primitive, a
+// useCallback'd function with an empty dependency array (see
+// AdminReportDetailScreen's own onUpdateRow/onRemoveRow/etc. below), or (for
+// descriptionSuggestions) the shared EMPTY_SUGGESTIONS reference described
+// above. Combined with updateManualRow's own existing behavior (it already
+// returned the exact same row object reference, unchanged, for every row
+// except the one being edited - see that function's own comment), this
+// means typing into row N's field now only ever produces a new `row` object
+// for row N; every other row's props are all still === what they were last
+// render, so React.memo skips re-rendering them (and their own internal
+// AppInput/TextInput trees) entirely. Only the one row actually being typed
+// into re-renders on each keystroke, which is exactly the render cost a
+// single-row edit should have.
+// STAGE 29.3: `suppressPointerEvents` - see AdminReportDetailScreen's own
+// computation of it below (hasOpenDescriptionSuggestions && this isn't the
+// focused row). ROOT CAUSE this addresses: descriptionSuggestionDropdown
+// (the "תיאור מוצר" autocomplete panel) is absolutely positioned below its
+// own input and can be up to 260px tall (descriptionSuggestionScroll's own
+// maxHeight), while a single row is only ~56-100px tall - with more than
+// one suggestion showing, the open dropdown routinely extends past its own
+// row's bottom edge and overlaps the row(s) below it. Before Stage 29.1,
+// sibling rows had no background fill of their own (just a 1px top
+// hairline), so this overlap was harmless. Stage 29.1 gave every row an
+// OPAQUE white card background + border for the table redesign - and React
+// Native's zIndex, while it does reorder PAINT order among siblings
+// correctly (manualRowElevated already raises the open row to zIndex 30),
+// is not guaranteed to also reorder native TOUCH hit-testing the same way
+// on every platform - a well-documented category of cross-platform RN
+// behavior. The practical effect: a tap aimed at a suggestion in the
+// dropdown could land on the now-opaque sibling row card underneath instead
+// - most often that row's OWN description input - silently shifting focus
+// and typing to a different row than the admin intended, which is exactly
+// what "the field jumps/resets" and "can't select the product I want"
+// describe. `pointerEvents="none"` is a DEFINITIVE (not paint-order
+// -dependent) RN guarantee: while some OTHER row's dropdown is open, every
+// row except that one stops accepting touches entirely, so a tap in the
+// overlap zone can only ever reach the dropdown itself. This prop only
+// changes when a dropdown opens/closes (not on every keystroke), so it does
+// not reintroduce the Stage 29.2 per-keystroke re-render cost.
+const ManualItemRow = memo(function ManualItemRow({
+  row,
+  index,
+  isWide,
+  rowsDisabled,
+  descriptionSuggestions,
+  suppressPointerEvents,
+  onUpdateRow,
+  onRemoveRow,
+  onOpenMatchModal,
+  onDescriptionFocus,
+  onDescriptionBlur,
+  onApplyProduct,
+  onClearDescriptionFocus,
+}) {
+  // STAGE 29.5: a STATIC, position-only zIndex (earlier rows always higher
+  // than later ones) - replaces the old `isRowElevated && zIndex:30`
+  // TOGGLE that used to apply/remove elevation on THIS row's own container
+  // at the exact moment its own descriptionSuggestions went from empty to
+  // non-empty (i.e. the exact moment autocomplete activates while typing).
+  // That toggle was the prime suspect for the reported "input jumps right
+  // after the second character" bug: it changed a style property
+  // (zIndex) on a live ancestor of the actively-focused TextInput at
+  // precisely that moment, and React Native's Fabric renderer can promote
+  // a view to its own native compositing layer (or demote it back) when a
+  // layering-relevant style like zIndex changes - a transition that, for a
+  // view containing a currently-focused native TextInput, can manifest as
+  // exactly this kind of focus/cursor disruption. A fixed, never-toggled
+  // per-row zIndex achieves the identical visual guarantee (row K's
+  // dropdown always paints above every row below it, since only overlap
+  // ever makes zIndex visible at all) without ever changing while the
+  // admin types - `index` only changes when rows are added/removed, not
+  // per keystroke.
+  const rowZIndex = 1000 - index;
+  // Stage 4: a small, optional caption for a row still carrying its
+  // original OCR normalization outcome - null for every manually-entered
+  // row and for a 'clean' OCR row.
+  const ocrHint = getOcrNormalizationHint(row.normalizationStatus);
+  const statusMeta = getManualMatchStatusMeta(row.match_status);
+  const hasLineAmountWarning =
+    row.match_status === 'matched' &&
+    computeLineAmount(toNumberOrNull(row.quantity), toNumberOrNull(row.unit_price)) == null;
+
+  const handleSelectDescriptionSuggestion = (product) => {
+    onApplyProduct(row.key, product, 'manual', null);
+    onClearDescriptionFocus(null);
+  };
+
+  if (isWide) {
+    return (
+      <View
+        style={[styles.manualTableRow, { zIndex: rowZIndex }]}
+        pointerEvents={suppressPointerEvents ? 'none' : 'auto'}>
+        <View style={[{ flex: MANUAL_COLUMNS[0].flex }, styles.descriptionCellAnchor]}>
+          <AppInput
+            value={row.description}
+            onChangeText={(value) => onUpdateRow(row.key, 'description', value)}
+            onFocus={() => onDescriptionFocus(row.key)}
+            onBlur={() => onDescriptionBlur(row.key)}
+            placeholder="תיאור מוצר"
+            editable={!rowsDisabled}
+            accessibilityLabel={`תיאור מוצר, שורה ${isolateLTR(index + 1)}`}
+            style={[styles.manualTableCellInput, rowsDisabled && styles.rowControlDisabled]}
+            containerStyle={styles.manualTableCellInputContainer}
+            inputStyle={styles.manualTableCellInputText}
+          />
+          {ocrHint ? <Text style={styles.ocrNormalizationHintText}>{ocrHint}</Text> : null}
+          <DescriptionSuggestionDropdown
+            suggestions={descriptionSuggestions}
+            onSelect={handleSelectDescriptionSuggestion}
+          />
+        </View>
+        <View style={{ flex: MANUAL_COLUMNS[1].flex }}>
+          <AppInput
+            value={row.quantity}
+            onChangeText={(value) => onUpdateRow(row.key, 'quantity', value)}
+            placeholder="כמות"
+            keyboardType="decimal-pad"
+            editable={!rowsDisabled}
+            accessibilityLabel={`כמות, שורה ${isolateLTR(index + 1)}`}
+            textAlign="left"
+            writingDirection="ltr"
+            style={[styles.manualTableCellInput, rowsDisabled && styles.rowControlDisabled]}
+            containerStyle={styles.manualTableCellInputContainer}
+            inputStyle={styles.manualTableCellInputText}
+          />
+        </View>
+        <View style={{ flex: MANUAL_COLUMNS[2].flex }}>
+          <AppInput
+            value={row.unit_price}
+            onChangeText={(value) => onUpdateRow(row.key, 'unit_price', value)}
+            placeholder="מחיר ליחידה"
+            keyboardType="decimal-pad"
+            editable={!rowsDisabled}
+            accessibilityLabel={`מחיר ליחידה, שורה ${isolateLTR(index + 1)}`}
+            textAlign="left"
+            writingDirection="ltr"
+            style={[styles.manualTableCellInput, rowsDisabled && styles.rowControlDisabled]}
+            containerStyle={styles.manualTableCellInputContainer}
+            inputStyle={styles.manualTableCellInputText}
+          />
+        </View>
+        <View style={[styles.manualGoldenLightCell, { flex: MANUAL_COLUMNS[3].flex }]}>
+          <Pressable
+            onPress={() => onOpenMatchModal(row)}
+            disabled={rowsDisabled}
+            accessibilityRole="button"
+            accessibilityLabel={`בחירת מוצר Golden Light, שורה ${isolateLTR(index + 1)}`}
+            hitSlop={8}
+            style={[
+              styles.manualMatchStatusPressable,
+              { backgroundColor: statusMeta.backgroundColor, borderColor: statusMeta.color },
+              rowsDisabled && styles.rowControlDisabled,
+            ]}>
+            <Ionicons name={statusMeta.icon} size={16} color={statusMeta.color} />
+            <Text style={[styles.manualMatchStatusCellText, { color: statusMeta.color }]} numberOfLines={1}>
+              {row.match_status === 'matched' ? row.matched_product_sku || statusMeta.label : statusMeta.label}
+            </Text>
+          </Pressable>
+          {hasLineAmountWarning ? (
+            <Ionicons
+              name="alert-circle"
+              size={16}
+              color={colors.error}
+              accessibilityLabel="חסר כמות/מחיר למוצר Golden Light"
+            />
+          ) : null}
+        </View>
+        <Pressable
+          onPress={() => onRemoveRow(row.key)}
+          disabled={rowsDisabled}
+          style={[styles.manualTableDeleteCell, rowsDisabled && styles.rowControlDisabled]}
+          accessibilityRole="button"
+          accessibilityLabel={`מחיקת שורה ${isolateLTR(index + 1)}`}
+          hitSlop={8}>
+          <Ionicons name="trash-outline" size={16} color={colors.error} />
+        </Pressable>
+      </View>
+    );
+  }
+
+  // STAGE 29.2: compact two-level narrow/mobile row - was a much taller
+  // stacked block (row-index header line, labeled description field,
+  // labeled quantity+price pair, then a full-width status row, then an
+  // optional warning line - up to 5 vertical sections). Now exactly two
+  // lines in the normal case: the description field alone on its own line
+  // (it needs the most width and is the one field worth a full line), then
+  // quantity/price/status/delete together on ONE row beneath it - the same
+  // compact cell styling (manualTableCellInputContainer,
+  // manualMatchStatusPressable, manualTableDeleteCell) the wide table uses,
+  // so the two layouts share one visual language. The optional "missing
+  // amount" warning (rare - only for a matched row with no computable line
+  // total) is a genuine exception to "two lines", shown only when it
+  // actually applies.
+  return (
+    <View
+      style={[styles.manualCompactRow, { zIndex: rowZIndex }]}
+      pointerEvents={suppressPointerEvents ? 'none' : 'auto'}>
+      <View style={styles.descriptionCellAnchor}>
+        <AppInput
+          value={row.description}
+          onChangeText={(value) => onUpdateRow(row.key, 'description', value)}
+          onFocus={() => onDescriptionFocus(row.key)}
+          onBlur={() => onDescriptionBlur(row.key)}
+          placeholder="תיאור מוצר"
+          editable={!rowsDisabled}
+          accessibilityLabel={`תיאור מוצר, שורה ${isolateLTR(index + 1)}`}
+          style={[styles.manualTableCellInput, rowsDisabled && styles.rowControlDisabled]}
+          containerStyle={styles.manualCompactDescriptionContainer}
+          inputStyle={styles.manualCompactDescriptionText}
+        />
+        {ocrHint ? <Text style={styles.ocrNormalizationHintText}>{ocrHint}</Text> : null}
+        <DescriptionSuggestionDropdown
+          suggestions={descriptionSuggestions}
+          onSelect={handleSelectDescriptionSuggestion}
+        />
+      </View>
+
+      <View style={styles.manualCompactBottomRow}>
+        <AppInput
+          value={row.quantity}
+          onChangeText={(value) => onUpdateRow(row.key, 'quantity', value)}
+          placeholder="כמות"
+          keyboardType="decimal-pad"
+          editable={!rowsDisabled}
+          accessibilityLabel={`כמות, שורה ${isolateLTR(index + 1)}`}
+          textAlign="left"
+          writingDirection="ltr"
+          style={[styles.manualTableCellInput, styles.manualCompactQuantityWrap, rowsDisabled && styles.rowControlDisabled]}
+          containerStyle={styles.manualTableCellInputContainer}
+          inputStyle={styles.manualTableCellInputText}
+        />
+        <AppInput
+          value={row.unit_price}
+          onChangeText={(value) => onUpdateRow(row.key, 'unit_price', value)}
+          placeholder="מחיר"
+          keyboardType="decimal-pad"
+          editable={!rowsDisabled}
+          accessibilityLabel={`מחיר ליחידה, שורה ${isolateLTR(index + 1)}`}
+          textAlign="left"
+          writingDirection="ltr"
+          style={[styles.manualTableCellInput, styles.manualCompactPriceWrap, rowsDisabled && styles.rowControlDisabled]}
+          containerStyle={styles.manualTableCellInputContainer}
+          inputStyle={styles.manualTableCellInputText}
+        />
+        <Pressable
+          onPress={() => onOpenMatchModal(row)}
+          disabled={rowsDisabled}
+          accessibilityRole="button"
+          accessibilityLabel={`בחירת מוצר Golden Light, שורה ${isolateLTR(index + 1)}`}
+          hitSlop={8}
+          style={[
+            styles.manualMatchStatusPressable,
+            styles.manualCompactStatusWrap,
+            { backgroundColor: statusMeta.backgroundColor, borderColor: statusMeta.color },
+            rowsDisabled && styles.rowControlDisabled,
+          ]}>
+          <Ionicons name={statusMeta.icon} size={14} color={statusMeta.color} />
+          <Text style={[styles.manualMatchStatusCellText, { color: statusMeta.color }]} numberOfLines={1}>
+            {row.match_status === 'matched' ? row.matched_product_sku || statusMeta.label : statusMeta.label}
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={() => onRemoveRow(row.key)}
+          disabled={rowsDisabled}
+          style={[styles.manualTableDeleteCell, rowsDisabled && styles.rowControlDisabled]}
+          accessibilityRole="button"
+          accessibilityLabel={`מחיקת שורה ${isolateLTR(index + 1)}`}
+          hitSlop={8}>
+          <Ionicons name="trash-outline" size={14} color={colors.error} />
+        </Pressable>
+      </View>
+
+      {hasLineAmountWarning ? (
+        <Text style={styles.manualRowWarningText}>{`חסר כמות/מחיר למוצר ${isolateLTR('Golden Light')}`}</Text>
+      ) : null}
+    </View>
+  );
+});
+
 export default function AdminReportDetailScreen() {
   const { id } = useLocalSearchParams();
   const router = useRouter();
@@ -674,23 +1012,17 @@ export default function AdminReportDetailScreen() {
   // exactly the receipt's true shape (never stretched/cropped), instead of
   // guessing a fixed aspect ratio. null until it resolves.
   const [imageNaturalSize, setImageNaturalSize] = useState(null);
-  // Click-to-enlarge lightbox - same pattern already proven on the
-  // customer-facing PurchaseReportDetailsScreen (dark overlay Modal,
-  // resizeMode="contain", explicit close button).
+  // STAGE 28.9: click-to-enlarge lightbox now renders via the SAME shared
+  // ReceiptImageViewerModal component the customer-facing
+  // PurchaseReportDetailsScreen uses (dark overlay Modal, header, +
+  // ZoomableImage, explicit "סגירה" button) instead of this screen's own,
+  // separately-built fullscreen viewer (which had its own backdrop-tap-to-
+  // dismiss, corner X button, and letterbox tap-catchers - all removed
+  // along with the extra outer GestureHandlerRootView they required, a
+  // suspected cause of a physical-device freeze). isPreviewZoomed and the
+  // fullscreen-fitted-rectangle math that only existed to size those
+  // letterbox catchers are gone with them.
   const [previewOpen, setPreviewOpen] = useState(false);
-  // STAGE 24.2: tracks whether the fullscreen receipt is currently zoomed
-  // past its normal fitted scale - reported by ZoomableImage's own optional
-  // onZoomChange callback (see that component's Stage 24.2 comment). Only
-  // used to decide whether tapping the dark backdrop around the receipt is
-  // safe to treat as "close the viewer" (the fitted-image bounds computed
-  // below are only accurate at rest - once zoomed, the receipt's real
-  // on-screen bounds are whatever ZoomableImage's own internal Reanimated
-  // transform currently renders, which this screen has no need to track).
-  // Always starts false; ZoomableImage itself only ever mounts fresh while
-  // previewOpen is true (see its conditional render below), so a fresh
-  // mount's own initial onZoomChange(false) call keeps this correctly
-  // reset on every reopen without any extra effect here.
-  const [isPreviewZoomed, setIsPreviewZoomed] = useState(false);
 
   // The unified review form - always editable while the report is
   // reviewable (submitted/needs_review), and also reused (in a clearly
@@ -805,7 +1137,6 @@ export default function AdminReportDetailScreen() {
     setError('');
     setNotFound(false);
     setPreviewOpen(false);
-    setIsPreviewZoomed(false);
     setFinalizeModalOpen(false);
     setFinalizeError('');
     setRejectModalOpen(false);
@@ -925,13 +1256,18 @@ export default function AdminReportDetailScreen() {
     }
   }, []);
 
-  const addManualRow = () => {
+  // STAGE 29.2: wrapped in useCallback with an empty dependency array - a
+  // purely functional setManualRows update, never reads any outer state
+  // directly. Passed to ManualItemRow (React.memo'd) as a stable prop
+  // reference; see that component's own comment for why an unstable
+  // (recreated-every-render) callback here would defeat its memoization.
+  const addManualRow = useCallback(() => {
     setManualRows((rows) => [...rows, createEmptyManualRow()]);
-  };
+  }, []);
 
   // If this is the only remaining row, clear it in place instead of
   // removing it - the form must never end up with zero rows while editing.
-  const removeManualRow = (key) => {
+  const removeManualRow = useCallback((key) => {
     setManualRows((rows) => {
       if (rows.length <= 1) {
         return rows.map((row) =>
@@ -955,7 +1291,7 @@ export default function AdminReportDetailScreen() {
       }
       return rows.filter((row) => row.key !== key);
     });
-  };
+  }, []);
 
   // Plain field edits (description, quantity, unit_price). `sku` is never
   // edited this way anymore - it is only ever set by applyProductToRow()
@@ -969,7 +1305,7 @@ export default function AdminReportDetailScreen() {
   // matched_product_name - a stale product_id must never persist). Falls
   // back to 'unresolved', not 'not_golden_light' - nothing was explicitly
   // decided, the row just needs to be matched again via the modal.
-  const updateManualRow = (key, field, value) => {
+  const updateManualRow = useCallback((key, field, value) => {
     setManualRows((rows) =>
       rows.map((row) => {
         if (row.key !== key) {
@@ -991,11 +1327,11 @@ export default function AdminReportDetailScreen() {
         return nextRow;
       }),
     );
-  };
+  }, []);
 
-  const applyRowMatch = (key, patch) => {
+  const applyRowMatch = useCallback((key, patch) => {
     setManualRows((rows) => rows.map((row) => (row.key === key ? { ...row, ...patch } : row)));
-  };
+  }, []);
 
   // Seeds the modal's single search box with whatever the admin already
   // typed into "תיאור מוצר" for this row - so opening the modal for a row
@@ -1003,10 +1339,15 @@ export default function AdminReportDetailScreen() {
   // without retyping it. The admin can still freely replace the text with a
   // SKU or barcode instead - the same box (getProductSuggestions) searches
   // all three regardless of what's typed there.
-  const openMatchModal = (key) => {
-    const row = manualRows.find((candidate) => candidate.key === key);
-    setMatchModal({ open: true, rowKey: key, searchQuery: row?.description?.trim() || '' });
-  };
+  // STAGE 29.2: now takes the row object directly (every caller already has
+  // it - see ManualItemRow) instead of a key it had to look up via
+  // manualRows.find() - that lookup would have required `manualRows` in
+  // this callback's own dependency array, defeating useCallback's purpose
+  // (a new function reference every time any row changes, which is every
+  // keystroke).
+  const openMatchModal = useCallback((row) => {
+    setMatchModal({ open: true, rowKey: row.key, searchQuery: row?.description?.trim() || '' });
+  }, []);
 
   const closeMatchModal = () => {
     setMatchModal({ open: false, rowKey: null, searchQuery: '' });
@@ -1020,20 +1361,20 @@ export default function AdminReportDetailScreen() {
   // focusedDescriptionRowKey above. Any pending blur-close from a
   // previously focused row is cancelled first, so switching focus directly
   // between two description inputs never leaves a stale timer running.
-  const handleDescriptionFocus = (key) => {
+  const handleDescriptionFocus = useCallback((key) => {
     if (descriptionBlurTimeoutRef.current) {
       clearTimeout(descriptionBlurTimeoutRef.current);
       descriptionBlurTimeoutRef.current = null;
     }
     setFocusedDescriptionRowKey(key);
-  };
+  }, []);
 
-  const handleDescriptionBlur = (key) => {
+  const handleDescriptionBlur = useCallback((key) => {
     descriptionBlurTimeoutRef.current = setTimeout(() => {
       setFocusedDescriptionRowKey((current) => (current === key ? null : current));
       descriptionBlurTimeoutRef.current = null;
     }, 200);
-  };
+  }, []);
 
   // THE ONE place description/sku/product_id/match_status are ever
   // synchronized together - called whenever the admin picks a product from
@@ -1059,7 +1400,7 @@ export default function AdminReportDetailScreen() {
   // uses it (instead of the now-canonical `description`) to learn the
   // alias, exactly preserving the existing alias-learning mechanism even
   // though the visible description field is now always synchronized.
-  const applyProductToRow = (key, product, method, confidence) => {
+  const applyProductToRow = useCallback((key, product, method, confidence) => {
     setManualRows((rows) =>
       rows.map((row) => {
         if (row.key !== key) {
@@ -1084,7 +1425,7 @@ export default function AdminReportDetailScreen() {
         };
       }),
     );
-  };
+  }, []);
 
   // Applies to whichever row the modal is currently open for, then closes
   // it - the modal's search-result rows below are the only caller.
@@ -1380,10 +1721,12 @@ export default function AdminReportDetailScreen() {
   // otherwise leave the image sized wrong until some unrelated re-render
   // happens to trigger it. ADMIN_CONTENT_MAX_WIDTH/paddings mirror
   // AdminShell's bodyContent (maxWidth 1100, horizontal padding
-  // spacing.xl) and this card's own padding (spacing.lg) - if either
-  // changes, update the numbers here too.
+  // spacing.xl) and this card's own padding - STAGE 29.6: imageCard's own
+  // padding was tightened from spacing.lg to spacing.sm (see that style's
+  // own comment), so this now matches spacing.sm * 2 - if either changes,
+  // update the numbers here too.
   const ADMIN_CONTENT_MAX_WIDTH = 1100;
-  const availableContentWidth = Math.min(windowWidth, ADMIN_CONTENT_MAX_WIDTH) - spacing.xl * 2 - spacing.lg * 2;
+  const availableContentWidth = Math.min(windowWidth, ADMIN_CONTENT_MAX_WIDTH) - spacing.xl * 2 - spacing.sm * 2;
   // Height is capped generously so even a very tall portrait photo stays
   // inspectable without scrolling the whole page; width is additionally
   // capped lower on wide desktop so a landscape receipt doesn't sprawl
@@ -1396,38 +1739,12 @@ export default function AdminReportDetailScreen() {
     receiptBoxMaxWidth,
     receiptBoxMaxHeight,
   );
-  // STAGE 24.1: the fullscreen viewer's image layer now fills the entire
-  // modal edge-to-edge (see previewImageWrap's own styles below) rather
-  // than a smaller margined box - see that style's comment for why a
-  // smaller-than-screen box was the actual source of the visible "frame"
-  // reported after this stage's physical-device testing.
-  //
-  // STAGE 24.2: the SAME fitReceiptDisplaySize math used for the inline
-  // preview above, now computed against the full window instead of the
-  // inline card's smaller box - this is exactly the rectangle ZoomableImage
-  // will contain-fit the receipt into AT REST (1x, uncropped, centered).
-  // Used only to size the four backdrop "letterbox" tap-catchers below
-  // (top/bottom/left/right bands around that rectangle) - the rectangle
-  // itself never gets an overlay, so a tap directly on the receipt still
-  // reaches ZoomableImage's own gesture surface untouched.
-  const fullscreenFittedSize = fitReceiptDisplaySize(
-    imageNaturalSize?.width,
-    imageNaturalSize?.height,
-    windowWidth,
-    windowHeight,
-  );
-  const fullscreenFittedLeft = Math.max((windowWidth - fullscreenFittedSize.width) / 2, 0);
-  const fullscreenFittedTop = Math.max((windowHeight - fullscreenFittedSize.height) / 2, 0);
-  // Backdrop dismissal is only offered at rest (Part "Zoomed state
-  // behavior" - reliable backdrop-to-close at 1x, reliable X close at
-  // every zoom level, rather than fragile hit-testing against a live
-  // Reanimated transform this screen doesn't track). Also requires a real
-  // natural size - before that resolves there is nothing to compute a
-  // fitted rectangle against, so no catcher bands render (the plain
-  // full-screen previewBackdrop underneath still handles that brief
-  // window, see the render below).
-  const canDismissFullscreenViaBackdrop =
-    !isPreviewZoomed && Boolean(imageNaturalSize) && fullscreenFittedSize.width > 0 && fullscreenFittedSize.height > 0;
+  // STAGE 28.9: the fullscreen-viewer-specific fitted-rectangle math
+  // (fullscreenFittedSize/Left/Top, canDismissFullscreenViaBackdrop) that
+  // used to live here was removed along with the letterbox tap-catchers it
+  // only existed to size - see ReceiptImageViewerModal.js, now used for
+  // this screen's fullscreen viewer instead. receiptDisplaySize above (the
+  // INLINE card preview's own sizing) is unrelated and unchanged.
   const statusMeta = report ? getAdminReportStatusMeta(report.status) : null;
   const isReviewable = report ? REVIEWABLE_STATUSES.includes(report.status) : false;
   const isApproved = report?.status === 'approved';
@@ -1505,14 +1822,13 @@ export default function AdminReportDetailScreen() {
       : [];
   const hasOpenDescriptionSuggestions = focusedDescriptionSuggestions.length > 0;
 
-  // STAGE 24.2: the ONE shared close handler for the fullscreen viewer -
-  // used by the X button, the backdrop, the backdrop letterbox catchers,
-  // and the Modal's own onRequestClose (hardware back / swipe-down). Only
-  // ever touches previewOpen/isPreviewZoomed - no navigation, no
-  // loadDetail(), no receipt-cache invalidation.
+  // STAGE 24.2 / 28.9: the shared close handler for the fullscreen viewer -
+  // used by ReceiptImageViewerModal's own backdrop tap / top-right X and
+  // its Modal's onRequestClose (hardware back / swipe-down). Only ever
+  // touches previewOpen - no navigation, no loadDetail(), no receipt-cache
+  // invalidation.
   const handleClosePreview = useCallback(() => {
     setPreviewOpen(false);
-    setIsPreviewZoomed(false);
   }, []);
 
   // router.back() unconditionally throws the React Navigation "GO_BACK was
@@ -1532,12 +1848,23 @@ export default function AdminReportDetailScreen() {
 
   return (
     <AdminShell activeKey="dashboard">
-      <Pressable onPress={handleBackPress} style={styles.backRow} accessibilityRole="button">
-        <Ionicons name="chevron-forward" size={18} color={colors.primary} />
-        <Text style={styles.backText}>חזרה לרשימה</Text>
-      </Pressable>
+      {/* STAGE 29.6: a single local wrapper around all of this screen's own
+          content, with its OWN compact gap (spacing.md, 12px) between major
+          cards - replacing reliance on AdminShell's shared bodyContent gap
+          (spacing.xxl, 24px) for THIS page only. AdminShell itself is
+          untouched: it's shared by every other admin screen (dashboard,
+          reports history), and this page's own request for a tighter
+          vertical rhythm should not silently change their spacing too.
+          Modals stay OUTSIDE this wrapper as separate siblings - a RN
+          <Modal> always renders in its own native layer regardless of
+          where it sits in the JS tree, so this has no effect on them. */}
+      <View style={styles.pageStack}>
+        <Pressable onPress={handleBackPress} style={styles.backRow} accessibilityRole="button">
+          <Ionicons name="chevron-forward" size={18} color={colors.primary} />
+          <Text style={styles.backText}>חזרה לרשימה</Text>
+        </Pressable>
 
-      {loading ? (
+        {loading ? (
         <View style={styles.stateCard}>
           <ActivityIndicator color={colors.primary} size="small" />
         </View>
@@ -1589,7 +1916,11 @@ export default function AdminReportDetailScreen() {
               canOpenPreview && hovered && styles.imageCardHovered,
               canOpenPreview && pressed && styles.imageCardPressed,
             ]}
-            onPress={() => canOpenPreview && setPreviewOpen(true)}
+            onPress={() => {
+              if (canOpenPreview) {
+                setPreviewOpen(true);
+              }
+            }}
             disabled={!canOpenPreview}
             accessibilityRole={canOpenPreview ? 'button' : undefined}
             accessibilityLabel="פתיחת החשבונית במסך מלא">
@@ -1647,7 +1978,17 @@ export default function AdminReportDetailScreen() {
               or an approved report not currently being corrected) it's a
               plain read-only display of the last saved rows. */}
           {isEditingRows || hasManualItems ? (
-            <View style={[styles.sectionCard, hasOpenDescriptionSuggestions && styles.manualSectionElevated]}>
+            // STAGE 29.5: manualSectionElevated is now applied
+            // UNCONDITIONALLY (was: hasOpenDescriptionSuggestions && ...) -
+            // see ManualItemRow's own rowZIndex comment for why toggling
+            // zIndex on an ancestor of the actively-focused TextInput,
+            // exactly when suggestions first appear, was the prime suspect
+            // for the reported "jumps right after character 2" bug.
+            // Harmless when static: this card never actually overlaps its
+            // sibling section cards unless a suggestion dropdown is
+            // genuinely open, so an always-on zIndex has no visible effect
+            // in the normal case.
+            <View style={[styles.sectionCard, styles.manualSectionElevated]}>
               {isEditingRows ? (
                 <>
                   <Text style={styles.sectionTitle}>פרטי החשבונית</Text>
@@ -1675,212 +2016,29 @@ export default function AdminReportDetailScreen() {
                     </View>
                   ) : null}
 
-                  <View style={[styles.manualFormRows, hasOpenDescriptionSuggestions && styles.manualRowElevated]}>
-                    {manualRows.map((row, index) => {
-                      // Computed once above (focusedDescriptionSuggestions) -
-                      // only the currently-focused row ever shows anything,
-                      // since only one description input can be focused at
-                      // a time.
-                      const descriptionSuggestions =
-                        row.key === focusedDescriptionRowKey ? focusedDescriptionSuggestions : [];
-                      const handleSelectDescriptionSuggestion = (product) => {
-                        applyProductToRow(row.key, product, 'manual', null);
-                        setFocusedDescriptionRowKey(null);
-                      };
-                      // Raises this specific row above its OWN siblings
-                      // within the same section card (other rows, the
-                      // eligible-total summary below the list) while its
-                      // dropdown is open. On its own this is not enough to
-                      // clear sibling SECTION CARDS below "פרטי החשבונית"
-                      // (e.g. "פעולות בדיקה") - see manualSectionElevated
-                      // on the section card itself, applied from
-                      // hasOpenDescriptionSuggestions above.
-                      const isRowElevated = descriptionSuggestions.length > 0;
-                      // Stage 4: a small, optional caption for a row still
-                      // carrying its original OCR normalization outcome -
-                      // see getOcrNormalizationHint. null for every
-                      // manually-entered row (no normalizationStatus key
-                      // at all) and for a 'clean' OCR row.
-                      const ocrHint = getOcrNormalizationHint(row.normalizationStatus);
-
-                      return isWideManualTable ? (
-                        <View
-                          key={row.key}
-                          style={[styles.manualTableRow, isRowElevated && styles.manualRowElevated]}>
-                          <View style={[{ flex: MANUAL_COLUMNS[0].flex }, styles.descriptionCellAnchor]}>
-                            <AppInput
-                              value={row.description}
-                              onChangeText={(value) => updateManualRow(row.key, 'description', value)}
-                              onFocus={() => handleDescriptionFocus(row.key)}
-                              onBlur={() => handleDescriptionBlur(row.key)}
-                              placeholder="תיאור מוצר"
-                              editable={!rowsDisabled}
-                              accessibilityLabel={`תיאור מוצר, שורה ${isolateLTR(index + 1)}`}
-                              style={[styles.manualTableCellInput, rowsDisabled && styles.rowControlDisabled]}
-                            />
-                            {ocrHint ? <Text style={styles.ocrNormalizationHintText}>{ocrHint}</Text> : null}
-                            <DescriptionSuggestionDropdown
-                              suggestions={descriptionSuggestions}
-                              onSelect={handleSelectDescriptionSuggestion}
-                            />
-                          </View>
-                          <View style={{ flex: MANUAL_COLUMNS[1].flex }}>
-                            <AppInput
-                              value={row.quantity}
-                              onChangeText={(value) => updateManualRow(row.key, 'quantity', value)}
-                              placeholder="כמות"
-                              keyboardType="decimal-pad"
-                              editable={!rowsDisabled}
-                              accessibilityLabel={`כמות, שורה ${isolateLTR(index + 1)}`}
-                              textAlign="left"
-                              writingDirection="ltr"
-                              style={[styles.manualTableCellInput, rowsDisabled && styles.rowControlDisabled]}
-                            />
-                          </View>
-                          <View style={{ flex: MANUAL_COLUMNS[2].flex }}>
-                            <AppInput
-                              value={row.unit_price}
-                              onChangeText={(value) => updateManualRow(row.key, 'unit_price', value)}
-                              placeholder="מחיר ליחידה"
-                              keyboardType="decimal-pad"
-                              editable={!rowsDisabled}
-                              accessibilityLabel={`מחיר ליחידה, שורה ${isolateLTR(index + 1)}`}
-                              textAlign="left"
-                              writingDirection="ltr"
-                              style={[styles.manualTableCellInput, rowsDisabled && styles.rowControlDisabled]}
-                            />
-                          </View>
-                          <View style={[styles.manualGoldenLightCell, { flex: MANUAL_COLUMNS[3].flex }]}>
-                            <Pressable
-                              onPress={() => openMatchModal(row.key)}
-                              disabled={rowsDisabled}
-                              accessibilityRole="button"
-                              accessibilityLabel={`בחירת מוצר Golden Light, שורה ${isolateLTR(index + 1)}`}
-                              hitSlop={8}
-                              style={[styles.manualMatchStatusPressable, rowsDisabled && styles.rowControlDisabled]}>
-                              <Ionicons
-                                name={getManualMatchStatusMeta(row.match_status).icon}
-                                size={20}
-                                color={getManualMatchStatusMeta(row.match_status).color}
-                              />
-                              <Text
-                                style={[
-                                  styles.manualMatchStatusCellText,
-                                  { color: getManualMatchStatusMeta(row.match_status).color },
-                                ]}
-                                numberOfLines={1}>
-                                {row.match_status === 'matched'
-                                  ? row.matched_product_sku || getManualMatchStatusMeta(row.match_status).label
-                                  : getManualMatchStatusMeta(row.match_status).label}
-                              </Text>
-                            </Pressable>
-                            {row.match_status === 'matched' &&
-                            computeLineAmount(toNumberOrNull(row.quantity), toNumberOrNull(row.unit_price)) ==
-                              null ? (
-                              <Ionicons
-                                name="alert-circle"
-                                size={16}
-                                color={colors.error}
-                                accessibilityLabel="חסר כמות/מחיר למוצר Golden Light"
-                              />
-                            ) : null}
-                          </View>
-                          <Pressable
-                            onPress={() => removeManualRow(row.key)}
-                            disabled={rowsDisabled}
-                            style={[styles.manualTableDeleteCell, rowsDisabled && styles.rowControlDisabled]}
-                            accessibilityRole="button"
-                            accessibilityLabel={`מחיקת שורה ${isolateLTR(index + 1)}`}
-                            hitSlop={8}>
-                            <Ionicons name="trash-outline" size={16} color={colors.error} />
-                          </Pressable>
-                        </View>
-                      ) : (
-                        <View key={row.key} style={[styles.manualStackedRow, isRowElevated && styles.manualRowElevated]}>
-                          <View style={styles.manualStackedRowHeader}>
-                            <Text style={styles.manualStackedRowIndex}>{`שורה ${isolateLTR(index + 1)}`}</Text>
-                            <Pressable
-                              onPress={() => removeManualRow(row.key)}
-                              disabled={rowsDisabled}
-                              accessibilityRole="button"
-                              accessibilityLabel={`מחיקת שורה ${isolateLTR(index + 1)}`}
-                              hitSlop={8}
-                              style={rowsDisabled && styles.rowControlDisabled}>
-                              <Ionicons name="trash-outline" size={16} color={colors.error} />
-                            </Pressable>
-                          </View>
-                          <View style={styles.descriptionCellAnchor}>
-                            <AppInput
-                              label="תיאור מוצר"
-                              value={row.description}
-                              onChangeText={(value) => updateManualRow(row.key, 'description', value)}
-                              onFocus={() => handleDescriptionFocus(row.key)}
-                              onBlur={() => handleDescriptionBlur(row.key)}
-                              editable={!rowsDisabled}
-                              style={[styles.manualFormField, rowsDisabled && styles.rowControlDisabled]}
-                            />
-                            {ocrHint ? <Text style={styles.ocrNormalizationHintText}>{ocrHint}</Text> : null}
-                            <DescriptionSuggestionDropdown
-                              suggestions={descriptionSuggestions}
-                              onSelect={handleSelectDescriptionSuggestion}
-                            />
-                          </View>
-                          <View style={styles.manualFormFieldsRow}>
-                            <AppInput
-                              label="כמות"
-                              value={row.quantity}
-                              onChangeText={(value) => updateManualRow(row.key, 'quantity', value)}
-                              editable={!rowsDisabled}
-                              keyboardType="decimal-pad"
-                              textAlign="left"
-                              writingDirection="ltr"
-                              style={[styles.manualFormFieldHalf, rowsDisabled && styles.rowControlDisabled]}
-                            />
-                            <AppInput
-                              label="מחיר ליחידה"
-                              value={row.unit_price}
-                              onChangeText={(value) => updateManualRow(row.key, 'unit_price', value)}
-                              editable={!rowsDisabled}
-                              keyboardType="decimal-pad"
-                              textAlign="left"
-                              writingDirection="ltr"
-                              style={[styles.manualFormFieldHalf, rowsDisabled && styles.rowControlDisabled]}
-                            />
-                          </View>
-                          <Pressable
-                            onPress={() => openMatchModal(row.key)}
-                            disabled={rowsDisabled}
-                            style={[styles.manualGoldenLightStackedRow, rowsDisabled && styles.rowControlDisabled]}
-                            accessibilityRole="button"
-                            accessibilityLabel={`בחירת מוצר Golden Light, שורה ${isolateLTR(index + 1)}`}>
-                            <Ionicons
-                              name={getManualMatchStatusMeta(row.match_status).icon}
-                              size={20}
-                              color={getManualMatchStatusMeta(row.match_status).color}
-                            />
-                            <Text
-                              style={[
-                                styles.manualGoldenLightStackedLabel,
-                                { color: getManualMatchStatusMeta(row.match_status).color },
-                              ]}>
-                              {row.match_status === 'matched'
-                                ? `${row.matched_product_sku ? isolateLTR(row.matched_product_sku) : ''} — ${row.matched_product_name || ''}`.replace(
-                                    /^ — /,
-                                    '',
-                                  )
-                                : getManualMatchStatusMeta(row.match_status).label}
-                            </Text>
-                          </Pressable>
-                          {row.match_status === 'matched' &&
-                          computeLineAmount(toNumberOrNull(row.quantity), toNumberOrNull(row.unit_price)) ==
-                            null ? (
-                            <Text style={styles.manualRowWarningText}>
-                              {`חסר כמות/מחיר למוצר ${isolateLTR('Golden Light')}`}
-                            </Text>
-                          ) : null}
-                        </View>
-                      );
-                    })}
+                  {/* STAGE 29.5: manualRowElevated applied unconditionally
+                      here too - same reasoning as sectionCard just above. */}
+                  <View style={[styles.manualFormRows, styles.manualRowElevated]}>
+                    {manualRows.map((row, index) => (
+                      <ManualItemRow
+                        key={row.key}
+                        row={row}
+                        index={index}
+                        isWide={isWideManualTable}
+                        rowsDisabled={rowsDisabled}
+                        descriptionSuggestions={
+                          row.key === focusedDescriptionRowKey ? focusedDescriptionSuggestions : EMPTY_SUGGESTIONS
+                        }
+                        suppressPointerEvents={hasOpenDescriptionSuggestions && row.key !== focusedDescriptionRowKey}
+                        onUpdateRow={updateManualRow}
+                        onRemoveRow={removeManualRow}
+                        onOpenMatchModal={openMatchModal}
+                        onDescriptionFocus={handleDescriptionFocus}
+                        onDescriptionBlur={handleDescriptionBlur}
+                        onApplyProduct={applyProductToRow}
+                        onClearDescriptionFocus={setFocusedDescriptionRowKey}
+                      />
+                    ))}
                   </View>
 
                   <Pressable
@@ -1896,12 +2054,21 @@ export default function AdminReportDetailScreen() {
                   {/* Live, admin-only preview - recomputed from the rows
                       above on every keystroke/toggle. Never sent anywhere;
                       the database is the sole authoritative source once
-                      finalized/saved. */}
-                  <View style={styles.eligibleSummaryBox}>
-                    <Text style={styles.eligibleSummaryLine}>
+                      finalized/saved.
+                      STAGE 29.2: one clean summary strip (both values on a
+                      single row, separated by a middle dot) instead of two
+                      stacked lines - a dedicated style
+                      (manualEligibleSummaryStrip/Text), not a change to the
+                      shared eligibleSummaryBox/eligibleSummaryLine styles
+                      still used as-is by the unrelated "צבירת נקודות"
+                      fallback-award box below. Same calculation, same
+                      values, same wording - layout only. */}
+                  <View style={styles.manualEligibleSummaryStrip}>
+                    <Text style={styles.manualEligibleSummaryStripText}>
                       {`סכום מוצרי ${isolateLTR('Golden Light')}: ${isolateLTR(`₪${draftEligibleSummary.total.toFixed(2)}`)}`}
                     </Text>
-                    <Text style={styles.eligibleSummaryLine}>
+                    <View style={styles.manualEligibleSummaryStripDivider} />
+                    <Text style={styles.manualEligibleSummaryStripText}>
                       {`נקודות ${postApprovalEditing ? 'שיינתנו' : 'שיתווספו'}: ${isolateLTR(draftPointsPreview)}`}
                     </Text>
                   </View>
@@ -1964,21 +2131,30 @@ export default function AdminReportDetailScreen() {
                             {item.unit_price ?? '—'}
                           </Text>
                           <View style={[styles.manualGoldenLightCell, { flex: MANUAL_COLUMNS[3].flex }]}>
-                            <Ionicons
-                              name={getManualMatchStatusMeta(item.match_status).icon}
-                              size={18}
-                              color={getManualMatchStatusMeta(item.match_status).color}
-                            />
-                            <Text
+                            <View
                               style={[
-                                styles.manualMatchStatusCellText,
-                                { color: getManualMatchStatusMeta(item.match_status).color },
-                              ]}
-                              numberOfLines={1}>
-                              {item.match_status === 'matched'
-                                ? item.matched_product_sku || getManualMatchStatusMeta(item.match_status).label
-                                : getManualMatchStatusMeta(item.match_status).label}
-                            </Text>
+                                styles.manualMatchStatusPressable,
+                                {
+                                  backgroundColor: getManualMatchStatusMeta(item.match_status).backgroundColor,
+                                  borderColor: getManualMatchStatusMeta(item.match_status).color,
+                                },
+                              ]}>
+                              <Ionicons
+                                name={getManualMatchStatusMeta(item.match_status).icon}
+                                size={16}
+                                color={getManualMatchStatusMeta(item.match_status).color}
+                              />
+                              <Text
+                                style={[
+                                  styles.manualMatchStatusCellText,
+                                  { color: getManualMatchStatusMeta(item.match_status).color },
+                                ]}
+                                numberOfLines={1}>
+                                {item.match_status === 'matched'
+                                  ? item.matched_product_sku || getManualMatchStatusMeta(item.match_status).label
+                                  : getManualMatchStatusMeta(item.match_status).label}
+                              </Text>
+                            </View>
                           </View>
                         </View>
                       ))}
@@ -2137,7 +2313,8 @@ export default function AdminReportDetailScreen() {
             )}
           </View>
         </>
-      )}
+        )}
+      </View>
 
       <Modal visible={finalizeModalOpen} transparent animationType="fade" onRequestClose={closeFinalizeModal}>
         <View style={styles.modalOverlay}>
@@ -2275,7 +2452,13 @@ export default function AdminReportDetailScreen() {
               style={styles.manualFormField}
             />
 
-            <ScrollView style={styles.matchModalScroll} nestedScrollEnabled>
+            {/* STAGE 29.4: keyboardShouldPersistTaps="handled" - same fix,
+                same reason, as AdminShell's own outer ScrollView (see that
+                component's comment): without it, tapping a search result
+                here while the "חיפוש מוצר" input's keyboard is open
+                dismisses the keyboard on the first tap instead of selecting
+                the product. */}
+            <ScrollView style={styles.matchModalScroll} nestedScrollEnabled keyboardShouldPersistTaps="handled">
               {matchSearchResults.map((product) => (
                 <Pressable
                   key={product.id}
@@ -2314,126 +2497,43 @@ export default function AdminReportDetailScreen() {
         </View>
       </Modal>
 
-      {/* STAGE 24.1 fixed the close-button interception and the visible
-          zoom frame (see that stage's own notes, preserved below).
-          STAGE 24.2 adds backdrop-tap-to-close: four thin Pressable "letterbox"
-          bands (top/bottom/left/right), sized to exactly the dark space
-          around fullscreenFittedSize's centered rectangle - never
-          overlapping the rectangle where the receipt itself renders, so a
-          tap ON the receipt still reaches ZoomableImage's own gesture
-          surface untouched, while a tap in the surrounding dark space is
-          claimed by these bands instead. Only rendered at rest
-          (canDismissFullscreenViaBackdrop is false while isPreviewZoomed is
-          true) - once zoomed, the receipt's real on-screen bounds no longer
-          match this fitted rectangle, and reliable X-button dismissal
-          (already fixed in 24.1, further hardened below) is preferred over
-          fragile transformed-bounds hit-testing. All three dismiss paths
-          (X, backdrop, letterbox bands) share the one handleClosePreview
-          handler above.
-          STAGE 24.1: CLOSE BUTTON - ZoomableImage wraps ITSELF in its own
-          GestureHandlerRootView (scoped to just the image), while the close
-          button lived outside it as a plain RN-tree sibling within the same
-          Modal - react-native-gesture-handler's own documented requirement
-          for Modals is that ONE GestureHandlerRootView should wrap the
-          Modal's ENTIRE content, not just the gesture-heavy part; splitting
-          the button and the gesture surface across two different
-          touch-handling trees inside the same native modal window is
-          exactly what let the pinch/pan recognizer intermittently keep
-          claiming touches meant for the button once a gesture had been
-          active. Wrapping this WHOLE modal body in its own
-          GestureHandlerRootView (nesting harmlessly with ZoomableImage's
-          own inner one - RNGH explicitly supports nested roots) puts the
-          button and the gesture surface in the same recognized tree, so a
-          tap that starts on the button's own bounds is never absorbed by
-          the pinch/pan recognizer.
-          STAGE 24.1: VISIBLE FRAME - the image layer used to be a smaller
-          box (windowWidth/Height minus margins) with overflow:'hidden'. At
-          1x the box's edges exactly coincided with the contain-fitted
-          image's own edges (invisible), but once zoomed/panned the image
-          content would extend past that smaller box and get hard-clipped
-          there - a rectangular clip boundary floating inside the larger
-          dark backdrop, visible as a "frame" around the receipt. The image
-          layer now fills the entire modal edge-to-edge (previewImageWrap
-          below), so there is no smaller decorated box for the transform to
-          ever be clipped against - only ZoomableImage's own transparent,
-          border-less root+image are ever transformed, exactly matching "no
-          visible card edges" - the receipt now genuinely floats on the dark
-          backdrop at any zoom/pan position. */}
-      <Modal visible={previewOpen} transparent animationType="fade" onRequestClose={handleClosePreview}>
-        <GestureHandlerRootView style={styles.previewRoot}>
-          <Pressable
-            style={styles.previewBackdrop}
-            onPress={handleClosePreview}
-            accessibilityRole="button"
-            accessibilityLabel="סגירה"
-          />
-
-          {previewOpen && imageState.status === 'ready' && imageState.url ? (
-            <View style={styles.previewImageWrap}>
-              <ZoomableImage
-                uri={imageState.url}
-                recyclingKey={report?.id}
-                cacheKey={receiptImageCacheKey(report?.receipt_path)}
-                onZoomChange={setIsPreviewZoomed}
-              />
-            </View>
-          ) : null}
-
-          {canDismissFullscreenViaBackdrop ? (
-            <>
-              <Pressable
-                style={[styles.previewBackdropCatcher, { top: 0, left: 0, right: 0, height: fullscreenFittedTop }]}
-                onPress={handleClosePreview}
-                accessibilityRole="button"
-                accessibilityLabel="סגירה"
-              />
-              <Pressable
-                style={[
-                  styles.previewBackdropCatcher,
-                  { bottom: 0, left: 0, right: 0, height: fullscreenFittedTop },
-                ]}
-                onPress={handleClosePreview}
-                accessibilityRole="button"
-                accessibilityLabel="סגירה"
-              />
-              <Pressable
-                style={[
-                  styles.previewBackdropCatcher,
-                  { top: fullscreenFittedTop, bottom: fullscreenFittedTop, left: 0, width: fullscreenFittedLeft },
-                ]}
-                onPress={handleClosePreview}
-                accessibilityRole="button"
-                accessibilityLabel="סגירה"
-              />
-              <Pressable
-                style={[
-                  styles.previewBackdropCatcher,
-                  { top: fullscreenFittedTop, bottom: fullscreenFittedTop, right: 0, width: fullscreenFittedLeft },
-                ]}
-                onPress={handleClosePreview}
-                accessibilityRole="button"
-                accessibilityLabel="סגירה"
-              />
-            </>
-          ) : null}
-
-          <SafeAreaView edges={['top', 'right']} style={styles.previewCloseSafeArea} pointerEvents="box-none">
-            <Pressable
-              style={styles.previewCloseButton}
-              onPress={handleClosePreview}
-              accessibilityRole="button"
-              accessibilityLabel="סגירה"
-              hitSlop={12}>
-              <Ionicons name="close" size={22} color={colors.textOnDark} />
-            </Pressable>
-          </SafeAreaView>
-        </GestureHandlerRootView>
-      </Modal>
+      {/* STAGE 28.9: this fullscreen viewer previously had its own richer
+          implementation (backdrop-tap-to-dismiss, a corner X button,
+          letterbox tap-catcher bands, and its own outer
+          GestureHandlerRootView nested around ZoomableImage's inner one).
+          That extra outer root - two GestureHandlerRootViews nested within
+          the same native Modal window, an atypical RNGH configuration -
+          was the one concrete structural difference from the customer-
+          facing PurchaseReportDetailsScreen's own fullscreen viewer (which
+          has never had an outer root and has no reported freeze), and was
+          the suspected cause of a physical-device freeze when opening this
+          admin viewer. Rather than keep tweaking this screen's own gesture
+          wrappers one at a time, this now renders the SAME
+          ReceiptImageViewerModal component the customer screen uses -
+          structurally identical, not just similar - via
+          src/components/common/ReceiptImageViewerModal.js. STAGE 28.10:
+          the shared viewer dropped its header/footer (title/subtitle/
+          "סגירה" button) in favor of a full-bleed dark backdrop with a
+          top-right X, so those props no longer exist. */}
+      <ReceiptImageViewerModal
+        visible={previewOpen}
+        onClose={handleClosePreview}
+        imageUrl={imageState.status === 'ready' ? imageState.url : null}
+        recyclingKey={report?.id}
+        cacheKey={receiptImageCacheKey(report?.receipt_path)}
+      />
     </AdminShell>
   );
 }
 
 const styles = StyleSheet.create({
+  // STAGE 29.6: this screen's own compact vertical rhythm between major
+  // cards (backRow, headerCard, imageCard, each sectionCard) - see the
+  // render's own comment for why this is scoped here rather than in the
+  // shared AdminShell. 12px, within the requested "12-16px" range.
+  pageStack: {
+    gap: spacing.md,
+  },
   backRow: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
@@ -2482,7 +2582,11 @@ const styles = StyleSheet.create({
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    padding: spacing.lg,
+    // STAGE 29.6: padding tightened from spacing.lg (16) - this card's
+    // content (eyebrow/name/status/meta/points) already has its own tight
+    // internal gap; the outer padding was the larger contributor to its
+    // height.
+    padding: spacing.md,
     gap: spacing.xs,
     ...shadows.sm,
   },
@@ -2540,7 +2644,13 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: spacing.lg,
+    // STAGE 29.6: tightened from spacing.lg (16) so the receipt image uses
+    // more of the card's own width - the image itself is unchanged (still
+    // fit via receiptDisplaySize/aspect ratio, never cropped or shrunk
+    // below its natural fit); IMPORTANT: this exact value is also read by
+    // receiptBoxMaxWidth's own calc below (availableContentWidth) - if this
+    // changes again, update that too.
+    padding: spacing.sm,
     overflow: 'hidden',
     ...shadows.sm,
   },
@@ -2571,78 +2681,24 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.textMuted,
   },
-  // Fullscreen click-to-enlarge viewer - same conventions as the profile
-  // avatar preview (see ProfileScreen.js): dark backdrop, backdrop-tap and
-  // top-right X both close it, no other content.
-  previewRoot: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  previewBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(6, 10, 10, 0.9)',
-  },
-  // STAGE 24.1: fills the entire modal edge-to-edge (matching
-  // previewBackdrop's own absoluteFillObject) - no smaller decorated box
-  // for the zoom/pan transform to ever be clipped against, which is what
-  // previously read as a "frame" once zoomed. No border/background/padding
-  // of its own - ZoomableImage's own contentFit="contain" fits the receipt
-  // naturally inside this full-bleed space at 1x, and the receipt is the
-  // only thing that ever visually moves/scales.
-  previewImageWrap: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  // STAGE 24.2: the four backdrop "letterbox" tap-catchers - positioned via
-  // inline top/bottom/left/right/height/width per-band (see the render
-  // above), this shared style only carries what's common to all four:
-  // transparent (no visible styling of its own - purely a touch target,
-  // never a decorated frame), and a zIndex above the image layer (0) but
-  // below the close button (20) so it never competes with that button's own
-  // touch priority.
-  previewBackdropCatcher: {
-    position: 'absolute',
-    zIndex: 10,
-    elevation: 10,
-  },
-  // STAGE 24: absoluteFillObject + a top/right-edges-only SafeAreaView, so
-  // the close button positioned inside it lands just past the actual
-  // device safe area (notch/dynamic island) instead of a fixed spacing.xxl
-  // offset that could sit under it on some devices. pointerEvents="box-none"
-  // so this full-screen wrapper itself never blocks taps on the backdrop/
-  // image beneath it - only the button itself is ever an actual touch target.
-  // STAGE 24.1: explicit zIndex/elevation added as a second, belt-and-
-  // suspenders guarantee (alongside the GestureHandlerRootView fix above)
-  // that this sits above the zoom/pan gesture surface in both paint order
-  // and touch-hit priority on every platform.
-  previewCloseSafeArea: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 20,
-    elevation: 20,
-  },
-  // STAGE 24.2: top nudged down slightly (spacing.md -> spacing.md +
-  // spacing.sm, a further 8px) - physical-device testing found the X sat
-  // slightly too high within the safe area. hitSlop on the Pressable itself
-  // (see render, now 12) already gives it a ~64x64 effective touch target,
-  // comfortably past the ~44-48px target, without changing the button's
-  // own 40x40 visual size.
-  previewCloseButton: {
-    position: 'absolute',
-    top: spacing.md + spacing.sm,
-    right: spacing.lg,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.12)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  // STAGE 28.9: the fullscreen click-to-enlarge viewer's own
+  // previewRoot/previewBackdrop/previewImageWrap/previewBackdropCatcher/
+  // previewCloseSafeArea/previewCloseButton styles were removed - that
+  // viewer now renders via the shared ReceiptImageViewerModal component
+  // (src/components/common/ReceiptImageViewerModal.js), which carries its
+  // own styles.
   sectionCard: {
     backgroundColor: colors.white,
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    padding: spacing.lg,
+    // STAGE 29.6: tightened from spacing.lg (16) - applies uniformly to
+    // every sectionCard on this page ("פרטי החשבונית", "פרטי הענקת
+    // הנקודות", "צבירת נקודות", "פעולות בדיקה"). Internal gap between a
+    // card's own children (title, rows, summary strip, buttons) is kept at
+    // spacing.sm - already reasonably tight; tightening the outer padding
+    // alone gives the biggest reduction without crowding elements together.
+    padding: spacing.md,
     gap: spacing.sm,
     ...shadows.sm,
   },
@@ -2860,35 +2916,77 @@ const styles = StyleSheet.create({
     color: colors.primaryPressed,
     textAlign: 'right',
   },
-  // Wide/desktop table layout - shared column proportions (MANUAL_COLUMNS)
-  // between the header row, editable rows, and read-only rows so
-  // everything lines up.
+  // STAGE 29.1: wide/desktop table layout, redesigned into a real compact
+  // table (was: a bare flex row separated only by a top hairline, with each
+  // cell being a full-size standalone AppInput - see manualTableRow's own
+  // comment below for the full reasoning). Shared column proportions
+  // (MANUAL_COLUMNS) between the header row, editable rows, and read-only
+  // rows so everything lines up - unchanged from before this stage.
   manualTableHeaderRow: {
     flexDirection: 'row-reverse',
+    alignItems: 'center',
     gap: spacing.sm,
+    paddingHorizontal: spacing.md,
     paddingBottom: spacing.xs,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
   },
   manualTableHeaderText: {
-    ...typography.caption,
+    fontSize: 11,
+    lineHeight: 14,
     fontWeight: '700',
     color: colors.textMuted,
     textAlign: 'right',
   },
   manualTableDeleteHeaderCell: {
-    width: 32,
+    width: 36,
   },
+  // STAGE 29.1: previously just a plain flex row with a 1px top hairline
+  // and no padding/background/radius of its own - each cell (a full-size
+  // AppInput, each carrying its OWN border/background/radius/52px height)
+  // was the only thing with any visual weight, so a row read as several
+  // loosely-adjacent boxes rather than one unit. Now the ROW itself is the
+  // visual unit (white card, thin border, radius.md, consistent padding/
+  // height) - matching this stage's own "the row is the main visual unit,
+  // not every individual field" brief - and the individual cell inputs are
+  // de-emphasized via manualTableCellInputContainer below (no border/
+  // background of their own except on focus).
   manualTableRow: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
     gap: spacing.sm,
-    borderTopWidth: 1,
-    borderTopColor: colors.surfaceMuted,
-    paddingTop: spacing.sm,
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    minHeight: 56,
+    // STAGE 29.5: zIndex now comes from ManualItemRow's own inline
+    // rowZIndex (position-based, static) - see that component's own
+    // comment. No static value needed here anymore.
   },
   manualTableCellInput: {
     marginBottom: 0,
+  },
+  // STAGE 29.1: passed as AppInput's own `containerStyle` prop (a caller
+  // -level override AppInput has always supported, unused by this screen
+  // before this stage) - a transparent 1px border (invisible until focus,
+  // when AppInput's own internal `focused` style - applied AFTER this one
+  // in AppInput's style array - overrides it to the standard Golden Light
+  // turquoise) over a faint neutral fill, instead of AppInput's own default
+  // white-bordered 52px box. Reads as a compact table cell that still shows
+  // the exact same turquoise focus ring every other input in this app uses,
+  // rather than a smaller copy of a standalone form field.
+  manualTableCellInputContainer: {
+    minHeight: 40,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    backgroundColor: colors.surfaceMuted,
+    paddingHorizontal: spacing.sm,
+  },
+  manualTableCellInputText: {
+    fontSize: typography.caption.fontSize,
+    lineHeight: typography.caption.lineHeight,
   },
   // STAGE 8: a row-level control (input/button) disabled while a
   // save/finalize request is in flight (rowsDisabled) is otherwise
@@ -2989,42 +3087,74 @@ const styles = StyleSheet.create({
     color: colors.text,
     textAlign: 'right',
   },
+  // STAGE 29.1: small circular soft-red button (was: a bare 32-wide
+  // touch target with no fill/shape of its own) - matches this row's own
+  // new pill/chip language and stays clearly a "destructive, secondary"
+  // action next to the match-status pill.
   manualTableDeleteCell: {
-    width: 32,
+    width: 36,
+    height: 36,
+    borderRadius: radius.pill,
+    backgroundColor: colors.errorSoft,
     alignItems: 'center',
     justifyContent: 'center',
   },
   // Narrow/mobile stacked layout.
   manualFormRows: {
-    gap: spacing.md,
-  },
-  manualStackedRow: {
     gap: spacing.sm,
-    borderTopWidth: 1,
-    borderTopColor: colors.surfaceMuted,
-    paddingTop: spacing.sm,
   },
-  manualStackedRowHeader: {
+  // STAGE 29.2: compact two-level narrow/mobile row - see ManualItemRow's
+  // own comment for the full before/after. A real row card (matching the
+  // wide table's own manualTableRow language: white background, thin
+  // border, radius.md) instead of the old plain-hairline-separated stack.
+  manualCompactRow: {
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    padding: spacing.sm,
+    gap: spacing.xs,
+    // STAGE 29.5: see manualTableRow's own comment - zIndex now comes from
+    // ManualItemRow's inline rowZIndex instead.
+  },
+  manualCompactBottomRow: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    gap: spacing.xs,
   },
-  manualStackedRowIndex: {
-    ...typography.caption,
-    fontWeight: '700',
-    color: colors.textMuted,
+  // Slightly taller/larger-text than the wide table's own compact cell
+  // (manualTableCellInputContainer/Text) - description is the primary
+  // field here and gets its own full line, unlike the wide table where it
+  // shares row height with three other cells.
+  manualCompactDescriptionContainer: {
+    minHeight: 44,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    backgroundColor: colors.surfaceMuted,
+    paddingHorizontal: spacing.sm,
   },
+  manualCompactDescriptionText: {
+    fontSize: 14,
+    lineHeight: 18,
+  },
+  manualCompactQuantityWrap: {
+    width: 56,
+  },
+  manualCompactPriceWrap: {
+    width: 78,
+  },
+  // Lets the status pill fill whatever width remains after the fixed
+  // -width quantity/price fields and the delete button.
+  manualCompactStatusWrap: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  // STAGE 29.2: still used by the product-match modal's own free-text
+  // search AppInput (see that modal's render) - NOT part of the row
+  // redesign above, which uses manualCompactDescriptionContainer/
+  // manualTableCellInputContainer instead.
   manualFormField: {
-    marginBottom: 0,
-  },
-  manualFormFieldsRow: {
-    flexDirection: 'row-reverse',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-  },
-  manualFormFieldHalf: {
-    flexGrow: 1,
-    flexBasis: 140,
     marginBottom: 0,
   },
   manualItemsList: {
@@ -3053,17 +3183,29 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     textAlign: 'right',
   },
+  // STAGE 29.1: full-width, matching the table row's own radius/horizontal
+  // rhythm (was: a small pill pinned to the right edge, floating below the
+  // table with no relation to its column structure). Reads as "the next row
+  // in the table, dedicated to adding one" - a dashed turquoise border on a
+  // soft turquoise fill is a common, immediately-recognizable "add new"
+  // affordance, using only existing Golden Light tokens (colors.primary/
+  // primarySoft). Still the exact same addManualRow() trigger - clicking it
+  // appends one new, immediately-editable row rendered by the identical row
+  // template above; there was never a separate "add item" form to redesign.
   addRowButton: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.xs,
-    alignSelf: 'flex-end',
+    width: '100%',
+    minHeight: 44,
+    marginTop: spacing.sm,
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
     borderRadius: radius.md,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.primary,
+    borderStyle: 'dashed',
+    backgroundColor: colors.primarySoft,
   },
   addRowButtonText: {
     ...typography.caption,
@@ -3097,6 +3239,32 @@ const styles = StyleSheet.create({
     color: colors.primaryPressed,
     textAlign: 'right',
   },
+  // STAGE 29.2: "one clean summary strip" for the item-list totals - both
+  // values on a single row (wraps only if truly needed on a very narrow
+  // width), separated by a small divider dot/bar, instead of two stacked
+  // lines. Deliberately a separate style from eligibleSummaryBox above
+  // (still used unchanged by the unrelated "צבירת נקודות" fallback box).
+  manualEligibleSummaryStrip: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    gap: spacing.sm,
+  },
+  manualEligibleSummaryStripText: {
+    ...typography.caption,
+    fontWeight: '700',
+    color: colors.primaryPressed,
+  },
+  manualEligibleSummaryStripDivider: {
+    width: 1,
+    height: 12,
+    backgroundColor: colors.primaryPressed,
+    opacity: 0.35,
+  },
   // "מוצר Golden Light" checkbox cell (wide table).
   manualTableHeaderTextCentered: {
     textAlign: 'center',
@@ -3107,16 +3275,28 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: spacing.xs,
   },
+  // STAGE 29.1: a small tinted pill/chip (was: bare icon+text with no
+  // shape/fill of its own) - backgroundColor/borderColor are supplied
+  // inline per row from getManualMatchStatusMeta(status), the same
+  // *Soft-background-plus-solid-border/text convention this screen's own
+  // report-status badge already uses. Used for BOTH the editable
+  // (Pressable) and read-only (plain View) wide-table cell, so the table
+  // looks identical whether or not the row is currently tappable.
   manualMatchStatusPressable: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
     maxWidth: '100%',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
+    borderRadius: radius.pill,
+    borderWidth: 1,
   },
   manualMatchStatusCellText: {
-    ...typography.caption,
+    fontSize: 12,
+    lineHeight: 16,
     fontWeight: '700',
-    maxWidth: 90,
+    maxWidth: 84,
   },
   // "מוצר Golden Light" checkbox row (narrow/stacked layout).
   manualGoldenLightStackedRow: {
@@ -3221,9 +3401,15 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     gap: 2,
   },
+  // STAGE 29.6: sized up from a plain typography.body (16px) line to read
+  // as the section's one primary number - "make the points number the
+  // primary visual element" - rather than matching the same weight as
+  // every other line of text on the page. Same color/success-green
+  // semantic, same content/value - typography only.
   pointsAwardedInfoValue: {
-    ...typography.body,
-    fontWeight: '700',
+    fontSize: 22,
+    lineHeight: 26,
+    fontWeight: '800',
     color: colors.success,
     textAlign: 'right',
   },

@@ -1,17 +1,27 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
 import PointsBalanceCard from '../components/common/PointsBalanceCard';
+import ProductCarousel from '../components/home/ProductCarousel';
 import { getMembershipLevelInfo } from '../constants/membershipLevels';
 import { useAuth } from '../context/AuthContext';
 import { getProfile } from '../services/profileService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { isolateLTR } from '../utils/bidiText';
+
+// STAGE 28.12 / 28.12.2: the purchase-history hero card's local decorative
+// photo - required once, at module scope, and rendered via React Native's
+// own core `Image` (not expo-image's) - see the render below for why.
+// STAGE 28.12.2: the Stage 28.10 JPEG re-encode was removed and this points
+// back at the original approved `purchase-history-hero.png` (restored
+// byte-for-byte from safety commit 8761018) - the JPEG conversion's premise
+// (file size) was already disproven in Stage 28.11, and the file itself was
+// never the source of the "wrong image" report - see the render below.
+const purchaseHistoryHeroImage = require('../assets/images/purchase-history-hero.png');
 
 // STAGE 25: "דיווח רכישה" keeps its exact existing route/copy/icon - only
 // the second card (previously a plain "מתנות" link) changed, to emphasize
@@ -406,14 +416,43 @@ export default function HomeScreen() {
               accessibilityRole="button"
               accessibilityLabel="היסטוריית הרכישות, מעבר לצפייה בחשבוניות ובדיווחים">
               {/* STAGE 25, Part G: local decorative asset - see
-                  src/assets/images/purchase-history-hero.png. No remote URL,
-                  no runtime fetch; contentFit="cover" fills this card's
-                  fixed aspect-ratio box without distortion. */}
-              <Image
-                source={require('../assets/images/purchase-history-hero.png')}
-                style={styles.historyHeroImage}
-                contentFit="cover"
-              />
+                  src/assets/images/purchase-history-hero.png (the original
+                  approved photo - full dark-desk scene: plant top-left, pen
+                  holder, clipboard/receipt centered, mug and keyboard top
+                  -right, notebooks bottom-left). No remote URL, no runtime
+                  fetch; resizeMode="cover" fills this card's box without
+                  distortion.
+                  STAGE 28.10 (file-size theory) and STAGE 28.11 (aspectRatio
+                  -vs-absolute-children layout theory) were both physically
+                  tested and neither fixed the card rendering as a solid dark
+                  box - the image never painted any pixels, while the
+                  correctly-shaped/bordered card and the text content on top
+                  of it both rendered fine.
+                  STAGE 28.12 switched this local asset from expo-image's
+                  `Image` to React Native's own core `Image` - that got real
+                  pixels painting for the first time, but physically showed
+                  only a tight, unscaled close-up of the photo's top-left
+                  corner (the plant) instead of the full cover-fitted scene.
+                  STAGE 28.12.2 root cause: `historyHeroImage`/
+                  `historyHeroOverlay` (below) were sized via
+                  `...StyleSheet.absoluteFillObject` (top/left/right/bottom:0
+                  inset-based sizing) inside `historyHero`, a parent whose OWN
+                  size comes from `aspectRatio` rather than an explicit
+                  number - RN's core Image apparently cannot reliably resolve
+                  an inset-based absolute size against an aspectRatio-derived
+                  parent on this build, and falls back to the image's own
+                  intrinsic pixel size positioned at the box's origin, which -
+                  clipped by historyHero's own overflow:'hidden' - shows only
+                  whatever corner of the full-resolution photo happens to
+                  land in that small box (the top-left, i.e. the plant).
+                  Fixed by giving both layers explicit `width:'100%',
+                  height:'100%'` alongside `top:0, left:0` instead of the
+                  right/bottom-inset form - a different Yoga resolution path
+                  for the exact same visual result once it works, and the
+                  same technique now applied consistently to both the image
+                  and its gradient overlay so they always share the same
+                  box. */}
+              <Image source={purchaseHistoryHeroImage} style={styles.historyHeroImage} resizeMode="cover" />
               <LinearGradient
                 colors={['transparent', 'rgba(6, 10, 10, 0.92)']}
                 start={{ x: 0, y: 0 }}
@@ -431,52 +470,17 @@ export default function HomeScreen() {
               </View>
             </Pressable>
 
-            {/* STAGE 25.7: richer promotional banner - a purely
-                informational block, still not a Pressable (no onPress
-                anywhere in it), no route, no backend call, no new business
-                logic. "למימוש הנקודות" (the quick action above) remains the
-                one real action toward Rewards. Uses only existing Ionicons
-                + styled Views for the decorative reward area - no new image
-                asset, no new dependency. Same overall width as the
-                purchase-history hero above (both are plain children of
-                sheetInner, width:'100%' by default, no explicit override on
-                either), so their left/right edges already align. */}
-            <LinearGradient
-              colors={[colors.primarySoft, colors.white]}
-              start={{ x: 0.05, y: 0 }}
-              end={{ x: 0.95, y: 1 }}
-              style={styles.motivationBanner}>
-              <View style={styles.motivationBannerTopRow}>
-                <View style={styles.motivationBannerTextWrap}>
-                  <Text style={styles.motivationBannerTitle}>
-                    {'🎁 כל קנייה משתלמת יותר עם '}
-                    <Text style={styles.motivationBannerTitleAccent}>{isolateLTR('Golden Light')}</Text>
-                    {'!'}
-                  </Text>
-                  <Text style={styles.motivationBannerBody}>
-                    המשיכו לצבור נקודות על כל רכישה של מוצרי Golden Light והמירו אותן למתנות, הטבות ופרסים שווים
-                    במיוחד.
-                  </Text>
-                </View>
-
-                {/* Decorative reward area - a larger gift badge with a small
-                    overlapping sparkle accent, built entirely from existing
-                    Ionicons + styled Views (no illustration asset). */}
-                <View style={styles.motivationBannerGiftArea}>
-                  <View style={styles.motivationBannerGiftBadge}>
-                    <Ionicons name="gift" size={32} color={colors.primary} />
-                  </View>
-                  <View style={styles.motivationBannerSparkleBadge}>
-                    <Ionicons name="sparkles" size={12} color={colors.primaryPressed} />
-                  </View>
-                </View>
-              </View>
-
-              <View style={styles.motivationBannerFooter}>
-                <Ionicons name="sparkles" size={13} color={colors.primaryPressed} />
-                <Text style={styles.motivationBannerFooterText}>קונים וצוברים נקודות — ממשיכים ליהנות!</Text>
-              </View>
-            </LinearGradient>
+            {/* STAGE 28.14: rotating Golden Light product-category showcase
+                - see src/components/home/ProductCarousel.js for the carousel
+                itself. Same width as the purchase-history hero above (both
+                are plain children of sheetInner, width:'100%' by default),
+                so their left/right edges align.
+                STAGE 28.14.1: the gifts/points promo (Stage 25.7, briefly
+                restored as its own separate card directly below the
+                carousel) is now a FIFTH slide INSIDE ProductCarousel itself
+                - see that file. There is no separate gifts card here
+                anymore; this is the only element in this section. */}
+            <ProductCarousel />
           </View>
         </View>
       </AppScreen>
@@ -485,9 +489,16 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
-root: {
-  flex: 1,
-  backgroundColor: colors.background,
+  // Matches heroGradient's own END color (colors.charcoal), the same fix
+  // confirmed on the physically-approved RewardsScreen.js and Stage 28.7's
+  // dark-hero secondary screens - not colors.background (the app's default
+  // light surface). heroGradient is an absolute-fill decorative layer; if
+  // it is ever not yet painted for even one frame, root's own background is
+  // what actually shows behind it. Purely a fallback color - no layout,
+  // spacing, or content change.
+  root: {
+    flex: 1,
+    backgroundColor: colors.charcoal,
   },
   heroGradient: {
     ...StyleSheet.absoluteFillObject,
@@ -763,15 +774,27 @@ root: {
   historyHeroPressed: {
     opacity: 0.92,
   },
+  // STAGE 28.12.2: explicit width/height (not StyleSheet.absoluteFillObject's
+  // right/bottom insets) - see the render's own comment for why, on this
+  // aspectRatio-sized parent, that distinction mattered for React Native's
+  // core Image specifically.
   historyHeroImage: {
-    ...StyleSheet.absoluteFillObject,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: '100%',
   },
   // STAGE 25, Part H: a restrained top-transparent -> bottom-dark gradient,
   // not a flat opaque layer - the image stays visible through most of the
   // card; only the lower portion (where the text sits) darkens enough for
   // white text to stay readable.
   historyHeroOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: '100%',
   },
   historyHeroContent: {
     flex: 1,
@@ -811,102 +834,5 @@ root: {
     fontSize: 13,
     fontWeight: '700',
     color: colors.primary,
-  },
-  // STAGE 25.7: richer promotional banner below the history hero - a
-  // subtle two-stop gradient (colors.primarySoft -> colors.white, both
-  // existing tokens, no new palette) reading as a premium "rewards card"
-  // rather than a flat fill, a soft teal-tinted border (a local rgba value
-  // scoped to just this style, not a new shared theme token), and the same
-  // restrained shadow every other Home card uses. Same width as the
-  // purchase-history hero above (see the render's own comment).
-  motivationBanner: {
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: 'rgba(46, 196, 199, 0.35)',
-    paddingHorizontal: 20,
-    paddingVertical: 20,
-    gap: spacing.lg,
-    ...shadows.softCard,
-  },
-  motivationBannerTopRow: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    gap: spacing.md,
-  },
-  motivationBannerTextWrap: {
-    flex: 1,
-    gap: 6,
-  },
-  motivationBannerTitle: {
-    fontSize: 18,
-    lineHeight: 24,
-    fontWeight: '800',
-    color: colors.text,
-    textAlign: 'right',
-  },
-  // The "Golden Light" accent within the title (see the render's nested
-  // Text) - same size/weight as the surrounding title, only the color
-  // changes, so it reads as emphasis rather than a separate heading.
-  motivationBannerTitleAccent: {
-    color: colors.primaryPressed,
-  },
-  motivationBannerBody: {
-    fontSize: 14,
-    lineHeight: 20,
-    fontWeight: '500',
-    color: colors.textMuted,
-    textAlign: 'right',
-  },
-  // Decorative reward area - fixed-size, flexShrink: 0 so it never
-  // squeezes the text column; the surrounding 84x84 box gives the small
-  // overlapping sparkle badge room to sit outside the main 72x72 gift
-  // badge without being clipped.
-  motivationBannerGiftArea: {
-    width: 84,
-    height: 84,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-  },
-  motivationBannerGiftBadge: {
-    width: 72,
-    height: 72,
-    borderRadius: 26,
-    backgroundColor: colors.white,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(46, 196, 199, 0.25)',
-    ...shadows.sm,
-  },
-  motivationBannerSparkleBadge: {
-    position: 'absolute',
-    top: 2,
-    left: 2,
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: colors.white,
-    alignItems: 'center',
-    justifyContent: 'center',
-    ...shadows.sm,
-  },
-  // STAGE 25.7, Part 7: a small non-interactive pill reinforcing the
-  // purchase -> points -> reward loop - never a button (no onPress
-  // anywhere on it), just a subtle highlighted row under the main text.
-  motivationBannerFooter: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    alignSelf: 'flex-end',
-    gap: 6,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 6,
-    borderRadius: radius.pill,
-    backgroundColor: colors.white,
-  },
-  motivationBannerFooterText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: colors.primaryPressed,
   },
 });

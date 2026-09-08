@@ -48,6 +48,15 @@ const DOUBLE_TAP_SCALE = 2;
 // dark backdrop around it should close the viewer (safe only at rest,
 // where the fitted-image bounds are still accurate) without this component
 // needing to know anything about backdrop-dismissal itself.
+//
+// STAGE 28.10 added a second optional `onNaturalSize` callback here so a
+// caller could size a wrapping box from this component's own onLoad. STAGE
+// 28.13 removed it again: ReceiptImageViewerModal (the only caller that
+// ever used it) now resolves the receipt's real dimensions up front via
+// React Native's own `Image.getSize`, before this component ever mounts,
+// so it no longer needs a callback from inside here - this component goes
+// back to knowing nothing beyond the plain image/gesture surface it always
+// rendered.
 export default function ZoomableImage({ uri, recyclingKey, cacheKey, onZoomChange }) {
   const scale = useSharedValue(1);
   const savedScale = useSharedValue(1);

@@ -366,9 +366,18 @@ export default function PurchaseHistoryScreen() {
 }
 
 const styles = StyleSheet.create({
+  // Matches heroGradient's own END color (colors.charcoal), the same fix
+  // already proven correct on the physically-approved RewardsScreen.js -
+  // not colors.background (the app's default light surface). heroGradient
+  // is an absolute-fill decorative layer; if it is ever not yet painted for
+  // even one frame (e.g. right on this screen's first mount), root's own
+  // background is what actually shows behind it - colors.background made
+  // that moment read as a flat light page instead of the intended dark
+  // hero, exactly the composition bug this fix corrects. Purely a fallback
+  // color - no layout, spacing, or content change.
   root: {
     flex: 1,
-    backgroundColor: colors.background,
+    backgroundColor: colors.charcoal,
   },
   heroGradient: {
     ...StyleSheet.absoluteFillObject,

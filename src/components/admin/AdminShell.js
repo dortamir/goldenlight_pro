@@ -17,9 +17,15 @@ import { isolateLTR } from '../../utils/bidiText';
 // inside `nav`'s plain `flexDirection: 'row'` - see the mirrored headerRow
 // render below for why this order (not the array order alone) is what
 // actually determines the visual left-to-right result.
+// STAGE 31: 'users' ("מנהלים") appended after the existing two entries -
+// preserves their established relative order/behavior exactly (see the
+// header render's own comment below for why order here is what actually
+// determines the visual left-to-right result) rather than inserting between
+// them or reordering anything.
 const NAV_ITEMS = [
   { key: 'history', label: 'כל החשבוניות', route: '/admin/reports' },
   { key: 'dashboard', label: 'ראשי', route: '/admin' },
+  { key: 'users', label: 'מנהלים', route: '/admin/users' },
 ];
 
 // Shared web-first admin chrome: a dark header (brand + minimal nav + sign
@@ -112,7 +118,23 @@ export default function AdminShell({ activeKey = 'dashboard', children, onScroll
         contentContainerStyle={styles.bodyContent}
         showsVerticalScrollIndicator={false}
         onScroll={onScroll}
-        scrollEventThrottle={onScroll ? scrollEventThrottle : undefined}>
+        scrollEventThrottle={onScroll ? scrollEventThrottle : undefined}
+        // STAGE 29.4: React Native's ScrollView default (keyboardShouldPersistTaps
+        // = 'never') makes the FIRST tap on any non-focused touchable child
+        // dismiss the keyboard (and blur whatever TextInput was focused)
+        // INSTEAD OF delivering that tap to the child's own onPress - a
+        // well-documented RN behavior, not specific to this app. This
+        // ScrollView is the nearest real ScrollView ancestor of every admin
+        // screen's content, including AdminReportDetailScreen's inline
+        // "תיאור מוצר" autocomplete suggestions (plain Pressables nested many
+        // levels deep, with no scrollable ancestor of their own in between) -
+        // so tapping a suggestion while the keyboard was open was dismissing
+        // the keyboard on the first tap instead of selecting it, exactly
+        // matching the reported "can't select the product I want" bug.
+        // 'handled' delivers the tap to a child that itself handles it
+        // (a Pressable with onPress) instead of dismissing the keyboard
+        // first - the standard, documented fix for this exact class of bug.
+        keyboardShouldPersistTaps="handled">
         {children}
       </ScrollView>
     </View>
