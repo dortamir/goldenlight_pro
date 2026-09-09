@@ -7,7 +7,6 @@ const PROFILE_COLUMNS =
   'id, full_name, phone, profession, date_of_birth, avatar_path, points_balance, membership_level, approved_purchases_count, created_at, updated_at';
 
 const AVATAR_BUCKET = 'profile-avatars';
-const AVATAR_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp'];
 
 // Signed URLs are requested with a 1-hour lifetime, long enough to cover a
 // normal app session. The in-memory cache below treats a cached entry as
@@ -253,7 +252,12 @@ export async function claimBirthdayBonus() {
 
   if (error) {
     if (__DEV__) {
-      console.warn('[Profile] claimBirthdayBonus failed', { code: error.code, message: error.message });
+      console.warn('[Profile] claimBirthdayBonus failed', {
+        code: error.code,
+        message: error.message,
+        details: error.details,
+        hint: error.hint,
+      });
     }
     throw error;
   }
@@ -268,6 +272,58 @@ export async function claimBirthdayBonus() {
     pointsBalance: Number.isFinite(row?.points_balance) ? row.points_balance : null,
     bonusPoints: Number.isFinite(row?.bonus_points) ? row.bonus_points : 0,
   };
+}
+
+// STAGE 32.5: the single unacknowledged birthday-bonus celebration (if any)
+// for this customer - the persistent, reload/logout-survivable replacement
+// for AuthContext's old in-memory birthdayBonus state. Reads through the
+// SECURITY DEFINER public.get_my_pending_birthday_celebration() RPC
+// (033_birthday_bonus_celebration.sql), required (not just preferred) since
+// points_transactions' only RLS policy is admin-only - a plain customer
+// select against this table returns zero rows regardless of any table
+// grant. Returns null (never throws) when there is nothing pending.
+export async function getPendingBirthdayCelebration() {
+  if (!supabase) {
+    return null;
+  }
+
+  const { data, error } = await supabase.rpc('get_my_pending_birthday_celebration');
+
+  if (error) {
+    throw error;
+  }
+
+  const row = Array.isArray(data) ? data[0] : data;
+
+  if (!row) {
+    return null;
+  }
+
+  return { id: row.transaction_id, bonusPoints: row.bonus_points, rewardYear: row.reward_year };
+}
+
+// STAGE 32.5: marks this birthday-bonus transaction's celebration as shown/
+// dismissed - the ONLY way points_transactions.acknowledged_at can ever be
+// written (public.acknowledge_my_birthday_celebration() in
+// 033_birthday_bonus_celebration.sql). Ownership and "is this actually a
+// pending birthday bonus" are both enforced server-side, not trusted here -
+// calling this for a transaction that isn't the caller's own, or that
+// isn't a birthday bonus, or is already acknowledged, is a harmless no-op.
+export async function acknowledgeBirthdayCelebration(transactionId) {
+  if (!supabase || !transactionId) {
+    return;
+  }
+
+  const { error } = await supabase.rpc('acknowledge_my_birthday_celebration', {
+    p_transaction_id: transactionId,
+  });
+
+  if (error) {
+    if (__DEV__) {
+      console.warn('[Profile] acknowledgeBirthdayCelebration failed', { code: error.code, message: error.message });
+    }
+    throw error;
+  }
 }
 
 function getAvatarExtension(mimeType) {
@@ -304,6 +360,34 @@ async function createAvatarUploadPayload(asset, mimeType, fileName) {
   return { body: arrayBuffer, byteSize: arrayBuffer.byteLength };
 }
 
+// STAGE 32.6.3: every upload now gets a UNIQUE storage path
+// ("<userId>/avatar-<timestamp>.<ext>"), replacing the old stable
+// "<userId>/avatar.<ext>" + upsert:true design. That design relied on every
+// downstream cache (this module's own avatarUrlCache, expo-image's native
+// cache, and potentially an HTTP/CDN cache in front of Supabase Storage)
+// correctly distinguishing two different signed URLs for the SAME path from
+// their query-string token alone - physical testing showed the rendered
+// image could still go stale despite a genuinely fresh, different-token
+// signed URL being resolved (see this stage's own diagnosis). A unique path
+// per upload removes that entire class of uncertainty: every layer that
+// might cache by path (not just by full URL) now sees a genuinely new
+// object, with no assumption required about query-string cache-key
+// handling anywhere in the chain.
+//
+// Never derived from user input - Date.now() only, exactly as directed.
+// upsert is no longer relied upon for normal replacement (kept `false`,
+// Supabase Storage's own default) - a same-millisecond collision for the
+// same user is not a realistic scenario this app needs to tolerate, and an
+// explicit failure here is safer than a silent overwrite would be.
+//
+// This function no longer deletes anything - the OLD stale-extension
+// cleanup here used to guess sibling files from a stable filename pattern,
+// which no longer applies now that every path is unique per upload.
+// Deleting the previous avatar is now the caller's responsibility (see
+// deletePreviousAvatar() below), performed only AFTER the caller has
+// confirmed profiles.avatar_path was actually updated to point at this new
+// path - never from inside the upload step itself, which has no way to
+// know whether the subsequent DB write will succeed.
 export async function uploadProfileAvatar(userId, asset) {
   if (!supabase || !userId || !asset?.uri) {
     throw new Error('Avatar upload is not available.');
@@ -311,7 +395,7 @@ export async function uploadProfileAvatar(userId, asset) {
 
   const mimeType = asset.mimeType || asset.type || 'image/jpeg';
   const extension = getAvatarExtension(mimeType);
-  const fileName = `avatar.${extension}`;
+  const fileName = `avatar-${Date.now()}.${extension}`;
   const storagePath = `${userId}/${fileName}`;
   const uploadPayload = await createAvatarUploadPayload(asset, mimeType, fileName);
 
@@ -323,42 +407,71 @@ export async function uploadProfileAvatar(userId, asset) {
     .from(AVATAR_BUCKET)
     .upload(storagePath, uploadPayload.body, {
       contentType: mimeType,
-      upsert: true,
+      upsert: false,
     });
 
   if (uploadError) {
     throw uploadError;
   }
 
-  // Each user has exactly one current avatar. Since the object path is keyed
-  // by file extension, replacing a .png avatar with a .jpg one (for example)
-  // would otherwise leave the old file behind. Best-effort clean up any
-  // other supported-extension avatar files for this user so they don't
-  // accumulate; this is non-fatal if it fails.
-  const staleExtensions = AVATAR_EXTENSIONS.filter((ext) => ext !== extension);
-  if (staleExtensions.length > 0) {
-    try {
-      await supabase.storage
-        .from(AVATAR_BUCKET)
-        .remove(staleExtensions.map((ext) => `${userId}/avatar.${ext}`));
-    } catch (cleanupError) {
-      if (__DEV__) {
-        console.warn('[Profile] Failed to clean up stale avatar files', cleanupError);
-      }
-    }
+  return storagePath;
+}
 
-    staleExtensions.forEach((ext) => invalidateAvatarUrlCache(`${userId}/avatar.${ext}`));
+// STAGE 32.6.3: deletes the customer's PREVIOUS avatar object, called only
+// by EditProfileScreen.js's save flow, only AFTER updateProfile() has
+// confirmed profiles.avatar_path now points at the NEW path. Never throws -
+// a cleanup failure here must never affect an already-successful save (the
+// new avatar is already live in both Storage and the DB by the time this
+// runs); it is logged in __DEV__ and otherwise silently ignored, per the
+// explicit "do not roll back, just log and continue" requirement. Three
+// defensive checks before ever calling Storage's remove(): the previous
+// path must be non-empty, must differ from the new path (never delete what
+// we just pointed the profile at), and must live inside this exact user's
+// own folder (`${userId}/...`) - this function will never delete an
+// arbitrary caller-supplied path outside that scope, even if called with
+// unexpected input.
+export async function deletePreviousAvatar(userId, previousAvatarPath, newAvatarPath) {
+  if (!supabase || !userId || !previousAvatarPath) {
+    return;
   }
 
-  // The upload above may have used `upsert: true` against the SAME path as
-  // before (e.g. replacing userId/avatar.jpg with a new photo). The path
-  // string is unchanged, but the bytes behind it are not, so any cached
-  // signed URL for this path must be dropped here rather than left to
-  // expire naturally - otherwise the UI could keep showing (or re-resolve to
-  // display) the previous photo's content via a technically-still-valid URL.
-  invalidateAvatarUrlCache(storagePath);
+  if (previousAvatarPath === newAvatarPath) {
+    return;
+  }
 
-  return storagePath;
+  if (!previousAvatarPath.startsWith(`${userId}/`)) {
+    if (__DEV__) {
+      console.warn('[Profile] Refusing to delete avatar outside the caller\'s own folder', {
+        userId,
+        previousAvatarPath,
+      });
+    }
+    return;
+  }
+
+  try {
+    const { error } = await supabase.storage.from(AVATAR_BUCKET).remove([previousAvatarPath]);
+
+    if (error) {
+      throw error;
+    }
+
+    if (__DEV__) {
+      console.log('[Profile] Deleted previous avatar', { previousAvatarPath });
+    }
+  } catch (err) {
+    if (__DEV__) {
+      console.warn('[Profile] Failed to delete previous avatar (non-fatal)', {
+        previousAvatarPath,
+        message: err?.message,
+      });
+    }
+  } finally {
+    // Regardless of whether the object delete itself succeeded, nothing
+    // should keep serving a signed URL for a path profiles.avatar_path no
+    // longer references.
+    invalidateAvatarUrlCache(previousAvatarPath);
+  }
 }
 
 export async function getProfileAvatarSignedUrl(avatarPath, options = {}) {

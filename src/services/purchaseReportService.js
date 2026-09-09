@@ -301,23 +301,100 @@ export async function getMyPurchaseReports(userId) {
   return data || [];
 }
 
+// STAGE 32.7.1: reads through the SECURITY DEFINER public.get_my_purchase_
+// report(p_report_id) RPC (035_get_my_purchase_report.sql), replacing a
+// plain `.from('purchase_reports').select(...)` that started failing with
+// 42501 once the customer column grant was narrowed by
+// 025_customer_column_grant_hardening.sql without ever being extended to
+// cover promoted_to_tier/promotion_acknowledged_at (added later by 031).
+// The RPC needs no table grant at all and derives identity exclusively
+// from auth.uid() server-side - `userId` is still accepted here purely as
+// a cheap client-side guard (mirrors every other "expected caller" check
+// in this file), never sent to or trusted by the RPC itself, which cannot
+// return another customer's row regardless of what's passed here.
 export async function getPurchaseReportById(reportId, userId) {
   if (!supabase || !reportId || !userId) {
     return null;
   }
 
-  const { data, error } = await supabase
-    .from('purchase_reports')
-    .select('id, original_filename, receipt_path, status, points_awarded, rejection_reason, created_at, updated_at')
-    .eq('id', reportId)
-    .eq('user_id', userId)
-    .maybeSingle();
+  const { data, error } = await supabase.rpc('get_my_purchase_report', { p_report_id: reportId });
 
   if (error) {
     throw error;
   }
 
-  return data;
+  // `returns table (...)` RPCs resolve to an array of rows via
+  // supabase-js - zero rows means "not found or not owned by this caller",
+  // preserving the exact same null-for-not-found shape the previous
+  // `.maybeSingle()` call already gave every existing caller.
+  const row = Array.isArray(data) ? data[0] : data;
+
+  return row ?? null;
+}
+
+// STAGE 32.4: the single unacknowledged tier promotion (if any) for this
+// customer, used by HomeScreen to surface LevelUpCelebration automatically
+// on return-to-app instead of only inside PurchaseReportDetailsScreen.
+//
+// STAGE 32.4.2: switched from a plain `.from('purchase_reports').select(...)`
+// to the SECURITY DEFINER public.get_my_pending_tier_promotion() RPC
+// (032_pending_tier_promotion_rpc.sql) after physical runtime testing
+// proved the plain select fails with 42501 ("permission denied for table
+// purchase_reports") - purchase_reports' customer-facing SELECT grant was
+// narrowed to an explicit column list by
+// 025_customer_column_grant_hardening.sql, written before
+// promoted_to_tier/promotion_acknowledged_at existed, so neither column was
+// ever added to that list (see the migration's own comment for the full
+// mechanic). The RPC needs no table grant at all - it runs with its
+// owner's privileges - and takes no userId parameter (identity comes
+// exclusively from auth.uid() inside the function), so this function no
+// longer accepts one either; a caller can never request another customer's
+// promotion. `.rpc()` on a `returns table (...)` function resolves to an
+// array (0 or 1 rows here, per the RPC's own `limit 1`), unlike a plain
+// `.select().maybeSingle()` call - unwrapped below into the same
+// `{ id, promoted_to_tier, reviewed_at }` shape callers already expect, so
+// HomeScreen's own code needed no further change beyond dropping the now-
+// unused userId argument at its call site. Returns null (never throws) when
+// there is nothing pending.
+export async function getPendingTierPromotion() {
+  if (!supabase) {
+    return null;
+  }
+
+  const { data, error } = await supabase.rpc('get_my_pending_tier_promotion');
+
+  if (error) {
+    throw error;
+  }
+
+  const row = Array.isArray(data) ? data[0] : data;
+
+  if (!row) {
+    return null;
+  }
+
+  return { id: row.report_id, promoted_to_tier: row.promoted_to_tier, reviewed_at: row.reviewed_at };
+}
+
+// STAGE 32: marks this report's level-up celebration as shown/dismissed -
+// the ONLY way promotion_acknowledged_at can ever be written (see
+// public.acknowledge_tier_promotion() in 031_membership_tier_rewards.sql).
+// Ownership and "is there actually a pending promotion" are both enforced
+// server-side, not trusted here - calling this for a report that isn't the
+// caller's own, or that has no pending promotion, is a harmless no-op.
+export async function acknowledgeTierPromotion(reportId) {
+  if (!supabase || !reportId) {
+    return;
+  }
+
+  const { error } = await supabase.rpc('acknowledge_tier_promotion', { p_report_id: reportId });
+
+  if (error) {
+    if (__DEV__) {
+      console.warn('[Purchase] acknowledgeTierPromotion failed', { code: error.code, message: error.message });
+    }
+    throw error;
+  }
 }
 
 // Read-only: ONLY the confirmed Golden Light receipt lines that actually

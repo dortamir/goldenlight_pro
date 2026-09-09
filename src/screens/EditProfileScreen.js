@@ -14,6 +14,7 @@ import DateOfBirthPicker from '../components/common/DateOfBirthPicker';
 import PrimaryButton from '../components/common/PrimaryButton';
 import { useAuth } from '../context/AuthContext';
 import {
+  deletePreviousAvatar,
   getCachedAvatarUrl,
   getProfile,
   getProfileAvatarSignedUrl,
@@ -56,6 +57,13 @@ export default function EditProfileScreen() {
   // regardless of what this screen does or doesn't render.
   const [dateOfBirth, setDateOfBirth] = useState('');
   const [originalDateOfBirth, setOriginalDateOfBirth] = useState('');
+  // STAGE 32.6.3: the profile's avatar_path exactly as loaded, captured
+  // once and never updated afterward - handleSave() needs this to know
+  // which storage object to delete (the PREVIOUS avatar) once the new one
+  // is confirmed persisted. Deliberately separate from `avatarState` (which
+  // tracks the resolved signed URL for DISPLAY) - this is the raw path
+  // string used for the storage cleanup decision only.
+  const [originalAvatarPath, setOriginalAvatarPath] = useState(null);
   const [fieldErrors, setFieldErrors] = useState({});
   const [saveError, setSaveError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
@@ -110,6 +118,7 @@ export default function EditProfileScreen() {
         setOriginalDateOfBirth(data?.date_of_birth || '');
 
         const avatarPath = data?.avatar_path || null;
+        setOriginalAvatarPath(avatarPath);
 
         if (!avatarPath) {
           setAvatarState({ status: 'none', url: null });
@@ -255,7 +264,28 @@ export default function EditProfileScreen() {
         profileUpdates.avatar_path = newAvatarPath;
       }
 
-      await updateProfile(user.id, profileUpdates);
+      const updatedProfile = await updateProfile(user.id, profileUpdates);
+
+      // STAGE 32.6.3: only ONCE the DB row is confirmed to actually point at
+      // the new avatar path do we delete the previous storage object -
+      // never before. If updateProfile() above threw, this line is never
+      // reached at all and the old avatar (still referenced by
+      // profiles.avatar_path) is completely untouched. If the DB update
+      // "succeeded" but somehow didn't persist the expected value (defensive
+      // check, not expected in practice), we also skip cleanup rather than
+      // risk deleting an object the profile might still need.
+      if (
+        profileUpdates.avatar_path &&
+        updatedProfile?.avatar_path === profileUpdates.avatar_path &&
+        originalAvatarPath &&
+        originalAvatarPath !== profileUpdates.avatar_path
+      ) {
+        // deletePreviousAvatar() never throws (see its own comment in
+        // profileService.js) - a cleanup failure is logged internally
+        // (DEV-only) and otherwise ignored; it can never undo the
+        // already-successful save above.
+        await deletePreviousAvatar(user.id, originalAvatarPath, profileUpdates.avatar_path);
+      }
 
       if (profileUpdates.avatar_path) {
         // uploadProfileAvatar() already invalidated any stale cache entry

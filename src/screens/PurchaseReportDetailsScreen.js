@@ -2,14 +2,16 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppBackButton from '../components/common/AppBackButton';
 import AppScreen from '../components/common/AppScreen';
+import LevelUpCelebration from '../components/common/LevelUpCelebration';
 import ReceiptImageViewerModal from '../components/common/ReceiptImageViewerModal';
 import { useAuth } from '../context/AuthContext';
 import {
+  acknowledgeTierPromotion,
   getCachedReceiptUrl,
   getEligibleReceiptItems,
   getPurchaseReportById,
@@ -156,6 +158,45 @@ export default function PurchaseReportDetailsScreen() {
   // limits the reset to genuine navigations to a different report id.
   const loadedReportIdRef = useRef(null);
 
+  // STAGE 32: GOLDEN+ level-up celebration. report.promoted_to_tier/
+  // promotion_acknowledged_at are server-authoritative (set only by
+  // public.award_purchase_points()/public.acknowledge_tier_promotion() -
+  // see 031_membership_tier_rewards.sql) - this screen never decides
+  // whether a promotion happened, only whether/when to SHOW the
+  // already-decided result. celebratedReportIdRef additionally guards
+  // against re-showing it a second time within this same mount (e.g. a
+  // background refresh re-running this effect with the same still-
+  // unacknowledged report) while the acknowledge call is in flight -
+  // acknowledging is fire-and-forget from the UI's perspective (dismissing
+  // must feel instant), but must never be allowed to fire more than once
+  // for the same report from this screen instance.
+  const [celebrationTier, setCelebrationTier] = useState(null);
+  const celebratedReportIdRef = useRef(null);
+
+  useEffect(() => {
+    if (!report?.id || !report.promoted_to_tier || report.promotion_acknowledged_at) {
+      return;
+    }
+    if (celebratedReportIdRef.current === report.id) {
+      return;
+    }
+    celebratedReportIdRef.current = report.id;
+    setCelebrationTier(report.promoted_to_tier);
+  }, [report?.id, report?.promoted_to_tier, report?.promotion_acknowledged_at]);
+
+  const dismissCelebration = useCallback(() => {
+    const reportId = celebratedReportIdRef.current;
+    setCelebrationTier(null);
+    if (reportId) {
+      acknowledgeTierPromotion(reportId).catch(() => {
+        // Non-fatal: worst case the customer sees this same celebration
+        // once more on a future visit if the acknowledge call itself
+        // failed (e.g. offline) - never blocks dismissal, never retried
+        // automatically, and never surfaced as an error to the customer.
+      });
+    }
+  }, []);
+
   // Same measured-minHeight approach as HomeScreen/ProfileScreen/
   // PurchaseScreen/RewardsScreen/PurchaseHistoryScreen's dark hero + light
   // sheet (see HomeScreen for the full explanation) - guarantees the light
@@ -271,6 +312,7 @@ export default function PurchaseReportDetailsScreen() {
           }
           setError('');
           setNotFound(false);
+
           const data = await getPurchaseReportById(id, user.id);
 
           if (!isActiveRef.current) {
@@ -291,7 +333,7 @@ export default function PurchaseReportDetailsScreen() {
           hasLoadedReportRef.current = true;
           loadImage(data, isActiveRef);
           loadEligibleItems(data.id, isActiveRef, isInitialLoad);
-        } catch (err) {
+        } catch {
           if (isActiveRef.current && isInitialLoad) {
             // Background-refresh failure keeps the last-good report/image/
             // items visible (stale-while-refresh) - only the true first
@@ -603,6 +645,17 @@ export default function PurchaseReportDetailsScreen() {
         imageUrl={imageState.status === 'ready' ? imageState.url : null}
         recyclingKey={report?.id}
         cacheKey={receiptImageCacheKey(report?.receipt_path)}
+      />
+
+      {/* STAGE 32: only ever shown for a genuine upward tier transition
+          (BRONZE never triggers this - a report's promoted_to_tier is only
+          ever set server-side when public.award_purchase_points() detects
+          a real tier CHANGE, never for a customer's initial/starting
+          tier - see 031_membership_tier_rewards.sql). */}
+      <LevelUpCelebration
+        visible={Boolean(celebrationTier)}
+        tier={celebrationTier}
+        onDismiss={dismissCelebration}
       />
     </View>
   );

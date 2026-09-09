@@ -19,6 +19,7 @@ import AdminShell from '../components/admin/AdminShell';
 import AppInput from '../components/common/AppInput';
 import PrimaryButton from '../components/common/PrimaryButton';
 import ReceiptImageViewerModal from '../components/common/ReceiptImageViewerModal';
+import { getMembershipLevelRewardRate } from '../constants/membershipLevels';
 import {
   awardPurchasePoints,
   finalizePurchaseReport,
@@ -206,8 +207,62 @@ function buildRowsFromOcrEvidence(ocrLines, lineMatches) {
     const isMatched = Boolean(match && match.match_status === 'matched' && match.product_id);
     const ocrDescription = getOcrLineDescription(line);
 
-    const quantity = line.normalized_quantity != null ? line.normalized_quantity : line.detected_quantity;
+    // STAGE 32.2 FIX: normalized_quantity is null in exactly two cases that
+    // must be told apart - (a) Stage 2's reconciliation never even ran
+    // (detectedQuantity/unitPrice/total missing - "incomplete"), where
+    // falling back to detected_quantity is still the best available
+    // evidence and always was; and (b) reconciliation POSITIVELY PROVED
+    // detected_quantity is wrong (quantity * unit_price didn't reconcile
+    // with the invoice total) but found no raw OCR token in the row
+    // corroborating a specific corrected value - normalization_notes.quantity.status
+    // === 'inconsistent' (see reconcileQuantity()/normalizeOcrLine() in
+    // supabase/functions/process-receipt/ocrNormalization.ts). The OLD code
+    // here fell back to detected_quantity in BOTH cases identically - for
+    // case (b) that silently re-introduced the exact known-wrong value the
+    // system had just finished proving unreliable, with nothing to
+    // distinguish it visually from a genuinely trustworthy quantity (the
+    // row already shows a "נדרשת בדיקה" hint via normalization_status
+    // 'needs_review', but the quantity FIELD itself looked like normal,
+    // confident data). Now: for case (b) only, quantity is left blank so
+    // the admin must explicitly enter/confirm the real value - never a
+    // fabricated number that could inflate the eligible amount and, in
+    // turn, awarded points. Case (a) is completely unaffected.
+    const quantityReconciliationStatus = line.normalization_notes?.quantity?.status || null;
+    const quantityIsProvenUnreliable = quantityReconciliationStatus === 'inconsistent';
+    const quantity = line.normalized_quantity != null
+      ? line.normalized_quantity
+      : quantityIsProvenUnreliable
+        ? null
+        : line.detected_quantity;
+    // unit_price is never "corrected" by Stage 2 - normalized_unit_price is
+    // always either null (never normalized) or exactly equal to
+    // detected_unit_price (reconcileQuantity() only ever adjusts quantity;
+    // every documented real Azure OCR issue for this catalog has been a
+    // wrong Quantity selection, never a wrong UnitPrice/Amount - see that
+    // module's own comment) - so this fallback was never at risk of
+    // reintroducing a proven-wrong value the way quantity's was, and is
+    // left unchanged.
     const unitPrice = line.normalized_unit_price != null ? line.normalized_unit_price : line.detected_unit_price;
+
+    // STAGE 32.2 TEMPORARY DEV DIAGNOSTIC - safe to remove once the fix is
+    // confirmed on a real physical receipt. Logs only already-non-sensitive
+    // OCR-evidence numbers/status for this one row (no customer identity,
+    // no receipt image/URL, no Azure/Supabase keys) - lets the admin verify,
+    // for the exact receipt that showed the wrong quantity before, that
+    // detected_quantity/normalized_quantity/the reconciliation status/the
+    // final seeded quantity now line up as expected.
+    if (__DEV__) {
+      console.log('[OCR quantity mapping]', {
+        ocrLineId: line.id,
+        detectedQuantity: line.detected_quantity,
+        detectedUnitPrice: line.detected_unit_price,
+        detectedTotal: line.detected_total,
+        normalizedQuantity: line.normalized_quantity,
+        quantityReconciliationStatus,
+        quantityIsProvenUnreliable,
+        seededQuantity: quantity,
+      });
+    }
 
     const base = {
       key: `ocr-${line.id}`,
@@ -604,7 +659,15 @@ const FINALIZE_KNOWN_SAFE_ERRORS = new Set([
 // missing a valid quantity/unit_price, or a report with no positive
 // eligible amount, still blocks finalization (both already existed before
 // Stage 5 and are unrelated to this correction).
-function getFinalizeBlockingReason(rows) {
+//
+// STAGE 32: takes the customer's PRE-finalization reward rate as an
+// explicit parameter (from report.customerApprovedPurchasesCount via
+// getMembershipLevelRewardRate() - see the render below) instead of a
+// hardcoded 0.2 - the actual rate now depends on the customer's tier.
+// Still purely a client-side UX mirror: the real award, at the real rate,
+// is always (re)computed independently and authoritatively inside
+// public.award_purchase_points() at the moment finalize actually runs.
+function getFinalizeBlockingReason(rows, rewardRate) {
   let payload;
   try {
     payload = buildManualItemsPayload(rows);
@@ -625,7 +688,7 @@ function getFinalizeBlockingReason(rows) {
   if (summary.total <= 0) {
     return `יש לסמן לפחות מוצר ${isolateLTR('Golden Light')} אחד עם סכום זכאי תקין לפני האישור.`;
   }
-  if (Math.floor(summary.total * 0.2) <= 0) {
+  if (Math.floor(summary.total * rewardRate) <= 0) {
     return 'הסכום הזכאי אינו מספיק להענקת נקודות.';
   }
   return null;
@@ -1762,6 +1825,19 @@ export default function AdminReportDetailScreen() {
   // see Section 11's "disabled/loading state must be visually clear".
   const rowsDisabled = manualSaving || finalizing;
 
+  // STAGE 32: the customer's PRE-finalization reward rate, derived from
+  // their current approved_purchases_count (report.customerApprovedPurchasesCount -
+  // see adminReportService.js's getAdminReportDetail(), which reads it
+  // fresh alongside the rest of this report's data). For a still-
+  // reviewable report this count has not yet counted this invoice - the
+  // same "price using the tier held BEFORE this invoice" rule
+  // public.award_purchase_points() itself enforces server-side - so this
+  // preview and the actual server-computed award agree. Display only:
+  // getMembershipLevelRewardRate() is a plain client-side mirror (see that
+  // file's own comment), never the authority for what actually gets
+  // awarded.
+  const customerRewardRate = getMembershipLevelRewardRate(report?.customerApprovedPurchasesCount ?? 0);
+
   // Live draft preview - recomputed on every render from the in-progress
   // manualRows editing state (never persisted), so it updates immediately
   // as the admin marks/unmarks "מוצר Golden Light" or edits
@@ -1774,8 +1850,8 @@ export default function AdminReportDetailScreen() {
     quantity: toNumberOrNull(row.quantity),
     unitPrice: toNumberOrNull(row.unit_price),
   }));
-  const draftPointsPreview = Math.floor(draftEligibleSummary.total * 0.2);
-  const finalizeBlockingReason = isReviewable ? getFinalizeBlockingReason(manualRows) : null;
+  const draftPointsPreview = Math.floor(draftEligibleSummary.total * customerRewardRate);
+  const finalizeBlockingReason = isReviewable ? getFinalizeBlockingReason(manualRows, customerRewardRate) : null;
 
   // The fallback award-section preview - recomputed from report.manualItems,
   // the last SAVED data, since that is exactly what
@@ -1788,7 +1864,7 @@ export default function AdminReportDetailScreen() {
     quantity: item.quantity,
     unitPrice: item.unit_price,
   }));
-  const savedPointsPreview = Math.floor(savedEligibleSummary.total * 0.2);
+  const savedPointsPreview = Math.floor(savedEligibleSummary.total * customerRewardRate);
   const hasEligibleAmount = savedEligibleSummary.total > 0;
 
   // Derived state for the product-match modal - recomputed on every render

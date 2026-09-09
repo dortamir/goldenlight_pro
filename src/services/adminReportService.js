@@ -56,6 +56,39 @@ async function fetchProfileNamesByIds(userIds) {
   return new Map((data || []).map((profile) => [profile.id, profile.full_name]));
 }
 
+// STAGE 32: the customer's CURRENT approved_purchases_count - i.e., their
+// qualifying-invoice count as of the last time public.recalculate_
+// membership_level() ran for them. For a report still awaiting review
+// (submitted/needs_review - the normal case this is used for), this report
+// has not yet been counted, so this value IS the same pre-finalization
+// count public.award_purchase_points() will itself compute server-side at
+// the moment of finalize - see getAdminReportDetail() below, which uses
+// this only to show the admin an accurate points PREVIEW (via
+// src/constants/membershipLevels.js's client-side tier mirror) before they
+// finalize. This is a read of an already-admin-readable column ("Admins
+// can view all profiles", 009_admin_read_access.sql) - it does not grant
+// any new access, and the preview it feeds is never the actual points
+// -awarding authority (award_purchase_points() always recomputes its own
+// pre-finalization count independently, server-side, at the moment it
+// actually runs - see 031_membership_tier_rewards.sql).
+async function fetchProfileApprovedCount(userId) {
+  if (!userId) {
+    return 0;
+  }
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('approved_purchases_count')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data?.approved_purchases_count ?? 0;
+}
+
 // The admin's ONLY read path for receipt_manual_items as of migration 014:
 // is_golden_light is deliberately unreadable via a plain
 // `.from('receipt_manual_items').select(...)` (its column-level SELECT
@@ -383,11 +416,15 @@ export async function getAdminReportDetail(reportId) {
     return null;
   }
 
-  const [nameById, ocrData, manualItems, pointsAward] = await Promise.all([
+  const [nameById, ocrData, manualItems, pointsAward, customerApprovedPurchasesCount] = await Promise.all([
     fetchProfileNamesByIds([report.user_id]),
     fetchOcrDataForReport(reportId),
     fetchManualItemsSafely(reportId),
     fetchPointsAwardSafely(reportId),
+    // STAGE 32: independent extra branch, same Promise.all wave as the four
+    // above - does not change the existing Stage 24 parallelization, only
+    // adds one more already-independent read to it.
+    fetchProfileApprovedCount(report.user_id),
   ]);
 
   return {
@@ -398,6 +435,7 @@ export async function getAdminReportDetail(reportId) {
     lineMatches: ocrData.lineMatches,
     manualItems,
     pointsAward,
+    customerApprovedPurchasesCount,
   };
 }
 

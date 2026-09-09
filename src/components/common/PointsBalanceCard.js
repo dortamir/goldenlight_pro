@@ -7,13 +7,14 @@ import { isolateLTR } from '../../utils/bidiText';
 // Loyalty tier -> accent color. Only real, currently-reachable tiers
 // (membership_level is validated/defaulted by the caller - see HomeScreen's
 // safeMembershipLevel) map to a color; anything else simply hides the tier
-// row rather than guessing. TITANIUM is the current maximum G Level - see
-// src/constants/membershipLevels.js.
+// row rather than guessing. STAGE 32: DIAMOND is the current maximum tier -
+// see src/constants/membershipLevels.js.
 const TIER_COLORS = {
   BRONZE: colors.tierBronze,
   SILVER: colors.tierSilver,
   GOLD: colors.tierGold,
-  TITANIUM: colors.tierTitanium,
+  PLATINUM: colors.tierPlatinum,
+  DIAMOND: colors.tierDiamond,
 };
 
 function formatPoints(value) {

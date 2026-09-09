@@ -21,13 +21,14 @@ const AVATAR_SIZE = 88;
 // Same real, currently-reachable G Levels as PointsBalanceCard's own
 // TIER_COLORS map (see src/components/common/PointsBalanceCard.js) -
 // duplicated here rather than imported since that map isn't exported, and
-// this is just a plain color lookup, not shared logic. TITANIUM is the
-// current maximum level - see src/constants/membershipLevels.js.
+// this is just a plain color lookup, not shared logic. STAGE 32: DIAMOND is
+// the current maximum tier - see src/constants/membershipLevels.js.
 const TIER_COLORS = {
   BRONZE: colors.tierBronze,
   SILVER: colors.tierSilver,
   GOLD: colors.tierGold,
-  TITANIUM: colors.tierTitanium,
+  PLATINUM: colors.tierPlatinum,
+  DIAMOND: colors.tierDiamond,
 };
 
 const accountActions = [
@@ -44,7 +45,7 @@ const accountActions = [
 
 export default function ProfileScreen() {
   const router = useRouter();
-  const { signOut, user, birthdayBonus, dismissBirthdayBonus, profileVersion } = useAuth();
+  const { signOut, user, profileVersion } = useAuth();
   // STAGE 16.1: initializes from the shared profileService cache
   // (getCachedProfile - synchronous, service-level, already populated by
   // Home/Rewards if either was visited in the last few seconds) instead of
@@ -282,7 +283,7 @@ export default function ProfileScreen() {
   // safeMembershipLevel - a real profile.membership_level, defaulted to
   // BRONZE only when missing/unrecognized, never invented beyond that.
   const membershipLevel = String(profile?.membership_level || 'BRONZE').toUpperCase();
-  const tierKey = ['BRONZE', 'SILVER', 'GOLD', 'TITANIUM'].includes(membershipLevel)
+  const tierKey = ['BRONZE', 'SILVER', 'GOLD', 'PLATINUM', 'DIAMOND'].includes(membershipLevel)
     ? membershipLevel
     : 'BRONZE';
   const tierColor = TIER_COLORS[tierKey];
@@ -405,36 +406,13 @@ export default function ProfileScreen() {
             minHeight pattern as HomeScreen's own sheet. */}
         <View style={[styles.sheet, sheetMinHeight ? { minHeight: sheetMinHeight } : null]}>
           <View style={styles.sheetInner}>
-            {/* STAGE 26: shown only during the session that actually
-                received the bonus (AuthContext's own birthdayBonus state -
-                null on every other session/visit). Dismissible, not a
-                persistent banner - dismissBirthdayBonus() clears the
-                context state so it never reappears once closed, and it is
-                never re-derived from anything stored (no AsyncStorage/
-                local flag) - the real one-per-year guarantee lives entirely
-                in the database (see 028_birthday_bonus.sql), this is purely
-                a one-time celebratory message. */}
-            {birthdayBonus ? (
-              <View style={styles.birthdayBanner}>
-                <View style={styles.birthdayBannerIconWrap}>
-                  <Ionicons name="gift" size={22} color={colors.primary} />
-                </View>
-                <View style={styles.birthdayBannerTextWrap}>
-                  <Text style={styles.birthdayBannerTitle}>יום הולדת שמח! 🎉</Text>
-                  <Text style={styles.birthdayBannerBody}>
-                    {`${formatNumber(birthdayBonus.bonusPoints)} נקודות מתנה נוספו לחשבון שלך`}
-                  </Text>
-                </View>
-                <Pressable
-                  onPress={dismissBirthdayBonus}
-                  accessibilityRole="button"
-                  accessibilityLabel="סגירה"
-                  hitSlop={8}
-                  style={styles.birthdayBannerClose}>
-                  <Ionicons name="close" size={18} color={colors.textMuted} />
-                </Pressable>
-              </View>
-            ) : null}
+            {/* STAGE 32.5: the old inline birthday banner (ephemeral
+                AuthContext state, only ever visible if this exact session
+                was the one that triggered the award) was removed - a
+                pending birthday celebration is now surfaced automatically
+                and persistently on Home instead (see HomeScreen.js), so it
+                is never missed regardless of which screen the customer
+                happens to land on first after the award. */}
 
             <View style={styles.summaryCard}>
               {loading ? (
@@ -668,12 +646,21 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     overflow: 'hidden',
   },
-  // Absolute-fill (not percentage width/height) - guarantees the photo
-  // covers the entire circle with no gap at the rounded edges regardless of
-  // any flex-layout rounding, so none of avatarCircle's own background can
-  // ever show through/tint the image.
+  // STAGE 32.6.6: explicit width/height (not StyleSheet.absoluteFillObject's
+  // right/bottom insets) - physically confirmed on the real device that
+  // insets alone were not resolving against this parent, leaving the Image
+  // at an effectively zero rendered size (same root cause/fix as
+  // HomeScreen.js's own Stage 28.12.2 purchase-history-hero image). top/left
+  // still pin it to the circle's origin; width/height:'100%' size it to
+  // fill avatarCircle exactly, with no gap at the rounded edges regardless
+  // of any flex-layout rounding, so none of avatarCircle's own background
+  // can show through/tint the image.
   avatarImage: {
-    ...StyleSheet.absoluteFillObject,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: '100%',
   },
   avatarLoadingWrap: {
     width: '100%',
@@ -807,51 +794,6 @@ const styles = StyleSheet.create({
     borderRadius: 3,
     backgroundColor: colors.primary,
   },
-  // STAGE 26: one-time celebratory banner - same card language (white,
-  // radius.lg, border, softCard shadow) as the other light-section cards
-  // on this screen, not a new visual system.
-  birthdayBanner: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    gap: spacing.sm,
-    backgroundColor: colors.white,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.primary,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    ...shadows.softCard,
-  },
-  birthdayBannerIconWrap: {
-    width: 40,
-    height: 40,
-    borderRadius: 14,
-    backgroundColor: colors.primarySoft,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  birthdayBannerTextWrap: {
-    flex: 1,
-    gap: 2,
-  },
-  birthdayBannerTitle: {
-    fontSize: typography.body.fontSize,
-    fontWeight: '700',
-    color: colors.text,
-    textAlign: 'right',
-  },
-  birthdayBannerBody: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '500',
-    color: colors.textMuted,
-    textAlign: 'right',
-  },
-  birthdayBannerClose: {
-    width: 32,
-    height: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   summaryCard: {
     backgroundColor: colors.white,
     borderRadius: radius.lg,
@@ -964,6 +906,7 @@ const styles = StyleSheet.create({
   },
   previewRoot: {
     flex: 1,
+    position: 'relative',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -972,9 +915,25 @@ const styles = StyleSheet.create({
   // sibling could inherit (only a shared PARENT's `opacity` can do that,
   // which is exactly why the ring/circle/close-button below are its
   // siblings, not its children).
+  //
+  // STAGE 32.6.7b: explicit width/height (not StyleSheet.absoluteFillObject's
+  // right/bottom insets) - same root cause/fix as avatarImage/previewImage
+  // (Stage 32.6.6): physical testing showed the backdrop was rendering at
+  // effectively zero size, so nothing dimmed behind the preview at all
+  // (the Modal's own transparent background showed the real Profile screen
+  // through untouched). top/left pin it to previewRoot's origin;
+  // width/height:'100%' size it to fill the full screen.
   previewBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(6, 10, 10, 0.9)',
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: '100%',
+    // STAGE 32.6.7a: matches the app's existing confirmation-popup backdrop
+    // (modalOverlay in AdminUsersScreen.js/AdminReportDetailScreen.js) -
+    // same near-black tint, same 0.55 opacity, instead of a near-opaque
+    // 0.9 unique to this screen.
+    backgroundColor: 'rgba(6, 10, 10, 0.55)',
   },
   previewRing: {
     borderRadius: 999,
@@ -1000,8 +959,16 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primarySoft,
     opacity: 1,
   },
+  // STAGE 32.6.6: same fix as avatarImage above - explicit width/height
+  // instead of StyleSheet.absoluteFillObject's right/bottom insets, which
+  // physical testing showed were not resolving against previewCircle's
+  // inline-computed width/height either.
   previewImage: {
-    ...StyleSheet.absoluteFillObject,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: '100%',
     opacity: 1,
   },
   previewCloseButton: {

@@ -59,16 +59,21 @@ export const colors = {
   // above for secondary/supporting text on the same surface.
   textOnDark: '#F5F7F7',
   // Loyalty tier colors - real color per tier instead of a plain text label.
-  // Four official G Levels (see src/constants/membershipLevels.js): Bronze,
-  // Silver, Gold, Titanium (current maximum). tierTitanium is a cool
-  // gunmetal/graphite tone - deliberately darker and more premium-reading
-  // than tierSilver's light gray, while staying legible both on the dark
-  // PointsBalanceCard hero and on ProfileScreen's white summary card, same
-  // as the other three tier colors.
+  // STAGE 32: five official membership tiers (see
+  // src/constants/membershipLevels.js): Bronze, Silver, Gold, Platinum,
+  // Diamond (current maximum) - replaces the old four-tier ladder ending at
+  // Titanium (tierTitanium removed; no code references it any more).
+  // tierPlatinum is a cool steel-gray, deliberately more premium-reading
+  // than tierSilver's lighter gray without being as dark as the old
+  // titanium tone; tierDiamond is a rich icy blue, distinct from the app's
+  // own primary turquoise so a Diamond badge never reads as an interactive
+  // brand element. All five stay legible both on the dark PointsBalanceCard
+  // hero and on ProfileScreen's white summary card, same as before.
   tierBronze: '#B08D57',
   tierSilver: '#B7C1C1',
   tierGold: '#D4AF37',
-  tierTitanium: '#6E7C89',
+  tierPlatinum: '#8CA0AC',
+  tierDiamond: '#4FA8BD',
   // A barely-there "glass" surface for content that must sit directly on a
   // dark gradient without a solid card behind it (e.g. the auth logo) -
   // enough to lift it off the background for contrast, without reading as

@@ -5,11 +5,14 @@ import { useCallback, useRef, useState } from 'react';
 import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import AppScreen from '../components/common/AppScreen';
+import BirthdayCelebration from '../components/common/BirthdayCelebration';
+import LevelUpCelebration from '../components/common/LevelUpCelebration';
 import PointsBalanceCard from '../components/common/PointsBalanceCard';
 import ProductCarousel from '../components/home/ProductCarousel';
 import { getMembershipLevelInfo } from '../constants/membershipLevels';
 import { useAuth } from '../context/AuthContext';
-import { getProfile } from '../services/profileService';
+import { acknowledgeBirthdayCelebration, getPendingBirthdayCelebration, getProfile } from '../services/profileService';
+import { acknowledgeTierPromotion, getPendingTierPromotion } from '../services/purchaseReportService';
 import { colors, radius, shadows, spacing, typography } from '../theme';
 import { isolateLTR } from '../utils/bidiText';
 
@@ -58,7 +61,7 @@ export default function HomeScreen() {
   // own effects re-run the moment auth settles even in an edge case where
   // it were ever reached while still marked loading, instead of silently
   // firing a request against not-yet-fully-settled auth state.
-  const { user, loading: authLoading, profileVersion, birthdayBonus, dismissBirthdayBonus } = useAuth();
+  const { user, loading: authLoading, profileVersion } = useAuth();
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -201,6 +204,173 @@ export default function HomeScreen() {
     }, [user?.id, authLoading, profileVersion]),
   );
 
+  // STAGE 32.4: surfaces a pending, unacknowledged tier promotion
+  // automatically on Home, reusing the exact same LevelUpCelebration
+  // component/acknowledge RPC PurchaseReportDetailsScreen already uses -
+  // Home never computes/decides a promotion itself, only reacts to the
+  // server-authoritative promoted_to_tier/promotion_acknowledged_at state
+  // (see getPendingTierPromotion()'s own comment). Runs on every focus
+  // (same trigger as the profile load above) so returning to this tab after
+  // an admin approval elsewhere in the app surfaces it without needing a
+  // cold app restart. A failure here is silent by design (dev-logged only)
+  // - Home must still load normally either way, and a missed promotion
+  // simply surfaces again on a future focus.
+  const [pendingPromotion, setPendingPromotion] = useState(null);
+  // Guards against the SAME already-dismissed promotion reopening on a
+  // later focus that re-runs this check before its fire-and-forget
+  // acknowledge call (below) has actually landed server-side - mirrors
+  // PurchaseReportDetailsScreen's own celebratedReportIdRef guard.
+  const dismissedPromotionReportIdRef = useRef(null);
+
+  useFocusEffect(
+    useCallback(() => {
+      let isMounted = true;
+
+      // STAGE 32.4.1 TEMPORARY DIAGNOSTICS - remove once the missing-
+      // notification report is resolved. No tokens/secrets/full user
+      // objects logged, only the two scalars needed to prove the gate.
+      if (__DEV__) {
+        console.log('[Home tier promotion] focus');
+        console.log('[Home tier promotion] auth', { authLoading, userId: user?.id ?? null });
+      }
+
+      async function checkPendingPromotion() {
+        if (authLoading || !user?.id) {
+          return;
+        }
+
+        try {
+          if (__DEV__) {
+            console.log('[Home tier promotion] query start');
+          }
+
+          const pending = await getPendingTierPromotion();
+
+          if (__DEV__) {
+            console.log('[Home tier promotion] query result', {
+              id: pending?.id ?? null,
+              promoted_to_tier: pending?.promoted_to_tier ?? null,
+            });
+          }
+
+          if (!isMounted || !pending) {
+            return;
+          }
+
+          if (pending.id !== dismissedPromotionReportIdRef.current) {
+            if (__DEV__) {
+              console.log('[Home tier promotion] set pending');
+            }
+            setPendingPromotion(pending);
+          }
+        } catch (err) {
+          if (__DEV__) {
+            console.warn('[Home tier promotion] query error', { code: err?.code, message: err?.message });
+          }
+          // Silent otherwise - never blocks Home, never shows a raw error.
+        }
+      }
+
+      checkPendingPromotion();
+
+      return () => {
+        isMounted = false;
+      };
+    }, [user?.id, authLoading]),
+  );
+
+  // STAGE 32.4.1 TEMPORARY DIAGNOSTIC - remove alongside the block above.
+  if (__DEV__) {
+    console.log('[Home tier promotion] render', {
+      pendingId: pendingPromotion?.id ?? null,
+      tier: pendingPromotion?.promoted_to_tier ?? null,
+      visible: Boolean(pendingPromotion),
+    });
+  }
+
+  const dismissPendingPromotion = useCallback(() => {
+    const reportId = pendingPromotion?.id;
+
+    if (reportId) {
+      dismissedPromotionReportIdRef.current = reportId;
+    }
+    setPendingPromotion(null);
+
+    if (reportId) {
+      // Fire-and-forget, exactly like PurchaseReportDetailsScreen's own
+      // dismissCelebration - dismissal must feel instant, and a failure
+      // here (e.g. offline) never falsely marks it acknowledged locally;
+      // worst case the customer sees this same celebration again on a
+      // future visit.
+      acknowledgeTierPromotion(reportId).catch(() => {});
+    }
+  }, [pendingPromotion]);
+
+  // STAGE 32.5: same pattern as the tier-promotion check above, for the
+  // persistent birthday-bonus celebration (033_birthday_bonus_celebration.sql)
+  // - reliable across reload/logout/login/app-close, unlike the old
+  // ephemeral AuthContext state this replaces (see that file's own
+  // comment). Kept as a fully independent effect/state pair from the tier
+  // check above - a failure in one must never affect the other - and the
+  // two celebrations are never allowed to render simultaneously (see the
+  // `!pendingBirthday` guard on LevelUpCelebration's own `visible` prop
+  // below): birthday takes priority when both are pending, per the
+  // explicit v1.0 priority rule.
+  const [pendingBirthday, setPendingBirthday] = useState(null);
+  const dismissedBirthdayTransactionIdRef = useRef(null);
+
+  useFocusEffect(
+    useCallback(() => {
+      let isMounted = true;
+
+      async function checkPendingBirthday() {
+        if (authLoading || !user?.id) {
+          return;
+        }
+
+        try {
+          const pending = await getPendingBirthdayCelebration();
+
+          if (!isMounted || !pending) {
+            return;
+          }
+
+          if (pending.id !== dismissedBirthdayTransactionIdRef.current) {
+            setPendingBirthday(pending);
+          }
+        } catch (err) {
+          if (__DEV__) {
+            console.warn('[Home birthday celebration] query error', { code: err?.code, message: err?.message });
+          }
+          // Silent otherwise - never blocks Home, never shows a raw error.
+        }
+      }
+
+      checkPendingBirthday();
+
+      return () => {
+        isMounted = false;
+      };
+    }, [user?.id, authLoading]),
+  );
+
+  const dismissPendingBirthday = useCallback(() => {
+    const transactionId = pendingBirthday?.id;
+
+    if (transactionId) {
+      dismissedBirthdayTransactionIdRef.current = transactionId;
+    }
+    setPendingBirthday(null);
+
+    if (transactionId) {
+      // Fire-and-forget, same convention as dismissPendingPromotion above -
+      // a failure here never falsely marks it acknowledged locally; worst
+      // case the customer sees this same celebration again on a future
+      // visit.
+      acknowledgeBirthdayCelebration(transactionId).catch(() => {});
+    }
+  }, [pendingBirthday]);
+
   const firstName = (() => {
     const fullName = String(profile?.full_name || '').trim();
 
@@ -213,16 +383,16 @@ export default function HomeScreen() {
   })();
 
   const membershipLevel = String(profile?.membership_level || 'BRONZE').toUpperCase();
-  const safeMembershipLevel = ['BRONZE', 'SILVER', 'GOLD', 'TITANIUM'].includes(membershipLevel)
+  const safeMembershipLevel = ['BRONZE', 'SILVER', 'GOLD', 'PLATINUM', 'DIAMOND'].includes(membershipLevel)
     ? membershipLevel
     : 'BRONZE';
   const pointsBalance = profile?.points_balance ?? 0;
 
-  // Real progress toward the next G Level, derived from the same
+  // Real progress toward the next membership tier, derived from the same
   // database-authoritative approved_purchases_count used to compute
-  // membership_level itself (see supabase/migrations/017_g_level_progression.sql
+  // membership_level itself (see supabase/migrations/031_membership_tier_rewards.sql
   // and src/constants/membershipLevels.js) - never a client-invented value,
-  // and never shown as progress toward a nonexistent level after Titanium.
+  // and never shown as progress toward a nonexistent level after Diamond.
   const approvedPurchasesCount = profile?.approved_purchases_count ?? 0;
   const levelInfo = getMembershipLevelInfo(approvedPurchasesCount);
   const levelProgressLabel = levelInfo.nextLevel
@@ -336,38 +506,13 @@ export default function HomeScreen() {
             uses for the hero. */}
         <View style={[styles.sheet, sheetMinHeight ? { minHeight: sheetMinHeight } : null]}>
           <View style={styles.sheetInner}>
-            {/* STAGE 26: one-time celebratory message for the rare session
-                that actually receives the annual birthday bonus -
-                AuthContext's own birthdayBonus state, null on every other
-                visit. Dismissible; dismissing clears the context state so
-                it never reappears (not re-derived from anything stored -
-                the real once-per-year guarantee is entirely in the
-                database, see supabase/migrations/028_birthday_bonus.sql).
-                Placed here (not in the protected hero section above) as a
-                small additive, conditional card using the exact same
-                visual language as the rest of this light sheet - not a
-                redesign of Stage 25.7's own approved layout. */}
-            {birthdayBonus ? (
-              <View style={styles.birthdayBanner}>
-                <View style={styles.birthdayBannerIconWrap}>
-                  <Ionicons name="gift" size={22} color={colors.primary} />
-                </View>
-                <View style={styles.birthdayBannerTextWrap}>
-                  <Text style={styles.birthdayBannerTitle}>יום הולדת שמח! 🎉</Text>
-                  <Text style={styles.birthdayBannerBody}>
-                    {`${birthdayBonus.bonusPoints.toLocaleString('he-IL')} נקודות מתנה נוספו לחשבון שלך`}
-                  </Text>
-                </View>
-                <Pressable
-                  onPress={dismissBirthdayBonus}
-                  accessibilityRole="button"
-                  accessibilityLabel="סגירה"
-                  hitSlop={8}
-                  style={styles.birthdayBannerClose}>
-                  <Ionicons name="close" size={18} color={colors.textMuted} />
-                </Pressable>
-              </View>
-            ) : null}
+            {/* STAGE 32.5: the old inline birthday banner (ephemeral
+                AuthContext state, only ever visible if this exact session
+                was the one that triggered the award) was removed - replaced
+                by the persistent BirthdayCelebration modal below, driven by
+                the server-authoritative pending-celebration check, which
+                works regardless of which session actually triggered the
+                award. */}
 
             <View style={styles.section}>
               <View style={styles.sectionHeaderRow}>
@@ -484,6 +629,30 @@ export default function HomeScreen() {
           </View>
         </View>
       </AppScreen>
+
+      {/* STAGE 32.5: v1.0 priority rule - birthday celebration first, tier
+          celebration second, never both at once. LevelUpCelebration's own
+          `visible` is additionally gated on `!pendingBirthday` so if both
+          happen to be pending, the birthday modal shows alone; once it's
+          dismissed (pendingBirthday -> null), this same render immediately
+          reveals the already-fetched tier promotion, if any, with no extra
+          focus/round trip needed. */}
+      <BirthdayCelebration
+        visible={Boolean(pendingBirthday)}
+        bonusPoints={pendingBirthday?.bonusPoints}
+        onDismiss={dismissPendingBirthday}
+      />
+
+      {/* STAGE 32.4: same component/only-for-a-real-upward-transition
+          guarantee as PurchaseReportDetailsScreen's own instance (see that
+          file's comment) - this is a second, independent trigger for the
+          exact same server-authoritative state, not a new celebration
+          design. */}
+      <LevelUpCelebration
+        visible={Boolean(pendingPromotion) && !pendingBirthday}
+        tier={pendingPromotion?.promoted_to_tier}
+        onDismiss={dismissPendingPromotion}
+      />
     </View>
   );
 }
@@ -629,51 +798,6 @@ const styles = StyleSheet.create({
     paddingTop: spacing.xl,
     paddingBottom: spacing.xxl,
     gap: spacing.lg,
-  },
-  // STAGE 26: one-time celebratory banner - same white/border/softCard
-  // card language as the quick-action cards below it, not a new visual
-  // system.
-  birthdayBanner: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    gap: spacing.sm,
-    backgroundColor: colors.white,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.primary,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    ...shadows.softCard,
-  },
-  birthdayBannerIconWrap: {
-    width: 40,
-    height: 40,
-    borderRadius: 14,
-    backgroundColor: colors.primarySoft,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  birthdayBannerTextWrap: {
-    flex: 1,
-    gap: 2,
-  },
-  birthdayBannerTitle: {
-    fontSize: typography.body.fontSize,
-    fontWeight: '700',
-    color: colors.text,
-    textAlign: 'right',
-  },
-  birthdayBannerBody: {
-    fontSize: typography.caption.fontSize,
-    fontWeight: '500',
-    color: colors.textMuted,
-    textAlign: 'right',
-  },
-  birthdayBannerClose: {
-    width: 32,
-    height: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   // Smaller internal gap - the heading feels directly connected to its own
   // content, distinct from the larger between-section gap above.

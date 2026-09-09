@@ -235,7 +235,7 @@ export default function RewardsScreen() {
   // same result from the same real profile fields via the shared
   // getMembershipLevelInfo() helper.
   const membershipLevel = String(profile?.membership_level || 'BRONZE').toUpperCase();
-  const safeMembershipLevel = ['BRONZE', 'SILVER', 'GOLD', 'TITANIUM'].includes(membershipLevel)
+  const safeMembershipLevel = ['BRONZE', 'SILVER', 'GOLD', 'PLATINUM', 'DIAMOND'].includes(membershipLevel)
     ? membershipLevel
     : 'BRONZE';
   const approvedPurchasesCount = profile?.approved_purchases_count ?? 0;
